@@ -28,6 +28,23 @@ architecture.
 - [Cosmic Clarity](https://www.setiastro.com/cosmic-clarity) — AI sharpen/denoise/star-removal
 - Python: astropy, reproject, photutils, tifffile
 
+## Setup (Windows)
+
+External tools (installed side-by-side with existing software, nothing removed):
+
+- Siril 1.4.3 — `C:\Program Files\SiriL\bin\siril-cli.exe`
+- GraXpert 3.0.2 — `%LOCALAPPDATA%\Programs\GraXpert\GraXpert.exe` (has a real `-cli` flag)
+- ASTAP + D20 star database — `C:\Program Files\astap\astap_cli.exe`
+- Photoshop CS6 64-bit (already installed) — COM ProgID `Photoshop.Application`
+
+Python: this project targets 3.12, installed side-by-side with the system
+Python via the official installer (not the system default, no PATH changes):
+
+```
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e ".[windows,dev]"
+```
+
 ## Layout
 
 ```
