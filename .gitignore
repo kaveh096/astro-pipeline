@@ -216,3 +216,24 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Astro data — never commit imaging data, intermediates, or exports
+data/
+sessions/
+*.fits
+*.fit
+*.fts
+*.tif
+*.tiff
+*.psd
+*.xisf
+
+# Run state / manifests (session-specific, not repo content)
+*.manifest.json
+run-manifests/
+
+# OS / editor junk
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/

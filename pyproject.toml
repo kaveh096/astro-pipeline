@@ -1,0 +1,31 @@
+[project]
+name = "astro-pipeline"
+version = "0.1.0"
+description = "Automated, checkpointed LRGB/narrowband astrophotography processing pipeline (calibration through Photoshop handoff)"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "astropy>=6.0",
+    "reproject>=0.13",
+    "photutils>=1.13",
+    "tifffile>=2024.5",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+windows = [
+    "pywin32>=306",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
