@@ -92,6 +92,10 @@ class LightFrame:
     path: Path
     provenance: str  # "raw" | "calibrated" | "jpeg"
     telescope: str
+    user: str  # iTelescope account that captured this -- collaborators show
+    # up as different users on the same telescope/target and must not be
+    # silently merged (confirmed real: same target, same telescope, two
+    # users, different binning choices for RGB).
     target: str
     date: str
     time: str
@@ -125,20 +129,29 @@ class IngestReport:
     calibration: list[CalibrationFrame] = field(default_factory=list)
     unrecognized: list[UnrecognizedFrame] = field(default_factory=list)
 
-    def light_groups(self) -> dict[tuple[str, str, str, int], list[LightFrame]]:
-        """Group RAW lights by (telescope, target, filter, binning) -- the
-        unit Stage 4 stacks into one master. Deliberately excludes
-        "calibrated"/"jpeg" provenance frames -- those are catalog-only,
-        never fed back into the calibration/stacking pipeline as if they
-        were unprocessed subs (a real delivery bundles both raw and
-        iTelescope-calibrated versions of the same exposure; conflating
-        them would double-process or silently prefer one over the other).
+    def light_groups(self) -> dict[tuple[str, str, str, str, int], list[LightFrame]]:
+        """Group RAW lights by (telescope, user, target, filter, binning) --
+        the unit Stage 4 stacks into one master. `user` is part of the key
+        deliberately: a real delivery has two different iTelescope accounts
+        (collaborators) shooting the same target on the same telescope with
+        different binning choices for RGB -- silently merging their subs
+        into one group would mix incompatible data without anyone deciding
+        to. Combining multiple users' *masters* later is a legitimate,
+        separate step (same pattern as combining multiple instruments'
+        masters), not something this grouping does implicitly.
+
+        Deliberately excludes "calibrated"/"jpeg" provenance frames -- those
+        are catalog-only, never fed back into the calibration/stacking
+        pipeline as if they were unprocessed subs (a real delivery bundles
+        both raw and iTelescope-calibrated versions of the same exposure;
+        conflating them would double-process or silently prefer one over
+        the other).
         """
-        groups: dict[tuple[str, str, str, int], list[LightFrame]] = {}
+        groups: dict[tuple[str, str, str, str, int], list[LightFrame]] = {}
         for frame in self.lights:
             if frame.provenance != "raw":
                 continue
-            key = (frame.telescope, frame.target, frame.filter_name, frame.binning)
+            key = (frame.telescope, frame.user, frame.target, frame.filter_name, frame.binning)
             groups.setdefault(key, []).append(frame)
         return groups
 
@@ -165,7 +178,7 @@ class IngestReport:
             if frames:
                 cal_by_type_scope.setdefault((telescope, frame_type, binning), []).append(exptime)
 
-        for (telescope, target, filter_name, binning), lights in self.light_groups().items():
+        for (telescope, user, target, filter_name, binning), lights in self.light_groups().items():
             if (telescope, "Bias", binning) not in cal_by_type_scope:
                 warnings.append(
                     f"No Bias frames found for {telescope} BIN{binning} "
@@ -221,6 +234,7 @@ def classify_filename(
         return "light", {
             "provenance": match.group("provenance").lower(),
             "telescope": match.group("telescope"),
+            "user": match.group("user"),
             "target": match.group("target"),
             "date": match.group("date"),
             "time": match.group("time"),

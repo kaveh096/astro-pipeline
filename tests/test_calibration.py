@@ -89,8 +89,8 @@ def test_calibrate_real_luminance_bin1_without_flats(tmp_path: Path) -> None:
     """
     report = scan_session(REAL_SESSION_DIR)
     groups = report.light_groups()
-    lum_lights = groups[("T24", "M51", "Luminance", 1)]
-    assert len(lum_lights) == 21
+    lum_lights = groups[("T24", "kaveh096", "M51", "Luminance", 1)]
+    assert len(lum_lights) == 13
 
     cal_index = report.calibration_index()
     bias = cal_index[("T24", "Bias", 1, 0.0)]
@@ -108,7 +108,7 @@ def test_calibrate_real_luminance_bin1_without_flats(tmp_path: Path) -> None:
 
     assert result.flat_corrected is False
     assert result.master_flat is None
-    assert len(result.calibrated_lights) == 21
+    assert len(result.calibrated_lights) == 13
 
     raw_data = fits.getdata(lum_lights[0].path).astype(np.float64)
     calibrated_data = fits.getdata(result.calibrated_lights[0]).astype(np.float64)

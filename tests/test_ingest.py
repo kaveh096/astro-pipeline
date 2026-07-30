@@ -137,10 +137,24 @@ def test_scan_session_groups_lights_by_telescope_target_filter_binning(tmp_path:
     assert len(report.calibration) == 1
 
     groups = report.light_groups()
-    lum_key = ("T24", "M51", "Luminance", 1)
-    blue_key = ("T24", "M51", "Blue", 2)
+    lum_key = ("T24", "kaveh096", "M51", "Luminance", 1)
+    blue_key = ("T24", "kaveh096", "M51", "Blue", 2)
     assert len(groups[lum_key]) == 2
     assert len(groups[blue_key]) == 1
+
+
+def test_light_groups_keeps_different_users_separate(tmp_path: Path) -> None:
+    """Two collaborators shooting the same target/telescope/filter/binning
+    must land in different groups -- confirmed real (kaveh096 and jmwill
+    both imaged M51 on T24), and silently merging them was a real bug."""
+    touch(tmp_path, "raw-T24-kaveh096-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
+    touch(tmp_path, "raw-T24-jmwill-M51-20250226-020311-Luminance-BIN1-E-300-001.fit")
+
+    report = scan_session(tmp_path)
+    groups = report.light_groups()
+
+    assert len(groups[("T24", "kaveh096", "M51", "Luminance", 1)]) == 1
+    assert len(groups[("T24", "jmwill", "M51", "Luminance", 1)]) == 1
 
 
 def test_missing_calibration_warnings_flags_missing_flats_and_darks(tmp_path: Path) -> None:
@@ -180,12 +194,15 @@ def test_missing_calibration_warnings_flags_missing_bias_and_dark(tmp_path: Path
 def test_scan_real_multi_telescope_session() -> None:
     report = scan_session(REAL_SESSION_DIR)
 
-    # T24 raw lights: 95 (spread across three date subfolders: 20250115,
-    # 20250123, 20250127). T21's lights are zip-wrapped and invisible to a
-    # bare fit-glob scan -- that's expected here, not a bug (see test_index.py).
+    # T24 raw lights: 95, from TWO different iTelescope users -- Kaveh
+    # (kaveh096) and a collaborator (jmwill) who independently imaged the
+    # same target on the same telescope with different binning choices for
+    # RGB. T21's lights are zip-wrapped and invisible to a bare fit-glob
+    # scan -- that's expected here, not a bug (see test_index.py).
     raw_lights = [f for f in report.lights if f.provenance == "raw"]
     assert len(raw_lights) == 95
     assert all(f.telescope == "T24" for f in raw_lights)
+    assert {f.user for f in raw_lights} == {"kaveh096", "jmwill"}
 
     # iTelescope-side-calibrated duplicates of the same exposures are present
     # too, and must NOT show up in light_groups() (which only ever returns
@@ -197,10 +214,24 @@ def test_scan_real_multi_telescope_session() -> None:
     for frames in groups.values():
         assert all(f.provenance == "raw" for f in frames)
 
-    assert ("T24", "M51", "Luminance", 1) in groups
-    assert ("T24", "M51", "Red", 2) in groups
-    assert ("T24", "M51", "Green", 2) in groups
-    assert ("T24", "M51", "Blue", 2) in groups
+    # The two users' data must land in SEPARATE groups, not merged --
+    # confirmed real: without `user` in the grouping key, Kaveh's 13
+    # kaveh096 Luminance/BIN1 subs and jmwill's 8 would have silently
+    # combined into one group of 21.
+    assert ("T24", "kaveh096", "M51", "Luminance", 1) in groups
+    assert len(groups[("T24", "kaveh096", "M51", "Luminance", 1)]) == 13
+    assert ("T24", "jmwill", "M51", "Luminance", 1) in groups
+    assert len(groups[("T24", "jmwill", "M51", "Luminance", 1)]) == 8
+
+    assert ("T24", "kaveh096", "M51", "Red", 2) in groups
+    assert ("T24", "kaveh096", "M51", "Green", 2) in groups
+    assert ("T24", "kaveh096", "M51", "Blue", 2) in groups
+    # jmwill shoots RGB at BIN1 (matching L directly -- no drizzle/reproject
+    # reconciliation needed for jmwill's own contributed frames, unlike
+    # Kaveh's BIN2 RGB).
+    assert ("T24", "jmwill", "M51", "Red", 1) in groups
+    assert ("T24", "jmwill", "M51", "Green", 1) in groups
+    assert ("T24", "jmwill", "M51", "Blue", 1) in groups
 
     # T24 has real bias/dark (Calibrations/T24/Fresh) but genuinely no
     # flats anywhere in this delivery -- must surface, not be silent.
