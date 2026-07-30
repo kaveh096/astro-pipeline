@@ -1,32 +1,45 @@
-"""Stage 1: scan an iTelescope session folder and group subs by target/filter/binning/instrument.
+"""Stage 1: scan an iTelescope delivery tree and classify raw subs.
 
-Filename conventions below were reverse-engineered from a real T24 delivery
-(not assumed) -- see tests/fixtures/ and the commit that introduced this
-file. Two things the FITS headers themselves do NOT reliably provide, which
-is why this module is filename-first rather than header-first:
+Filename conventions below were reverse-engineered from real deliveries
+(not assumed) across two different telescopes (T24, T21) and two different
+users' data mixed into one tree -- see the commits that introduced/extended
+this file. FITS headers are not the source of truth for identity:
 
 - OBJECT and TELESCOP are blank on every real frame seen so far.
-- FILTER is absent (not just empty) on bias/dark frames, which is fine
-  since they don't use one, but means "does this frame have a filter" is
-  not a safe existence check for classification.
+- FILTER is absent (not just empty) on bias/dark frames.
 
-Observed filename conventions (telescope = e.g. "T24"):
+Observed conventions -- at least three distinct ones across two telescopes,
+so this module tries several regexes rather than assuming one:
 
-  Light:  raw-<telescope>-<user>-<target>-<YYYYMMDD>-<HHMMSS>-<Filter>-BIN<n>-E-<exptime>-<seq>.fit
-  Bias:   <telescope>-<user>-Bias-000-LD<YYYYMMDD>-LT<HHMMSS>-BIN<n>.fit
-  Dark:   <telescope>-<user>-Dark-<exptime>-LD<YYYYMMDD>-LT<HHMMSS>-BIN<n>.fit
+  Light (T24 and T21 both):
+    <provenance>-<telescope>-<user>-<target>-<YYYYMMDD>-<HHMMSS>-<Filter>-BIN<n>-<E|W>-<exptime>-<seq>.<ext>
+    provenance is "raw" (unprocessed), "calibrated" (iTelescope-side
+    calibrated -- a real delivery had BOTH raw and calibrated versions of
+    the same exposure bundled together), or "jpeg" (quick-look preview).
+    The <E|W> token is NOT a constant -- it's a meridian-side flag, proven
+    by real data containing both. An earlier version of this module
+    hardcoded it as literal "-E-", which was a filename-shape bug, not a
+    real convention; it only looked constant because the first sample
+    happened to be all-"E".
 
-Flat frame naming is UNVERIFIED -- no sample has been seen yet. Flats are
-attempted with the same shape as Bias/Dark; a real sample should be used to
-confirm/fix this the first time flats are actually available.
+  Bias/Dark (T24 style, telescope embedded in filename):
+    <telescope>-<user>-Bias-000-LD<YYYYMMDD>-LT<HHMMSS>-BIN<n>.fit
+    <telescope>-<user>-Dark-<exptime>-LD<YYYYMMDD>-LT<HHMMSS>-BIN<n>.fit
 
-Calibration frames in real deliveries are not necessarily captured the same
-night as the lights they calibrate (the sample session had lights from
-2025-01-15/23/27 and calibration frames from 2025-02-03, grouped by Kaveh
-into "Bias (Jan 2025)" / "Dark - 300s (Jan 2025)" folders) -- so calibration
-validity is scoped to whatever collection of frames is delivered/organized
-together, matched by telescope+binning(+exptime for darks), not to a single
-capture night.
+  Bias/Dark (T21 style, camera model instead of telescope -- telescope
+  must be inferred from the containing directory, e.g. ".../T21/Bias/..."):
+    <camera>-<index>bias Bin<n>.fit
+    <camera>-<index>dark<exptime>secBin<n>.fit
+
+  Flat (T21 style, also telescope-less, also path-inferred):
+    scope_<Filter>_<n>x<n>_skyflat<index>.fit
+
+Calibration frames are not tied to the capture night of the lights they
+calibrate -- real deliveries have calibration frames dated weeks to months
+away from the lights, grouped by iTelescope/Kaveh into date-ish folders
+that cover many light sessions. Calibration validity is scoped to whatever
+collection is delivered/organized together (matched by
+telescope+binning(+exptime for darks)), not to a single capture night.
 """
 
 from __future__ import annotations
@@ -39,17 +52,37 @@ from astropy.io import fits
 
 FIT_GLOB_PATTERNS = ("*.fit", "*.fits", "*.fts")
 
+_TELESCOPE_DIR_RE = re.compile(r"^T\d+$", re.IGNORECASE)
+
+
+# Extension is deliberately broad (not just .fit/.fits): the same per-exposure
+# naming convention is also used for iTelescope-side-calibrated TIFFs and JPEG
+# previews of the same exposure, confirmed in real deliveries.
 _LIGHT_RE = re.compile(
-    r"^raw-(?P<telescope>[A-Za-z0-9]+)-(?P<user>[A-Za-z0-9]+)-(?P<target>[A-Za-z0-9]+)-"
-    r"(?P<date>\d{8})-(?P<time>\d{6})-(?P<filter>[A-Za-z0-9]+)-BIN(?P<bin>\d+)-E-"
-    r"(?P<exptime>\d+)-(?P<seq>\d+)\.fits?$",
+    r"^(?P<provenance>raw|calibrated|jpeg)-(?P<telescope>[A-Za-z0-9]+)-(?P<user>[A-Za-z0-9]+)-"
+    r"(?P<target>[A-Za-z0-9]+)-(?P<date>\d{8})-(?P<time>\d{6})-(?P<filter>[A-Za-z0-9]+)-"
+    r"BIN(?P<bin>\d+)-(?P<side>[EW])-(?P<exptime>\d+)-(?P<seq>\d+)\.(?:fits?|fts|tiff?|jpe?g)$",
     re.IGNORECASE,
 )
 
-_CAL_RE = re.compile(
+_CAL_RE_T24 = re.compile(
     r"^(?P<telescope>[A-Za-z0-9]+)-(?P<user>[A-Za-z0-9]+)-"
     r"(?P<frametype>Bias|Dark|Flat)-(?P<exptime>\d+)-"
     r"LD(?P<date>\d{8})-LT(?P<time>\d{6})-BIN(?P<bin>\d+)\.fits?$",
+    re.IGNORECASE,
+)
+
+# e.g. "FLI6303 -0001biasBin1.fit" / "FLI6303 -0001dark900secBin1.fit"
+# Telescope isn't in the filename -- caller supplies it from the path.
+_CAL_RE_CAMERA = re.compile(
+    r"^(?P<camera>[A-Za-z0-9]+)\s*-(?P<index>\d+)"
+    r"(?P<frametype>bias|dark)(?:(?P<exptime>\d+)sec)?Bin(?P<bin>\d+)\.fits?$",
+    re.IGNORECASE,
+)
+
+# e.g. "scope_Luminance_1x1_skyflat0.fit" -- also telescope-less.
+_FLAT_RE_SKYFLAT = re.compile(
+    r"^scope_(?P<filter>[A-Za-z0-9]+)_(?P<binx>\d+)x(?P<biny>\d+)_skyflat(?P<index>\d+)\.fits?$",
     re.IGNORECASE,
 )
 
@@ -57,12 +90,14 @@ _CAL_RE = re.compile(
 @dataclass(frozen=True)
 class LightFrame:
     path: Path
+    provenance: str  # "raw" | "calibrated" | "jpeg"
     telescope: str
     target: str
     date: str
     time: str
     filter_name: str
     binning: int
+    side: str  # "E" | "W" -- meridian side, not a constant
     exptime: float
     sequence: int
 
@@ -73,9 +108,9 @@ class CalibrationFrame:
     telescope: str
     frame_type: str  # "Bias" | "Dark" | "Flat"
     binning: int
-    exptime: float
-    local_date: str
-    local_time: str
+    exptime: float  # 0.0 for flats (not a matching criterion for them)
+    local_date: str | None = None
+    local_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,10 +126,18 @@ class IngestReport:
     unrecognized: list[UnrecognizedFrame] = field(default_factory=list)
 
     def light_groups(self) -> dict[tuple[str, str, str, int], list[LightFrame]]:
-        """Group lights by (telescope, target, filter, binning) -- the unit
-        Stage 4 stacks into one master."""
+        """Group RAW lights by (telescope, target, filter, binning) -- the
+        unit Stage 4 stacks into one master. Deliberately excludes
+        "calibrated"/"jpeg" provenance frames -- those are catalog-only,
+        never fed back into the calibration/stacking pipeline as if they
+        were unprocessed subs (a real delivery bundles both raw and
+        iTelescope-calibrated versions of the same exposure; conflating
+        them would double-process or silently prefer one over the other).
+        """
         groups: dict[tuple[str, str, str, int], list[LightFrame]] = {}
         for frame in self.lights:
+            if frame.provenance != "raw":
+                continue
             key = (frame.telescope, frame.target, frame.filter_name, frame.binning)
             groups.setdefault(key, []).append(frame)
         return groups
@@ -110,9 +153,10 @@ class IngestReport:
     def missing_calibration_warnings(self) -> list[str]:
         """Human-readable gaps: for every (telescope, binning) a light group
         needs, is there a Bias and a matching-exptime Dark? Flats are
-        checked per (telescope, filter, binning) since they're optics/filter
-        specific. Does not decide what to do about gaps -- Stage 2 halts and
-        asks; this just reports what's actually there.
+        checked per (telescope, binning) regardless of exptime (flats don't
+        share the exptime-matching requirement bias/dark do). Does not
+        decide what to do about gaps -- Stage 2 halts and asks; this just
+        reports what's actually there.
         """
         warnings: list[str] = []
         cal_index = self.calibration_index()
@@ -151,38 +195,100 @@ def _read_imagetyp(path: Path) -> str | None:
     return str(value) if value is not None else None
 
 
+def _infer_telescope_from_path(path: Path) -> str | None:
+    """Some real calibration filenames (camera-model-based, skyflat-based)
+    don't embed the telescope at all -- it's only recoverable from the
+    directory structure (e.g. ".../Calibrations/T21/Bias/..."). Searches
+    ancestor directory names for a "T<digits>" token, nearest first."""
+    for parent in path.parents:
+        if _TELESCOPE_DIR_RE.match(parent.name):
+            return parent.name.upper()
+    return None
+
+
+def classify_filename(
+    name: str, telescope_hint: str | None = None
+) -> tuple[str, dict] | None:
+    """Pure filename classification, no file I/O -- usable both for real
+    files on disk and for names peeked out of a zip archive without
+    extracting it. Returns (kind, fields) where kind is "light" or
+    "calibration", or None if nothing matched. `telescope_hint` is used
+    for the telescope-less camera-model/skyflat calibration conventions
+    when there's no meaningful path to infer it from (e.g. inside a zip).
+    """
+    match = _LIGHT_RE.match(name)
+    if match:
+        return "light", {
+            "provenance": match.group("provenance").lower(),
+            "telescope": match.group("telescope"),
+            "target": match.group("target"),
+            "date": match.group("date"),
+            "time": match.group("time"),
+            "filter_name": match.group("filter"),
+            "binning": int(match.group("bin")),
+            "side": match.group("side").upper(),
+            "exptime": float(match.group("exptime")),
+            "sequence": int(match.group("seq")),
+        }
+
+    match = _CAL_RE_T24.match(name)
+    if match:
+        return "calibration", {
+            "telescope": match.group("telescope"),
+            "frame_type": match.group("frametype").capitalize(),
+            "binning": int(match.group("bin")),
+            "exptime": float(match.group("exptime")),
+            "local_date": match.group("date"),
+            "local_time": match.group("time"),
+        }
+
+    match = _CAL_RE_CAMERA.match(name)
+    if match and telescope_hint:
+        return "calibration", {
+            "telescope": telescope_hint,
+            "frame_type": match.group("frametype").capitalize(),
+            "binning": int(match.group("bin")),
+            "exptime": float(match.group("exptime")) if match.group("exptime") else 0.0,
+        }
+
+    match = _FLAT_RE_SKYFLAT.match(name)
+    if match and telescope_hint:
+        return "calibration", {
+            "telescope": telescope_hint,
+            "frame_type": "Flat",
+            "binning": int(match.group("binx")),
+            "exptime": 0.0,
+        }
+
+    return None
+
+
 def classify_frame(path: Path) -> LightFrame | CalibrationFrame | UnrecognizedFrame:
     """Classify one file by filename first (cheap, verified against real
-    data); falls back to reading IMAGETYP from the FITS header only when
-    the filename doesn't match a known pattern, so an unfamiliar naming
+    data from two telescopes); falls back to reading IMAGETYP from the
+    FITS header only when nothing matches, so an unfamiliar naming
     convention doesn't get silently mis-grouped.
     """
     name = path.name
+    telescope_hint = _infer_telescope_from_path(path)
 
-    match = _LIGHT_RE.match(name)
-    if match:
-        return LightFrame(
-            path=path,
-            telescope=match.group("telescope"),
-            target=match.group("target"),
-            date=match.group("date"),
-            time=match.group("time"),
-            filter_name=match.group("filter"),
-            binning=int(match.group("bin")),
-            exptime=float(match.group("exptime")),
-            sequence=int(match.group("seq")),
-        )
+    classified = classify_filename(name, telescope_hint=telescope_hint)
+    if classified is not None:
+        kind, fields = classified
+        if kind == "light":
+            return LightFrame(path=path, **fields)
+        return CalibrationFrame(path=path, **fields)
 
-    match = _CAL_RE.match(name)
-    if match:
-        return CalibrationFrame(
+    # Matched a telescope-less calibration pattern but no telescope could
+    # be inferred from the path -- distinguish this from "no pattern
+    # matched at all" so the fix (path missing a T<n> folder) is obvious.
+    if _CAL_RE_CAMERA.match(name) or _FLAT_RE_SKYFLAT.match(name):
+        return UnrecognizedFrame(
             path=path,
-            telescope=match.group("telescope"),
-            frame_type=match.group("frametype").capitalize(),
-            binning=int(match.group("bin")),
-            exptime=float(match.group("exptime")),
-            local_date=match.group("date"),
-            local_time=match.group("time"),
+            reason=(
+                "Matched a telescope-less calibration filename pattern but "
+                "no 'T<digits>' telescope directory was found in its path."
+            ),
         )
 
     imagetyp = _read_imagetyp(path)

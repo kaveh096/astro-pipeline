@@ -15,7 +15,7 @@ LIGHT_NAME = "raw-T24-kaveh096-M51-20250123-021344-Blue-BIN2-E-300-001.fit"
 BIAS_NAME = "T24-kaveh096-Bias-000-LD20250203-LT171434-BIN1.fit"
 DARK_NAME = "T24-kaveh096-Dark-300-LD20250203-LT155037-BIN1.fit"
 
-REAL_SESSION_DIR = Path(r"C:\Users\Kaveh\Desktop\M51 on T24")
+REAL_SESSION_DIR = Path(r"C:\Users\Kaveh\Desktop\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
 
 
 def touch(tmp_path: Path, name: str) -> Path:
@@ -33,7 +33,75 @@ def test_classify_light_frame(tmp_path: Path) -> None:
     assert frame.binning == 2
     assert frame.exptime == 300.0
     assert frame.date == "20250123"
-    assert frame.sequence == 1
+    assert frame.provenance == "raw"
+    assert frame.side == "E"
+
+
+def test_classify_light_frame_west_side_not_hardcoded(tmp_path: Path) -> None:
+    """A real delivery (different user, same T24 telescope) proved the 'E'
+    token is a meridian-side flag, not a constant -- must accept 'W' too."""
+    name = "raw-T24-jmwill-M51-20250225-030711-Luminance-BIN1-W-300-001.fit"
+    frame = classify_frame(touch(tmp_path, name))
+    assert isinstance(frame, LightFrame)
+    assert frame.side == "W"
+
+
+def test_classify_calibrated_provenance_light_frame(tmp_path: Path) -> None:
+    name = "calibrated-T21-kaveh096-M51-20250113-045216-Luminance-BIN1-E-600-001.fit"
+    frame = classify_frame(touch(tmp_path, name))
+    assert isinstance(frame, LightFrame)
+    assert frame.provenance == "calibrated"
+
+
+def test_classify_t21_camera_model_bias_dark(tmp_path: Path) -> None:
+    """T21's calibration frames use a completely different, telescope-less
+    naming convention (camera model, not telescope ID) -- telescope must be
+    inferred from a 'T<digits>' ancestor directory."""
+    t21_dir = tmp_path / "Calibrations" / "T21" / "Bias" / "2024 06"
+    t21_dir.mkdir(parents=True)
+    bias_path = t21_dir / "FLI6303 -0001biasBin1.fit"
+    bias_path.write_bytes(b"")
+    frame = classify_frame(bias_path)
+    assert isinstance(frame, CalibrationFrame)
+    assert frame.telescope == "T21"
+    assert frame.frame_type == "Bias"
+    assert frame.binning == 1
+
+    dark_dir = tmp_path / "Calibrations" / "T21" / "Darks" / "2024 06"
+    dark_dir.mkdir(parents=True)
+    dark_path = dark_dir / "FLI6303 -0001dark900secBin2.fit"
+    dark_path.write_bytes(b"")
+    dark_frame = classify_frame(dark_path)
+    assert isinstance(dark_frame, CalibrationFrame)
+    assert dark_frame.telescope == "T21"
+    assert dark_frame.frame_type == "Dark"
+    assert dark_frame.binning == 2
+    assert dark_frame.exptime == 900.0
+
+
+def test_classify_t21_skyflat(tmp_path: Path) -> None:
+    flat_dir = tmp_path / "Calibrations" / "T21" / "Flats" / "2024 06" / "raw flats" / "20240616_080204"
+    flat_dir.mkdir(parents=True)
+    flat_path = flat_dir / "scope_Luminance_1x1_skyflat0.fit"
+    flat_path.write_bytes(b"")
+    frame = classify_frame(flat_path)
+    assert isinstance(frame, CalibrationFrame)
+    assert frame.telescope == "T21"
+    assert frame.frame_type == "Flat"
+    assert frame.binning == 1
+
+
+def test_classify_telescope_less_calibration_without_telescope_dir_is_unrecognized(tmp_path: Path) -> None:
+    """Same camera-model filename, but with no T<digits> ancestor directory
+    to infer telescope from -- must be flagged, not silently dropped or
+    guessed at."""
+    loose_dir = tmp_path / "SomeRandomFolder"
+    loose_dir.mkdir()
+    path = loose_dir / "FLI6303 -0001biasBin1.fit"
+    path.write_bytes(b"")
+    frame = classify_frame(path)
+    assert isinstance(frame, UnrecognizedFrame)
+    assert "telescope" in frame.reason.lower()
 
 
 def test_classify_bias_frame(tmp_path: Path) -> None:
@@ -98,25 +166,51 @@ def test_missing_calibration_warnings_flags_missing_bias_and_dark(tmp_path: Path
     assert any("no flat" in w.lower() for w in warnings)
 
 
-# --- integration test against the real M51-on-T24 delivery -----------------
+# --- integration tests against the real multi-telescope M51 delivery -------
+#
+# This tree supersedes the original tidy single-telescope sample: it's messy
+# on purpose (real iTelescope deliveries across two telescopes, two users,
+# multiple filename conventions, zip-wrapped exposures). scan_session only
+# covers loose .fit/.fits/.fts files under root -- zip-wrapped T21 lights and
+# non-FITS files (previews, master calibration TIFFs) are index.py's job,
+# covered in test_index.py.
 
 
 @pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
-def test_scan_real_m51_t24_session() -> None:
+def test_scan_real_multi_telescope_session() -> None:
     report = scan_session(REAL_SESSION_DIR)
 
-    assert len(report.lights) == 49
-    assert len(report.unrecognized) == 0, [f.path.name for f in report.unrecognized]
+    # T24 raw lights: 95 (spread across three date subfolders: 20250115,
+    # 20250123, 20250127). T21's lights are zip-wrapped and invisible to a
+    # bare fit-glob scan -- that's expected here, not a bug (see test_index.py).
+    raw_lights = [f for f in report.lights if f.provenance == "raw"]
+    assert len(raw_lights) == 95
+    assert all(f.telescope == "T24" for f in raw_lights)
 
+    # iTelescope-side-calibrated duplicates of the same exposures are present
+    # too, and must NOT show up in light_groups() (which only ever returns
+    # raw provenance) -- conflating them would double-process or silently
+    # prefer one over the other.
+    calibrated_lights = [f for f in report.lights if f.provenance == "calibrated"]
+    assert len(calibrated_lights) > 0
     groups = report.light_groups()
+    for frames in groups.values():
+        assert all(f.provenance == "raw" for f in frames)
+
     assert ("T24", "M51", "Luminance", 1) in groups
     assert ("T24", "M51", "Red", 2) in groups
     assert ("T24", "M51", "Green", 2) in groups
     assert ("T24", "M51", "Blue", 2) in groups
 
-    # Real delivery has no flats at all -- this must surface, not be silent.
+    # T24 has real bias/dark (Calibrations/T24/Fresh) but genuinely no
+    # flats anywhere in this delivery -- must surface, not be silent.
     warnings = report.missing_calibration_warnings()
-    assert any("no flat" in w.lower() for w in warnings)
-    # But bias/dark for BIN1 and BIN2 at 300s are present, so no warning for those.
-    assert not any("no bias" in w.lower() for w in warnings)
-    assert not any("no dark" in w.lower() for w in warnings)
+    assert any("no flat" in w.lower() and "t24" in w.lower() for w in warnings)
+    assert not any("no bias" in w.lower() and "t24" in w.lower() for w in warnings)
+    assert not any("no dark" in w.lower() and "t24" in w.lower() for w in warnings)
+
+    # The only unrecognized FITS files should be the unidentified
+    # "Master_Flat <Filter> ..." set (a 4th, unrecognized instrument/source)
+    # -- correctly refused rather than guessed at.
+    assert len(report.unrecognized) == 11
+    assert all("master_flat" in f.path.name.lower() for f in report.unrecognized)

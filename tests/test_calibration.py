@@ -23,7 +23,7 @@ except FileNotFoundError:
 
 requires_siril = pytest.mark.skipif(not SIRIL_AVAILABLE, reason="Siril not installed on this machine")
 
-REAL_SESSION_DIR = Path(r"C:\Users\Kaveh\Desktop\M51 on T24")
+REAL_SESSION_DIR = Path(r"C:\Users\Kaveh\Desktop\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
 requires_real_session = pytest.mark.skipif(
     not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine"
 )
@@ -90,7 +90,7 @@ def test_calibrate_real_luminance_bin1_without_flats(tmp_path: Path) -> None:
     report = scan_session(REAL_SESSION_DIR)
     groups = report.light_groups()
     lum_lights = groups[("T24", "M51", "Luminance", 1)]
-    assert len(lum_lights) == 13
+    assert len(lum_lights) == 21
 
     cal_index = report.calibration_index()
     bias = cal_index[("T24", "Bias", 1, 0.0)]
@@ -108,7 +108,7 @@ def test_calibrate_real_luminance_bin1_without_flats(tmp_path: Path) -> None:
 
     assert result.flat_corrected is False
     assert result.master_flat is None
-    assert len(result.calibrated_lights) == 13
+    assert len(result.calibrated_lights) == 21
 
     raw_data = fits.getdata(lum_lights[0].path).astype(np.float64)
     calibrated_data = fits.getdata(result.calibrated_lights[0]).astype(np.float64)
