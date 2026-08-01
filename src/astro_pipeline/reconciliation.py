@@ -32,6 +32,7 @@ here specifically so reprojection can run this late in the chain.
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -101,6 +102,21 @@ def reproject_to_reference(
 
     out_shape = (int(ref_header["NAXIS2"]), int(ref_header["NAXIS1"]))
 
+    # Memory-conscious by necessity: this runs on a machine with only ~8GB
+    # total RAM and, in practice, as little as ~2.5GB free (confirmed via
+    # Win32_OperatingSystem). reproject_interp works in float64 internally
+    # regardless of input dtype, so a naive "reproject all 3 channels, then
+    # np.stack" approach holds several 4096x4096 float64 arrays (channel +
+    # footprint, x3) simultaneously -- verified to reliably trigger an
+    # out-of-memory kill on this machine (repeatedly reproduced, at the
+    # process level -- no Python exception, the process was just gone).
+    # Fixed two ways together: each channel is reprojected, cast down to
+    # float32, and freed before starting the next one; and reproject_interp
+    # is called with block_size="auto" (processes the output in chunks
+    # instead of allocating working memory for the whole array at once) --
+    # per-channel float32 handling alone was NOT enough on its own (still
+    # reproducibly killed); block_size="auto" was the fix that actually
+    # worked, verified on the real 2048x2048-to-4096x4096 RGB reprojection.
     if source_data.ndim == 3:
         # Multi-channel (e.g. an already rgbcomp'd RGB image): reproject
         # each channel independently, since reproject_interp works on 2D
@@ -111,16 +127,32 @@ def reproject_to_reference(
         # each 2D channel slice, or reproject_interp rejects the dimension
         # mismatch (verified empirically).
         source_wcs_2d = source_wcs.celestial
-        channels = []
-        footprints = []
-        for channel_data in source_data:
-            reproj_channel, fp = reproject_interp((channel_data, source_wcs_2d), ref_wcs, shape_out=out_shape)
-            channels.append(reproj_channel)
-            footprints.append(fp)
-        reprojected = np.stack(channels, axis=0)
-        footprint = np.stack(footprints, axis=0)
+        n_channels = source_data.shape[0]
+        reprojected = np.empty((n_channels, out_shape[0], out_shape[1]), dtype=np.float32)
+        footprint_min = np.inf
+        footprint_sum = 0.0
+        for i in range(n_channels):
+            reproj_channel, fp = reproject_interp(
+                (source_data[i], source_wcs_2d), ref_wcs, shape_out=out_shape,
+                block_size="auto", parallel=False,
+            )
+            reprojected[i] = reproj_channel.astype(np.float32)
+            footprint_min = min(footprint_min, float(np.nanmin(fp)))
+            footprint_sum += float(np.nanmean(fp))
+            del reproj_channel, fp
+            gc.collect()
+        footprint_mean = footprint_sum / n_channels
+        nan_fraction = float(np.isnan(reprojected).sum()) / reprojected.size
     else:
-        reprojected, footprint = reproject_interp((source_data, source_wcs), ref_wcs, shape_out=out_shape)
+        reprojected, footprint = reproject_interp(
+            (source_data, source_wcs), ref_wcs, shape_out=out_shape,
+            block_size="auto", parallel=False,
+        )
+        reprojected = reprojected.astype(np.float32)
+        footprint_min = float(np.nanmin(footprint))
+        footprint_mean = float(np.nanmean(footprint))
+        nan_fraction = float(np.isnan(reprojected).sum()) / reprojected.size
+        del footprint
 
     output_header = source_header.copy()
     for key, value in ref_wcs.to_header().items():
@@ -129,14 +161,14 @@ def reproject_to_reference(
     output_header["NAXIS2"] = out_shape[0]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fits.writeto(output_path, reprojected.astype(np.float32), header=output_header, overwrite=True)
+    fits.writeto(output_path, reprojected, header=output_header, overwrite=True)
 
     return ReconciliationResult(
         source_path=source_path,
         output_path=output_path,
-        footprint_min=float(np.nanmin(footprint)),
-        footprint_mean=float(np.nanmean(footprint)),
-        nan_fraction=float(np.isnan(reprojected).sum()) / reprojected.size,
+        footprint_min=footprint_min,
+        footprint_mean=footprint_mean,
+        nan_fraction=nan_fraction,
     )
 
 
