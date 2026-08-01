@@ -15,6 +15,19 @@ Reprojecting the Red master onto the Luminance grid produced a correct
 4096x4096 output with ~97.8% footprint coverage -- the ~2.2% outside the
 Red frame's actual field of view comes back as NaN (an honest "no data"
 marker), not a fabricated zero or extrapolated value.
+
+IMPORTANT pipeline-ordering finding, also verified against real data:
+reprojection must happen AFTER color calibration (PCC/SPCC), not before.
+Running PCC on a reprojected RGB composite failed with the same error as
+running it after GraXpert background extraction ("Error computing FWHM
+for photometry settings adjustment") -- the NaN edge pixels and
+interpolation artifacts introduced by reprojection break Siril's
+photometry statistics the same way background-subtraction artifacts do.
+The real pipeline order is: build R/G/B masters at native resolution ->
+rgbcomp -> PCC (Stage 6/7) -> GraXpert -> THEN reproject the processed RGB
+composite onto L's grid (this stage) -> GHT stretch both -> rgbcomp -lum=
+(Stages 8-9). Multi-channel (already-composited RGB) input is supported
+here specifically so reprojection can run this late in the chain.
 """
 
 from __future__ import annotations
@@ -87,7 +100,27 @@ def reproject_to_reference(
     source_wcs = _require_wcs(source_path)
 
     out_shape = (int(ref_header["NAXIS2"]), int(ref_header["NAXIS1"]))
-    reprojected, footprint = reproject_interp((source_data, source_wcs), ref_wcs, shape_out=out_shape)
+
+    if source_data.ndim == 3:
+        # Multi-channel (e.g. an already rgbcomp'd RGB image): reproject
+        # each channel independently, since reproject_interp works on 2D
+        # data. Channel axis is first (NAXIS3, C, ny, nx) per FITS/Siril
+        # convention, verified against real rgbcomp output. The FITS
+        # header's WCS is inherently 3D here (NAXIS=3 includes the channel
+        # axis) -- must drop to the 2D celestial sub-WCS before reprojecting
+        # each 2D channel slice, or reproject_interp rejects the dimension
+        # mismatch (verified empirically).
+        source_wcs_2d = source_wcs.celestial
+        channels = []
+        footprints = []
+        for channel_data in source_data:
+            reproj_channel, fp = reproject_interp((channel_data, source_wcs_2d), ref_wcs, shape_out=out_shape)
+            channels.append(reproj_channel)
+            footprints.append(fp)
+        reprojected = np.stack(channels, axis=0)
+        footprint = np.stack(footprints, axis=0)
+    else:
+        reprojected, footprint = reproject_interp((source_data, source_wcs), ref_wcs, shape_out=out_shape)
 
     output_header = source_header.copy()
     for key, value in ref_wcs.to_header().items():

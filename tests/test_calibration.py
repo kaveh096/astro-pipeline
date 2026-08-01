@@ -116,6 +116,42 @@ def test_calibrate_real_luminance_bin1_without_flats(tmp_path: Path) -> None:
     # Bias+dark subtraction must actually change the pixel values, not
     # just pass the file through unmodified.
     assert not np.allclose(raw_data, calibrated_data)
-    # Calibration should reduce the mean level (removing bias/dark offset),
-    # not add an implausible amount of signal.
-    assert calibrated_data.mean() < raw_data.mean()
+
+    # Real, critical regression guard: bias+dark-only calibration (no flat)
+    # routinely leaves the background slightly negative on average, and
+    # Siril's stack output was found to clip negative-averaged pixels to
+    # exact 0.0 -- destroying the background's continuous noise texture
+    # (>99.9% of a real master ended up exactly zero) and silently
+    # breaking GraXpert's background extraction downstream with 100% NaN
+    # output and no error. The default pedestal must keep the calibrated
+    # data comfortably non-negative so this can't happen.
+    assert calibrated_data.min() > 0
+
+
+@requires_siril
+@requires_real_session
+def test_calibrate_and_stack_produces_no_exact_zero_background(tmp_path: Path) -> None:
+    """Direct regression test for the real bug: without the pedestal,
+    stacking a bias+dark-only-calibrated sequence produced a master that
+    was >99.9% exact zero. With the default pedestal, the stacked master
+    must have a real, continuous, non-clipped background.
+    """
+    from astro_pipeline.registration_stacking import register_and_stack
+
+    report = scan_session(REAL_SESSION_DIR)
+    groups = report.light_groups()
+    lum_lights = groups[("T24", "kaveh096", "M51", "Luminance", 1)]
+    cal_index = report.calibration_index()
+    bias = cal_index[("T24", "Bias", 1, 0.0)]
+    dark = cal_index[("T24", "Dark", 1, 300.0)]
+
+    run_calibration(lum_lights, bias, dark, work_dir=tmp_path, flat_frames=None)
+    stack_result = register_and_stack("pp_lights_", tmp_path / "lights", out_name="master_lum")
+
+    master_data = fits.getdata(stack_result.master_path)
+    zero_fraction = float(np.sum(master_data == 0)) / master_data.size
+    assert zero_fraction < 0.01, (
+        f"{zero_fraction:.1%} of the master is exact zero -- the background-clipping "
+        "bug is back."
+    )
+    assert master_data.min() > 0

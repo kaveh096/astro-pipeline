@@ -31,6 +31,17 @@ requires_real_light = pytest.mark.skipif(
     not REAL_LIGHT.exists(), reason="Real sample light frame not present on this machine"
 )
 
+# Real Blue/BIN2 master built during development (see reconciliation/
+# background_color test scratch dir) -- reused here since it's the real
+# example of a solve that needed the -z 1 retry (only 9 stars detected).
+REAL_BLUE_MASTER = Path(
+    r"C:\Users\Kaveh\AppData\Local\Temp\claude\C--dev-astro-pipeline"
+    r"\030735e3-fa3c-4002-a37d-180b9f73ef2a\scratchpad\recon_test\blue\lights\master_blue.fit"
+)
+requires_real_blue_master = pytest.mark.skipif(
+    not REAL_BLUE_MASTER.exists(), reason="Real Blue master not present on this machine"
+)
+
 # M51: RA 13h29m52.7s, Dec +47:11:43 -- used directly (no network dependency)
 # for tests that don't specifically exercise name resolution.
 M51_RA_HOURS = 13.4980
@@ -84,6 +95,22 @@ def test_solve_real_light_with_correct_hint(tmp_path: Path) -> None:
     # in place, so the test must never point it at the real Desktop file.
     original_header = fits.getheader(REAL_LIGHT)
     assert "PLTSOLVD" not in original_header
+
+
+@requires_astap
+@requires_real_blue_master
+def test_solve_real_blue_master_via_downsample_retry(tmp_path: Path) -> None:
+    """Real regression case: the Blue/BIN2 master has far fewer detectable
+    stars (9, vs 100+ for Luminance/Red/Green) and only solves once
+    ASTAP's auto-downsampling is disabled -- solve() must retry with -z 1
+    rather than giving up after the default pass fails."""
+    staged = tmp_path / "master_blue.fit"
+    shutil.copy2(REAL_BLUE_MASTER, staged)
+
+    result = solve(staged, ra_hours=M51_RA_HOURS, dec_deg=M51_DEC_DEG, search_radius_deg=5.0)
+
+    assert result.ra_deg == pytest.approx(202.47, abs=0.2)
+    assert result.dec_deg == pytest.approx(47.18, abs=0.2)
 
 
 @requires_astap

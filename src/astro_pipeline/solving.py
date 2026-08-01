@@ -103,6 +103,13 @@ def solve(
     (either resolved from `target` or given directly) to keep the search
     fast rather than fully blind. Raises PlateSolveError if PLTSOLVD isn't
     set in the header afterward -- never trust ASTAP's exit code alone.
+
+    Retries once with downsampling disabled (-z 1) if the default (auto)
+    pass fails: verified real on a Blue-filter master, which had far fewer
+    detectable stars (9) than Luminance/Red/Green (100+) -- plausibly lower
+    sensor QE / more atmospheric scattering in blue -- and only solved once
+    ASTAP's auto-downsampling was turned off so it didn't throw away the
+    faint stars that were the only ones available.
     """
     fits_path = Path(fits_path)
 
@@ -116,8 +123,8 @@ def solve(
     exe = astap_cli or find_astap_cli()
     spd_deg = _south_pole_distance_deg(dec_deg)
 
-    proc = subprocess.run(
-        [
+    def run_astap(downsample: int | None) -> subprocess.CompletedProcess:
+        args = [
             str(exe),
             "-f", str(fits_path),
             "-ra", f"{ra_hours:.4f}",
@@ -126,19 +133,24 @@ def solve(
             "-r", str(search_radius_deg),
             "-update",
             "-log",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+        ]
+        if downsample is not None:
+            args += ["-z", str(downsample)]
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
 
+    proc = run_astap(downsample=None)
     header = fits.getheader(fits_path)
+
     if not header.get("PLTSOLVD"):
-        raise PlateSolveError(
-            f"ASTAP did not solve {fits_path.name} (PLTSOLVD not set after run). "
-            f"exit code was {proc.returncode} -- not a reliable success signal on its own.",
-            stdout=proc.stdout,
-        )
+        proc_retry = run_astap(downsample=1)
+        header = fits.getheader(fits_path)
+        if not header.get("PLTSOLVD"):
+            raise PlateSolveError(
+                f"ASTAP did not solve {fits_path.name} (PLTSOLVD not set after run, "
+                f"including a -z 1 retry). Exit codes {proc.returncode}/{proc_retry.returncode} "
+                f"-- not a reliable success signal on their own.",
+                stdout=proc.stdout + "\n--- retry with -z 1 ---\n" + proc_retry.stdout,
+            )
 
     return SolveResult(
         fits_path=fits_path,
