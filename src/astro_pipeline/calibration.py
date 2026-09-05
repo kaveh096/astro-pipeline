@@ -147,6 +147,7 @@ def calibrate_lights(
     master_flat: Path | None = None,
     basename: str = "lights",
     pedestal: float = DEFAULT_PEDESTAL,
+    subtract_bias: bool = False,
 ) -> list[Path]:
     """Convert light_frames to a sequence and run Siril's `calibrate`
     against the given masters. Returns calibrated file paths (prefix
@@ -157,6 +158,30 @@ def calibrate_lights(
     aware downstream background extraction may then silently produce
     garbage rather than erroring (verified: no exception, no warning
     beyond a "divide by zero" that also appears on healthy runs).
+
+    `subtract_bias` defaults to False, i.e. lights are calibrated against
+    the dark alone. A dark of matching exposure and temperature already
+    contains the bias signal, so also subtracting a separately-stacked bias
+    master is redundant -- and actively harmful when that master is built
+    from few frames, because its own read noise and fixed-column pattern
+    get imprinted onto every light. Siril's own bundled scripts pass -bias
+    only when calibrating flats, never lights.
+
+    Measured on the real T24 data (5 bias, 5 dark, 13 lights), using
+    column-to-column scatter normalised by the frame's pixel noise, where
+    ~1 would mean no fixed-column structure:
+
+        raw light                2.03
+        bias + dark calibrated   3.82   <- calibration nearly doubled it
+        dark only calibrated     3.34
+
+    Both calibrated numbers exceed the raw frame because a 5-frame master
+    retains ~45% of a single frame's noise; the real fix is more
+    calibration frames (T21's delivery has 82 bias / 25 darks per binning,
+    T24's has 5), which is a data limitation rather than a code one.
+    Dropping the redundant bias subtraction is the part that is fixable
+    here. Siril's `fixbanding` was also tried and moved the metric only
+    3.24 -> 3.21, so it is not used.
     """
     if not light_frames:
         raise CalibrationFramesMissingError("No light frames provided to calibrate.")
@@ -187,12 +212,14 @@ def calibrate_lights(
     seq = sequence_name(basename)
     run_script([f"convert {basename}"], workdir=stage_dir, script_name="convert.ssf")
 
-    staged_bias = stage_dir / "masterbias.fit"
     staged_dark = stage_dir / "masterdark.fit"
-    shutil.copy2(master_bias, staged_bias)
     shutil.copy2(master_dark, staged_dark)
 
-    command = f"calibrate {seq} -bias={staged_bias.stem} -dark={staged_dark.stem} -cc=dark"
+    command = f"calibrate {seq} -dark={staged_dark.stem} -cc=dark"
+    if subtract_bias:
+        staged_bias = stage_dir / "masterbias.fit"
+        shutil.copy2(master_bias, staged_bias)
+        command += f" -bias={staged_bias.stem}"
     if master_flat is not None:
         staged_flat = stage_dir / "masterflat.fit"
         shutil.copy2(master_flat, staged_flat)
@@ -221,6 +248,7 @@ def run_calibration(
     flat_frames: list[CalibrationFrame] | None = None,
     flat_policy: FlatPolicy = FlatPolicy.SKIP_IF_MISSING,
     pedestal: float = DEFAULT_PEDESTAL,
+    subtract_bias: bool = False,
 ) -> CalibrationResult:
     """Orchestrate one (telescope, binning[, exptime]) calibration group.
 
@@ -228,6 +256,11 @@ def run_calibration(
     flat_policy: REQUIRE raises, SKIP_IF_MISSING proceeds without flat
     correction -- but flat_corrected on the result always says which
     actually happened, so it's never silently ambiguous downstream.
+
+    Bias frames are still required (and a master bias is still built, since
+    it is the correct thing to calibrate flats against), but by default they
+    are NOT subtracted from the lights -- see calibrate_lights' docstring
+    for the measurements behind that.
     """
     if not bias_frames:
         raise CalibrationFramesMissingError("No bias frames available; cannot calibrate.")
@@ -249,7 +282,13 @@ def run_calibration(
         master_flat = build_master_flat(flat_frames, work_dir)
 
     calibrated = calibrate_lights(
-        light_frames, master_bias, master_dark, work_dir, master_flat=master_flat, pedestal=pedestal
+        light_frames,
+        master_bias,
+        master_dark,
+        work_dir,
+        master_flat=master_flat,
+        pedestal=pedestal,
+        subtract_bias=subtract_bias,
     )
 
     return CalibrationResult(
