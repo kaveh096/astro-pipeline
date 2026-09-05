@@ -136,7 +136,12 @@ def solve(
         ]
         if downsample is not None:
             args += ["-z", str(downsample)]
-        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        # Explicit encoding -- text=True alone decodes with the Windows
+        # locale codec, which can raise UnicodeDecodeError on bytes these
+        # tools legitimately emit (verified real with Siril's output).
+        return subprocess.run(
+            args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
+        )
 
     proc = run_astap(downsample=None)
     header = fits.getheader(fits_path)

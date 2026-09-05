@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 
 from astro_pipeline.index import build_index
+from astro_pipeline.ingest import is_generated
 
-REAL_TREE_DIR = Path(r"C:\Users\Kaveh\Desktop\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
+from conftest import PROJECT_DIR as REAL_TREE_DIR
 requires_real_tree = pytest.mark.skipif(
     not REAL_TREE_DIR.exists(), reason="Real multi-telescope sample tree not present on this machine"
 )
@@ -121,7 +122,15 @@ def test_build_index_on_real_tree() -> None:
     # accounted for via archived_entries (their contents, not the zip path
     # itself, since a zip normally holds exactly one thing worth cataloging);
     # everything else goes to lights (previews) or other_files.
-    all_fs_paths = {p for p in REAL_TREE_DIR.rglob("*") if p.is_file()}
+    # Generated pipeline output lives inside the project folder but is
+    # deliberately not indexed (see ingest.is_generated) -- excluded here
+    # too, or "everything is accounted for" would fail the moment the
+    # pipeline has been run once.
+    all_fs_paths = {
+        p
+        for p in REAL_TREE_DIR.rglob("*")
+        if p.is_file() and not is_generated(p, REAL_TREE_DIR)
+    }
     accounted_paths = (
         {f.path for f in idx.lights}
         | {f.path for f in idx.calibration}

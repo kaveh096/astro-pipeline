@@ -31,16 +31,12 @@ requires_real_light = pytest.mark.skipif(
     not REAL_LIGHT.exists(), reason="Real sample light frame not present on this machine"
 )
 
-# Real Blue/BIN2 master built during development (see reconciliation/
-# background_color test scratch dir) -- reused here since it's the real
-# example of a solve that needed the -z 1 retry (only 9 stars detected).
-REAL_BLUE_MASTER = Path(
-    r"C:\Users\Kaveh\AppData\Local\Temp\claude\C--dev-astro-pipeline"
-    r"\030735e3-fa3c-4002-a37d-180b9f73ef2a\scratchpad\recon_test\blue\lights\master_blue.fit"
-)
-requires_real_blue_master = pytest.mark.skipif(
-    not REAL_BLUE_MASTER.exists(), reason="Real Blue master not present on this machine"
-)
+# The Blue/BIN2 master is the real example of a solve that needed the -z 1
+# retry: it had only ~9 detectable stars versus 100+ in the other channels.
+from conftest import BLUE_MASTER as REAL_BLUE_MASTER
+from conftest import requires
+
+requires_real_blue_master = requires(REAL_BLUE_MASTER)
 
 # M51: RA 13h29m52.7s, Dec +47:11:43 -- used directly (no network dependency)
 # for tests that don't specifically exercise name resolution.

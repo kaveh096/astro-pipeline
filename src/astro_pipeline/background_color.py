@@ -54,7 +54,7 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 
-from .siril_driver import SirilError, SirilResult, run_script
+from .siril_driver import SirilError, SirilResult, run_load_process_save
 
 DEFAULT_GRAXPERT_CANDIDATES = [
     Path.home() / "AppData" / "Local" / "Programs" / "GraXpert" / "GraXpert.exe",
@@ -115,13 +115,13 @@ def run_pcc(
     """
     rgb_composite_path = Path(rgb_composite_path)
     work_dir = Path(work_dir)
-    stem = rgb_composite_path.stem
 
     try:
-        result = run_script(
-            [f"load {stem}", "pcc", f"save {stem}"],
-            workdir=work_dir,
-            siril_cli=siril_cli,
+        # Temp-save + replace rather than saving onto the loaded stem --
+        # see run_load_process_save's docstring for why in-place saving is
+        # unreliable in Siril.
+        result = run_load_process_save(
+            rgb_composite_path, ["pcc"], work_dir, siril_cli=siril_cli
         )
     except SirilError as exc:
         raise ColorCalibrationError(
@@ -162,6 +162,10 @@ def run_graxpert_background_extraction(
         cwd=output_dir,
         capture_output=True,
         text=True,
+        # Explicit encoding -- text=True alone uses the Windows locale
+        # codec and can raise UnicodeDecodeError mid-run (verified real).
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
     if not output_path.exists():

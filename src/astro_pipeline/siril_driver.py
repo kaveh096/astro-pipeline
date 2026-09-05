@@ -15,6 +15,7 @@ no special environment handling is needed here.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -63,7 +64,14 @@ def find_siril_cli() -> Path:
 
 def get_version(siril_cli: Path | None = None) -> tuple[int, int, int]:
     exe = siril_cli or find_siril_cli()
-    result = subprocess.run([str(exe), "--version"], capture_output=True, text=True, check=True)
+    result = subprocess.run(
+        [str(exe), "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    )
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout)
     if not match:
         raise RuntimeError(f"Could not parse Siril version from: {result.stdout!r}")
@@ -119,6 +127,13 @@ def run_script(
         [str(exe), "-d", str(workdir), "-s", str(script_path)],
         capture_output=True,
         text=True,
+        # Explicit encoding: text=True otherwise decodes with the Windows
+        # locale codec (cp1252), which raises UnicodeDecodeError on bytes
+        # Siril legitimately emits -- verified real (0x9d in a progress
+        # line). errors="replace" keeps a decoding hiccup in the logs from
+        # taking down a long pipeline run.
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
     result = SirilResult(
@@ -134,6 +149,52 @@ def run_script(
             f"Last log lines:\n{tail}",
             result,
         )
+    return result
+
+
+def run_load_process_save(
+    fits_path: str | Path,
+    process_commands: list[str],
+    work_dir: str | Path,
+    siril_cli: Path | None = None,
+    tmp_suffix: str = "__tmp",
+) -> SirilResult:
+    """load -> <process commands> -> save, leaving the result at fits_path.
+
+    Saves to a temporary stem and moves it over the original afterward,
+    rather than `save`-ing onto the loaded stem directly. Siril's `save`
+    refuses to overwrite an existing file ("FITS error: failed to create
+    new file (already exists?)") -- but only sometimes: an in-place
+    `load X / ght / save X` reliably failed, while `load X / pcc / save X`
+    on an equivalent file did not. Rather than depend on which commands
+    happen to release the file handle, always write somewhere new and use
+    os.replace (atomic, and permits overwriting on Windows).
+
+    Note this is also why the extension matters: `save <stem>` writes
+    Siril's configured extension (.fit by default), so an input named
+    `x.fits` silently avoids the collision while `x.fit` hits it -- which
+    is exactly what made this bug look intermittent.
+    """
+    fits_path = Path(fits_path)
+    work_dir = Path(work_dir)
+    stem = fits_path.stem
+    tmp_stem = f"{stem}{tmp_suffix}"
+
+    result = run_script(
+        [f"load {stem}", *process_commands, f"save {tmp_stem}"],
+        workdir=work_dir,
+        siril_cli=siril_cli,
+    )
+
+    tmp_path = work_dir / f"{tmp_stem}.fit"
+    if not tmp_path.exists():
+        tmp_path = work_dir / f"{tmp_stem}.fits"
+    if not tmp_path.exists():
+        raise SirilError(
+            f"Siril reported success but no '{tmp_stem}.fit(s)' was created in {work_dir}.",
+            result,
+        )
+    os.replace(tmp_path, fits_path)
     return result
 
 

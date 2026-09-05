@@ -23,7 +23,7 @@ except FileNotFoundError:
 
 requires_siril = pytest.mark.skipif(not SIRIL_AVAILABLE, reason="Siril not installed on this machine")
 
-REAL_SESSION_DIR = Path(r"C:\Users\Kaveh\Desktop\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
+from conftest import PROJECT_DIR as REAL_SESSION_DIR
 requires_real_session = pytest.mark.skipif(
     not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine"
 )

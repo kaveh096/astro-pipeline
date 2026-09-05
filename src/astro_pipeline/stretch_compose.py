@@ -10,6 +10,26 @@ sketch, before any Siril command syntax had been checked).
 `rgbcomp -lum=` requires the luminance and RGB images to share the same
 pixel dimensions -- this is why Stage 5's reconciliation (reprojecting R/G/B
 onto L's grid) must run before this stage, not after.
+
+Stretch method, and why the default is what it is -- established by looking
+at the actual rendered image, which is the only thing that caught this:
+
+- `ght` with hand-picked parameters (the original default) is a trap. Its
+  symmetry point SP defaults to 0, i.e. the stretch is centred on black,
+  while real calibrated data here sits at a background of ~0.1 (partly from
+  calibration.py's own pedestal). The result passed every numeric check --
+  0% NaN, no clipping, "non-degenerate" spread, 225 stars for PCC -- and
+  still rendered as a nearly black frame with the galaxy invisible.
+- `autoghs` places SP at k*sigma from each channel's median, so it adapts to
+  the actual background. Much better, but it applies no shadow clipping, so
+  the background stayed a flat grey (~0.30) with no black point.
+- `autostretch` (Siril's own auto-render: MTF with shadow clipping) sets a
+  real black point AND a target background, and produced the first output
+  that actually looks like an astrophoto. It is the default here.
+
+`-linked` is passed for every method. Siril's own documentation warns that
+the unlinked (per-channel) forms alter white balance, which would silently
+undo the photometric colour calibration done in Stage 6/7.
 """
 
 from __future__ import annotations
@@ -18,7 +38,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from .siril_driver import SirilResult, run_script
+from .siril_driver import SirilResult, run_load_process_save, run_script
+
+DEFAULT_SHADOWS_CLIP = -2.8
+DEFAULT_TARGET_BACKGROUND = 0.25
 
 
 @dataclass
@@ -63,36 +86,68 @@ def ght_stretch(
     strength (-D=) is the only mandatory parameter, 0-10. weighting is
     ignored for mono images (Siril's own behavior); pass None to omit it.
 
-    Real bug worth noting: Siril's `save <stem>` refuses to overwrite an
-    existing file (unlike `stack -out=`/`calibrate -prefix=`, which
-    overwrite freely) -- verified real, "FITS error: failed to create new
-    file (already exists?)". A naive `load <stem> / ght / save <stem>`
-    only appears to work when the input's extension happens to differ from
-    Siril's own save default (verified: this masked the bug in earlier
-    manual testing using .fits-suffixed inputs, while Siril defaults to
-    writing .fit) -- with the .fit-suffixed files this pipeline actually
-    uses everywhere else (masters, calibrated lights), it would hit the
-    collision every time. Fixed by saving to a temp stem inside the Siril
-    script, then having Python overwrite fits_path afterward (os.replace
-    is atomic and allows overwriting on Windows, unlike a raw file write).
+    Saving is routed through run_load_process_save rather than a direct
+    `save <stem>`, because Siril's `save` refuses to overwrite an existing
+    file -- see that function's docstring for the full story (it was found
+    here first, via "FITS error: failed to create new file (already
+    exists?)" on a .fit input).
     """
     fits_path = Path(fits_path)
     work_dir = Path(work_dir)
-    stem = fits_path.stem
-    tmp_stem = f"{stem}__ght_tmp"
 
     cmd = _ght_command(strength, black_point, linear_point, symmetry_point, highlight_point, weighting, channels)
 
-    result = run_script([f"load {stem}", cmd, f"save {tmp_stem}"], workdir=work_dir, siril_cli=siril_cli)
+    return run_load_process_save(
+        fits_path, [cmd], work_dir, siril_cli=siril_cli, tmp_suffix="__ght_tmp"
+    )
 
-    tmp_path = work_dir / f"{tmp_stem}.fit"
-    if not tmp_path.exists():
-        tmp_path = work_dir / f"{tmp_stem}.fits"
-    if not tmp_path.exists():
-        raise RuntimeError(f"Siril reported success but no '{tmp_stem}.fit(s)' was created in {work_dir}.")
-    os.replace(tmp_path, fits_path)
 
-    return result
+def auto_stretch(
+    fits_path: str | Path,
+    work_dir: str | Path,
+    shadows_clip: float = DEFAULT_SHADOWS_CLIP,
+    target_background: float = DEFAULT_TARGET_BACKGROUND,
+    siril_cli: Path | None = None,
+) -> SirilResult:
+    """Siril's `autostretch`: histogram transform with shadow clipping, so
+    it sets a real black point as well as lifting the midtones. This is the
+    default stretch -- see module docstring for why the hand-tuned `ght`
+    path it replaced produced an essentially black image.
+
+    Always `-linked`, to avoid altering white balance post-colour-calibration.
+    """
+    return run_load_process_save(
+        Path(fits_path),
+        [f"autostretch -linked {shadows_clip} {target_background}"],
+        Path(work_dir),
+        siril_cli=siril_cli,
+        tmp_suffix="__as_tmp",
+    )
+
+
+def auto_ghs_stretch(
+    fits_path: str | Path,
+    work_dir: str | Path,
+    shadows_clip: float = DEFAULT_SHADOWS_CLIP,
+    strength: float = 2.0,
+    siril_cli: Path | None = None,
+) -> SirilResult:
+    """Siril's `autoghs`: generalised hyperbolic stretch with the symmetry
+    point derived from each channel's own median, so it adapts to the actual
+    background level rather than assuming zero.
+
+    Lifts more faint structure than `autostretch` but applies no shadow
+    clipping, so on its own it leaves the background a flat grey. Useful
+    followed by auto_stretch() when the goal is maximum faint signal; that
+    combination is also noticeably noisier.
+    """
+    return run_load_process_save(
+        Path(fits_path),
+        [f"autoghs -linked {shadows_clip} {strength}"],
+        Path(work_dir),
+        siril_cli=siril_cli,
+        tmp_suffix="__ags_tmp",
+    )
 
 
 def rgbcomp_lum(
@@ -126,31 +181,49 @@ def stretch_and_compose(
     rgb_path: str | Path,
     work_dir: str | Path,
     output_stem: str = "lrgb_composite",
-    lum_strength: float = 0.5,
-    rgb_strength: float = 0.5,
+    method: str = "autostretch",
+    shadows_clip: float = DEFAULT_SHADOWS_CLIP,
+    target_background: float = DEFAULT_TARGET_BACKGROUND,
+    ghs_strength: float = 2.0,
     siril_cli: Path | None = None,
 ) -> ComposeResult:
-    """Convenience wrapper: independently GHT-stretch lum_path and
-    rgb_path, then combine via rgbcomp -lum=. Strength is exposed per
-    channel-set since L and RGB typically need different amounts of
-    stretch -- this is meant to be the tunable parameter surfaced to the
-    user at the checkpoint, not a fixed default.
+    """Independently stretch lum_path and rgb_path, then combine via
+    `rgbcomp -lum=`.
 
-    Default of 0.5 (GHT's -D= range is 0-10) is deliberately conservative,
-    verified against real data: an earlier, untested default of 3.0-4.0
-    crushed an entire real M51 LRGB composite into the top ~1.5% of the
-    value range (median 0.988, essentially blown-out white) -- 0.5
-    produced a real, properly distributed stretch (background ~0.11,
-    genuine spread to saturated highlights) on the same data. Still just
-    a starting point for interactive tuning, not a value to trust blindly
-    on different data.
+    method:
+      "autostretch"  (default) shadow-clipped histogram transform -- the
+                     only one of the three that produced a viewable image
+                     on real data straight off.
+      "autoghs"      GHS with a data-derived symmetry point; lifts more
+                     faint signal, leaves the background grey (no black
+                     point) and is noisier.
+      "autoghs+auto" autoghs followed by autostretch: most faint detail,
+                     most noise.
+
+    Both images get the same treatment, since `rgbcomp -lum=` expects
+    comparably-stretched inputs. Parameters are exposed rather than baked
+    in because this is the step meant to be tuned interactively at a
+    checkpoint -- but unlike the previous hand-picked GHT defaults, these
+    adapt to the data instead of assuming a background of zero.
     """
     lum_path = Path(lum_path)
     rgb_path = Path(rgb_path)
     work_dir = Path(work_dir)
 
-    lum_log = ght_stretch(lum_path, work_dir, strength=lum_strength, weighting=None)
-    rgb_log = ght_stretch(rgb_path, work_dir, strength=rgb_strength, weighting="human")
+    def apply(path: Path) -> SirilResult:
+        if method == "autostretch":
+            return auto_stretch(path, work_dir, shadows_clip, target_background, siril_cli=siril_cli)
+        if method == "autoghs":
+            return auto_ghs_stretch(path, work_dir, shadows_clip, ghs_strength, siril_cli=siril_cli)
+        if method == "autoghs+auto":
+            auto_ghs_stretch(path, work_dir, shadows_clip, ghs_strength, siril_cli=siril_cli)
+            return auto_stretch(path, work_dir, shadows_clip, target_background, siril_cli=siril_cli)
+        raise ValueError(
+            f"Unknown stretch method {method!r}; expected 'autostretch', 'autoghs' or 'autoghs+auto'."
+        )
+
+    lum_log = apply(lum_path)
+    rgb_log = apply(rgb_path)
 
     composite_path, compose_log = rgbcomp_lum(lum_path, rgb_path, output_stem, work_dir, siril_cli=siril_cli)
 

@@ -15,7 +15,7 @@ LIGHT_NAME = "raw-T24-kaveh096-M51-20250123-021344-Blue-BIN2-E-300-001.fit"
 BIAS_NAME = "T24-kaveh096-Bias-000-LD20250203-LT171434-BIN1.fit"
 DARK_NAME = "T24-kaveh096-Dark-300-LD20250203-LT155037-BIN1.fit"
 
-REAL_SESSION_DIR = Path(r"C:\Users\Kaveh\Desktop\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
+from conftest import PROJECT_DIR as REAL_SESSION_DIR
 
 
 def touch(tmp_path: Path, name: str) -> Path:
@@ -141,6 +141,28 @@ def test_scan_session_groups_lights_by_telescope_target_filter_binning(tmp_path:
     blue_key = ("T24", "kaveh096", "M51", "Blue", 2)
     assert len(groups[lum_key]) == 2
     assert len(groups[blue_key]) == 1
+
+
+def test_scan_ignores_pipeline_generated_output(tmp_path: Path) -> None:
+    """The pipeline writes into <project>/_pipeline/, which sits inside the
+    scanned tree. Without an exclusion a second run re-ingests its own
+    staged copies and calibrated output as if they were new raw frames --
+    verified real: a re-run counted 26 lights for a 13-light group.
+    """
+    touch(tmp_path, "raw-T24-kaveh096-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
+
+    generated = tmp_path / "_pipeline" / "T24-kaveh096-M51-Luminance-bin1" / "lights"
+    generated.mkdir(parents=True)
+    # A staged copy of the same raw frame, plus a calibrated derivative --
+    # both would classify happily if they were not excluded.
+    (generated / "raw-T24-kaveh096-M51-20250115-045740-Luminance-BIN1-E-300-001.fit").write_bytes(b"")
+    (generated / "pp_lights_00001.fit").write_bytes(b"")
+
+    report = scan_session(tmp_path)
+
+    assert len(report.lights) == 1
+    assert "_pipeline" not in report.lights[0].path.parts
+    assert report.unrecognized == []
 
 
 def test_light_groups_keeps_different_users_separate(tmp_path: Path) -> None:

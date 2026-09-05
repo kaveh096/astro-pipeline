@@ -38,13 +38,10 @@ requires_graxpert = pytest.mark.skipif(not GRAXPERT_AVAILABLE, reason="GraXpert 
 # silently produced a >99.9%-exact-zero background that broke GraXpert with
 # 100% NaN output and no error; this fixture must always come from a
 # pedestal-corrected build, not a bare rgbcomp of raw masters).
-REAL_RGB_COMPOSITE = Path(
-    r"C:\Users\Kaveh\AppData\Local\Temp\claude\C--dev-astro-pipeline"
-    r"\030735e3-fa3c-4002-a37d-180b9f73ef2a\scratchpad\revalidate\final\rgb_composite.fit"
-)
-requires_real_composite = pytest.mark.skipif(
-    not REAL_RGB_COMPOSITE.exists(), reason="Real RGB composite not present on this machine"
-)
+from conftest import RGB_NATIVE as REAL_RGB_COMPOSITE
+from conftest import requires
+
+requires_real_composite = requires(REAL_RGB_COMPOSITE)
 
 
 def make_result(log_lines: list[str]) -> SirilResult:

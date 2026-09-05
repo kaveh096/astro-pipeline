@@ -34,6 +34,7 @@ valid (0% NaN) output.
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -163,20 +164,42 @@ def calibrate_lights(
     stage_dir = Path(work_dir) / basename
     stage_frames([f.path for f in light_frames], stage_dir)
 
-    # Siril's -bias=/-dark=/-flat= want the path WITHOUT extension (it
-    # searches for "<path>.[any_allowed_extension]" itself, same convention
-    # as stack's -out=) -- verified empirically, confirmed by the exact
-    # error message Siril gives when the extension is included.
+    # Masters are COPIED into the sequence's own directory and referenced by
+    # bare name rather than by absolute path. Siril's .ssf parser splits
+    # arguments on whitespace, so any absolute path containing a space is
+    # truncated at the first one -- verified real, and not hypothetical: the
+    # project folder this pipeline runs against is named
+    # "M51 - Whirlpool galaxy - T24 & T21 - Jan 2025", which broke
+    # `-bias=<abs path>` with "C:\Users\Kaveh\Desktop\M51.[any_allowed_
+    # extension] not found". Staging also dodges the ampersand in that same
+    # folder name.
+    #
+    # CRITICAL ordering: `convert` ingests *every* supported image in the
+    # working directory, so the masters must NOT be present when it runs --
+    # otherwise they are swept into the light sequence itself. Verified
+    # real: staging them up-front made frame #1 of the sequence a
+    # calibrated bias frame, and registration died with "Found 0 stars in
+    # reference". Hence two separate Siril invocations: build the sequence
+    # first, stage the masters second, calibrate third.
+    #
+    # The extension is stripped in the arguments: Siril appends its own, and
+    # passing one yields "<path>.fit.[any_allowed_extension] not found".
     seq = sequence_name(basename)
-    command = (
-        f"calibrate {seq} -bias={master_bias.with_suffix('')} "
-        f"-dark={master_dark.with_suffix('')} -cc=dark"
-    )
+    run_script([f"convert {basename}"], workdir=stage_dir, script_name="convert.ssf")
+
+    staged_bias = stage_dir / "masterbias.fit"
+    staged_dark = stage_dir / "masterdark.fit"
+    shutil.copy2(master_bias, staged_bias)
+    shutil.copy2(master_dark, staged_dark)
+
+    command = f"calibrate {seq} -bias={staged_bias.stem} -dark={staged_dark.stem} -cc=dark"
     if master_flat is not None:
-        command += f" -flat={master_flat.with_suffix('')}"
+        staged_flat = stage_dir / "masterflat.fit"
+        shutil.copy2(master_flat, staged_flat)
+        command += f" -flat={staged_flat.stem}"
     command += " -prefix=pp_"
 
-    run_script([f"convert {basename}", command], workdir=stage_dir)
+    run_script([command], workdir=stage_dir, script_name="calibrate.ssf")
 
     calibrated = sorted(stage_dir.glob(f"pp_{seq}*.fit*"))
     if not calibrated:

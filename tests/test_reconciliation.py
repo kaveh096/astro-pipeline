@@ -18,16 +18,11 @@ from astro_pipeline.reconciliation import (
 # avoid repeating the several-minutes calibrate->register->stack->solve
 # chain, which is independently tested elsewhere (test_registration_stacking.py,
 # test_solving.py).
-SCRATCH_DIR = Path(
-    r"C:\Users\Kaveh\AppData\Local\Temp\claude\C--dev-astro-pipeline"
-    r"\030735e3-fa3c-4002-a37d-180b9f73ef2a\scratchpad\recon_test"
-)
-REAL_LUM_MASTER = SCRATCH_DIR / "lum" / "lights" / "master_lum.fit"
-REAL_RED_MASTER = SCRATCH_DIR / "red" / "lights" / "master_red.fit"
-requires_real_masters = pytest.mark.skipif(
-    not (REAL_LUM_MASTER.exists() and REAL_RED_MASTER.exists()),
-    reason="Real solved masters not present on this machine (see recon_test scratch dir)",
-)
+from conftest import LUM_MASTER as REAL_LUM_MASTER
+from conftest import RED_MASTER as REAL_RED_MASTER
+from conftest import requires
+
+requires_real_masters = requires(REAL_LUM_MASTER, REAL_RED_MASTER)
 
 
 def make_solved_fits(tmp_path: Path, name: str, shape: tuple[int, int], pixel_scale_deg: float) -> Path:

@@ -26,6 +26,7 @@ from .ingest import (
     _infer_telescope_from_path,
     classify_filename,
     classify_frame,
+    is_generated,
 )
 
 FITS_EXTENSIONS = (".fit", ".fits", ".fts")
@@ -120,12 +121,17 @@ def _scan_zip(zip_path: Path, index: TreeIndex) -> None:
 
 
 def build_index(root: str | Path) -> TreeIndex:
-    """Walk the entire tree under root and classify every file."""
+    """Walk the entire tree under root and classify every file.
+
+    Skips the pipeline's own generated-output directory -- indexing it
+    would catalogue staged copies and intermediates as if they were part
+    of the raw delivery (see ingest.is_generated).
+    """
     root = Path(root)
     index = TreeIndex(root=root)
 
     for path in root.rglob("*"):
-        if not path.is_file():
+        if not path.is_file() or is_generated(path, root):
             continue
         suffix = path.suffix.lower()
 

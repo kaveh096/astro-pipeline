@@ -52,6 +52,13 @@ from astropy.io import fits
 
 FIT_GLOB_PATTERNS = ("*.fit", "*.fits", "*.fts")
 
+# Directory (inside a project folder) holding pipeline-generated data. Must
+# never be scanned as input -- see is_generated(). Kept as a literal here
+# rather than imported from workspace.py to avoid a circular import;
+# workspace.PIPELINE_DIRNAME is the same value and the two are asserted
+# equal in the tests.
+GENERATED_DIRNAME = "_pipeline"
+
 _TELESCOPE_DIR_RE = re.compile(r"^T\d+$", re.IGNORECASE)
 
 
@@ -318,13 +325,32 @@ def classify_frame(path: Path) -> LightFrame | CalibrationFrame | UnrecognizedFr
     return UnrecognizedFrame(path=path, reason="Filename and FITS header both unrecognized.")
 
 
+def is_generated(path: Path, root: Path) -> bool:
+    """True if `path` lives under a generated-output directory.
+
+    The pipeline writes its intermediates into `<project>/_pipeline/`, which
+    sits INSIDE the directory being scanned. Without this exclusion a second
+    run re-discovers its own staged copies of the raw frames and treats them
+    as additional raw data -- verified real and badly wrong, not theoretical:
+    a re-run reported "26 lights (10 bias, 10 dark)" for a group that has
+    exactly 13 lights, 5 bias and 5 dark, because every staged copy was
+    counted a second time. Calibrated (`pp_`) and registered (`r_`) outputs
+    would likewise be fed back in as if they were unprocessed subs.
+    """
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    return GENERATED_DIRNAME in relative.parts
+
+
 def scan_session(root: str | Path) -> IngestReport:
     root = Path(root)
     report = IngestReport()
     seen: set[Path] = set()
     for pattern in FIT_GLOB_PATTERNS:
         for path in root.rglob(pattern):
-            if path in seen:
+            if path in seen or is_generated(path, root):
                 continue
             seen.add(path)
             classified = classify_frame(path)
