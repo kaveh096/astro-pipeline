@@ -1,8 +1,27 @@
 """Stages 6-7: color calibration (PCC) and background extraction (GraXpert).
 
-CORRECTED FINDING (supersedes an earlier, wrong conclusion from this same
-investigation): **order does not matter**. PCC and GraXpert were both
-re-tested, in both orders, on real data -- all four combinations succeed.
+THE ACTUAL RULE, arrived at over three wrong turns: **PCC requires
+NaN-free input.** Everything else about ordering follows from that, and
+nothing else about ordering matters.
+
+The wrong turns are worth recording, because each looked convincing:
+
+  1. "PCC must run before GraXpert" -- concluded when PCC failed on
+     GraXpert's output. The real cause was that GraXpert's output was 100%
+     NaN (from a background clipped to exact zero upstream), and PCC was
+     correctly refusing to do photometry on garbage.
+  2. "Order does not matter" -- concluded after fixing that, when PCC then
+     succeeded in both orders. True for that data, but only because it
+     happened to be NaN-free by then.
+  3. Both were symptoms of the same underlying constraint, which only
+     became visible when NaN was reintroduced deliberately: PCC dies with
+     "Error computing FWHM for photometry settings adjustment" the moment
+     any NaN is present, at a fraction as small as 0.27%.
+
+Siril tolerates NaN perfectly well in stretching and compositing. It is
+specifically star photometry that cannot. So the invariant to preserve is
+that whatever reaches PCC has no NaN in it -- see the nan-filling in
+run_graxpert_background_extraction, and why `restore_nan` defaults to off.
 An earlier test run concluded "PCC must run before GraXpert" because PCC
 failed on GraXpert's output, but that failure's real cause was a upstream
 data-corruption bug (see calibration.py's `pedestal` parameter): Siril's
@@ -67,6 +86,32 @@ class ColorCalibrationError(RuntimeError):
         self.result = result
 
 
+class CatalogueUnavailableError(ColorCalibrationError):
+    """PCC's online star catalogue could not be reached.
+
+    Distinguished from a genuine colour-calibration failure because the fix
+    is completely different: nothing is wrong with the data, the pipeline,
+    or the parameters. Siril queries VizieR over the network for reference
+    star photometry, and that server can be down, or can rate-limit a burst
+    of requests -- seen for real as HTTP 403 after several pipeline reruns
+    in quick succession. Retrying later usually works; installing Siril's
+    local Gaia extract removes the dependency for good.
+    """
+
+
+_CATALOGUE_FAILURE_MARKERS = (
+    "server unreachable",
+    "unable to retrieve the remote catalogue",
+    "catalog error, no stars identified",
+    "cannot create catalogue file",
+)
+
+
+def _is_catalogue_unavailable(log_text: str) -> bool:
+    lowered = log_text.lower()
+    return any(marker in lowered for marker in _CATALOGUE_FAILURE_MARKERS)
+
+
 class BackgroundExtractionError(RuntimeError):
     pass
 
@@ -124,6 +169,16 @@ def run_pcc(
             rgb_composite_path, ["pcc"], work_dir, siril_cli=siril_cli
         )
     except SirilError as exc:
+        log_text = "\n".join(exc.result.log_lines) if exc.result else ""
+        if _is_catalogue_unavailable(log_text):
+            raise CatalogueUnavailableError(
+                "PCC could not reach its online star catalogue (VizieR returned an "
+                "error or was unreachable). This is an external outage or rate limit, "
+                "not a problem with the data or the pipeline -- retrying later usually "
+                "works. To remove the dependency entirely, install Siril's local Gaia "
+                "extract via its Catalog_Installer.py script, which also enables SPCC.",
+                exc.result,
+            ) from exc
         raise ColorCalibrationError(
             f"PCC failed on {rgb_composite_path.name}: {exc}", exc.result
         ) from exc
@@ -139,6 +194,7 @@ def run_graxpert_background_extraction(
     correction: str = "Subtraction",
     gpu: bool = True,
     timeout: float | None = 300,
+    restore_nan: bool = False,
 ) -> Path:
     """Run GraXpert's AI background extraction. GraXpert always appends
     '.fits' to whatever -output value is given -- output_stem must be a
@@ -149,6 +205,27 @@ def run_graxpert_background_extraction(
     output_dir = fits_path.parent
     output_path = output_dir / f"{output_stem}.fits"
 
+    # GraXpert cannot tolerate ANY NaN in its input: feeding it a frame that
+    # was 0.27% NaN (harmless edge slivers left by reprojecting one channel
+    # onto another's grid) produced 100% NaN output, silently, exit code 0.
+    # So NaN is filled with the frame's own median before the call and
+    # restored afterwards -- the filled pixels carry no real data either
+    # way, but keeping them NaN downstream preserves the honest "no data"
+    # marker instead of inventing background there.
+    source_data = fits.getdata(fits_path, memmap=False)
+    nan_mask = ~np.isfinite(source_data)
+    filled_path = fits_path
+    if nan_mask.any():
+        data, header = fits.getdata(fits_path, header=True, memmap=False)
+        fill_value = float(np.nanmedian(data))
+        filled_path = output_dir / f"{fits_path.stem}__nanfilled.fit"
+        fits.writeto(
+            filled_path,
+            np.where(nan_mask, fill_value, data).astype(np.float32),
+            header=header,
+            overwrite=True,
+        )
+
     proc = subprocess.run(
         [
             str(exe),
@@ -157,7 +234,7 @@ def run_graxpert_background_extraction(
             "-smoothing", str(smoothing),
             "-correction", correction,
             "-gpu", "true" if gpu else "false",
-            str(fits_path),
+            str(filled_path),
         ],
         cwd=output_dir,
         capture_output=True,
@@ -168,28 +245,45 @@ def run_graxpert_background_extraction(
         errors="replace",
         timeout=timeout,
     )
+    if filled_path != fits_path:
+        filled_path.unlink(missing_ok=True)
+
     if not output_path.exists():
         raise BackgroundExtractionError(
             f"GraXpert did not produce {output_path.name} (exit code {proc.returncode}). "
             "stdout tail:\n" + "\n".join(proc.stdout.splitlines()[-20:])
         )
 
-    # File existing is not sufficient -- verified real: GraXpert can exit 0
-    # and write a fully-formed FITS file that is 100% NaN, with no error
-    # beyond a "divide by zero" warning that also appears on healthy runs.
-    # Root cause was upstream (calibration-stage background clipped to
-    # exact zero by Siril's stack output, see calibration.py's pedestal
-    # parameter) but this check exists so ANY future cause of the same
-    # failure mode is caught here, not discovered accidentally three
-    # stages later.
-    output_data = fits.getdata(output_path)
+    # File existing is not sufficient -- verified real, twice, from two
+    # different causes: GraXpert exits 0 and writes a fully-formed FITS file
+    # that is 100% NaN, with no error beyond a "divide by zero" warning that
+    # also appears on healthy runs. (Causes seen so far: a background
+    # clipped to exact zero upstream, see calibration.py's pedestal; and any
+    # NaN at all in the input, handled above.)
+    output_data = fits.getdata(output_path, memmap=False)
     nan_fraction = float(np.isnan(output_data).sum()) / output_data.size
     if nan_fraction > 0.5:
         raise BackgroundExtractionError(
             f"GraXpert produced {output_path.name} but {nan_fraction:.1%} of pixels are NaN "
-            "-- treating this as a failure, not a degraded success. Common cause: input "
-            "background clipped to exact zero upstream (see calibration.py pedestal)."
+            "-- treating this as a failure, not a degraded success."
         )
+
+    # Optionally put the input's no-data regions back. Off by default,
+    # because the immediate downstream consumer is PCC, and Siril's star
+    # photometry cannot handle NaN either -- restoring it here made PCC fail
+    # with "Error computing FWHM for photometry settings adjustment", the
+    # same symptom that was previously (and wrongly) read as evidence that
+    # background extraction had to run *after* colour calibration.
+    #
+    # Siril tolerates NaN fine in stretching and compositing; it is
+    # specifically photometry that cannot. So the no-data slivers stay
+    # filled with background through PCC, and genuine NaN reappears later
+    # when the colour image is reprojected onto L's grid.
+    if restore_nan and nan_mask.any():
+        data, header = fits.getdata(output_path, header=True, memmap=False)
+        data = np.where(nan_mask, np.nan, data).astype(np.float32)
+        fits.writeto(output_path, data, header=header, overwrite=True)
+
     return output_path
 
 

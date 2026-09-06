@@ -128,3 +128,97 @@ def test_reconcile_masters_picks_luminance_as_reference(tmp_path: Path) -> None:
     assert red in results
     assert lum not in results
     assert results[red].output_path.exists()
+
+
+def test_reprojection_aligns_masters_to_a_common_pointing(tmp_path: Path) -> None:
+    """Regression guard for real colour fringing.
+
+    Filters are registered independently, so their masters do not share a
+    pointing -- measured on real data, Green sat 8.8px from Red and Blue
+    4.4px, against a stellar FWHM of only ~5-9px. `rgbcomp` stacks channels
+    without aligning them, so that offset became visible red/green fringing
+    on every star. Reprojecting onto a common reference must collapse it.
+    """
+    import numpy as np
+    from astropy.wcs import WCS
+
+    def solved(name: str, crval1: float, crval2: float) -> Path:
+        path = tmp_path / name
+        data = np.zeros((128, 128), dtype=np.float32)
+        data[60:68, 60:68] = 1.0
+        header = fits.Header()
+        header["CTYPE1"], header["CTYPE2"] = "RA---TAN", "DEC--TAN"
+        header["CRPIX1"] = header["CRPIX2"] = 64.0
+        header["CRVAL1"], header["CRVAL2"] = crval1, crval2
+        header["CDELT1"], header["CDELT2"] = -0.001, 0.001
+        fits.writeto(path, data, header=header, overwrite=True)
+        return path
+
+    # Same field, but the second master points 5 pixels (0.005 deg) away.
+    reference = solved("ref.fit", 202.4696, 47.1953)
+    offset = solved("offset.fit", 202.4696, 47.1953 + 0.005)
+
+    def pixel_of_target(path: Path) -> tuple[float, float]:
+        wcs = WCS(fits.getheader(path)).celestial
+        x, y = wcs.world_to_pixel_values(202.4696, 47.1953)
+        return float(x), float(y)
+
+    before = np.hypot(*np.subtract(pixel_of_target(offset), pixel_of_target(reference)))
+    assert before > 3, "fixture should start misaligned"
+
+    aligned = tmp_path / "aligned.fit"
+    reproject_to_reference(offset, reference, aligned)
+
+    after = np.hypot(*np.subtract(pixel_of_target(aligned), pixel_of_target(reference)))
+    assert after < 0.01, f"still misaligned by {after:.3f}px after reprojection"
+
+
+def _wedge_fits(path: Path, wedge: float) -> Path:
+    """Same-grid frame with a rotated wedge of NaN along one edge -- the
+    shape reprojection actually produces, since it applies a small
+    rotation."""
+    data = np.ones((200, 200), dtype=np.float32)
+    if wedge:
+        ys, xs = np.mgrid[0:200, 0:200]
+        data[(ys + xs * 0.05) < wedge] = np.nan
+    header = fits.Header()
+    header["CRPIX1"] = header["CRPIX2"] = 100.0
+    fits.writeto(path, data, header=header, overwrite=True)
+    return path
+
+
+def test_crop_to_common_coverage_removes_all_nan(tmp_path: Path) -> None:
+    """A first attempt kept only rows/columns that were valid across their
+    full span. Because the invalid region is a diagonal wedge rather than a
+    clean border, no row qualified and it cropped to nothing. The greedy
+    edge trim must actually converge on a clean box."""
+    from astro_pipeline.reconciliation import crop_to_common_coverage
+
+    paths = [
+        _wedge_fits(tmp_path / "a.fit", 0),
+        _wedge_fits(tmp_path / "b.fit", 4),
+        _wedge_fits(tmp_path / "c.fit", 8),
+    ]
+    outputs = crop_to_common_coverage(paths, tmp_path / "cropped")
+
+    shapes = set()
+    for out in outputs:
+        data = fits.getdata(out, memmap=False)
+        assert not np.isnan(data).any(), f"{out.name} still contains NaN"
+        shapes.add(data.shape)
+    assert len(shapes) == 1, "channels must stay dimensionally identical for rgbcomp"
+
+
+def test_crop_to_common_coverage_updates_wcs_reference_pixel(tmp_path: Path) -> None:
+    """Cropping moves the reference pixel; without updating CRPIX the WCS
+    would silently describe the wrong part of the sky."""
+    from astro_pipeline.reconciliation import crop_to_common_coverage
+
+    paths = [_wedge_fits(tmp_path / "a.fit", 0), _wedge_fits(tmp_path / "b.fit", 8)]
+    outputs = crop_to_common_coverage(paths, tmp_path / "cropped")
+
+    original = fits.getheader(paths[0])
+    cropped = fits.getheader(outputs[0])
+    trimmed_rows = original["NAXIS2"] - fits.getdata(outputs[0], memmap=False).shape[0]
+    assert trimmed_rows > 0
+    assert cropped["CRPIX2"] == pytest.approx(original["CRPIX2"] - trimmed_rows)

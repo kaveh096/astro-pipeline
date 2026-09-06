@@ -27,6 +27,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 from astropy.io import fits
 
 from .background_color import run_graxpert_background_extraction, run_pcc
@@ -34,7 +35,7 @@ from .calibration import run_calibration
 from .export_image import ExportResult, export
 from .ingest import scan_session
 from .checkpoints import Checkpoint, checkpoint, save_checkpoints
-from .reconciliation import reproject_to_reference
+from .reconciliation import crop_to_common_coverage, reproject_to_reference
 from .registration_stacking import register_and_stack
 from .siril_driver import run_script
 from .solving import solve
@@ -59,6 +60,36 @@ def _log(message: str, notes: list[str]) -> None:
     notes.append(message)
 
 
+def usable(path: Path, notes: list[str] | None = None) -> bool:
+    """Is an existing stage output actually fit to resume from?
+
+    Resumability that only checks os.path.exists trusts whatever is on disk,
+    and that bit hard: a run interrupted mid-flight left a 100%-NaN
+    background-extraction output behind, and the next run skipped the stage
+    ("already done") and happily fed the garbage forward through three more
+    stages. The guard that would have caught it lived inside the function
+    that was skipped.
+
+    So a skip must be earned: the file has to exist, parse, and contain
+    real data.
+    """
+    path = Path(path)
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        data = fits.getdata(path, memmap=False)
+    except Exception as exc:
+        if notes is not None:
+            _log(f"[stale] {path.name} could not be read ({exc}); will regenerate", notes)
+        return False
+    nan_fraction = float(np.isnan(data).sum()) / data.size
+    if nan_fraction > 0.5:
+        if notes is not None:
+            _log(f"[stale] {path.name} is {nan_fraction:.0%} NaN; will regenerate", notes)
+        return False
+    return True
+
+
 def build_master(
     project_dir: Path,
     report,
@@ -77,7 +108,7 @@ def build_master(
     work_dir = pipeline_dir(project_dir) / name
     master_path = work_dir / "lights" / f"master_{filter_name.lower()}.fit"
 
-    if master_path.exists() and fits.getheader(master_path).get("PLTSOLVD"):
+    if usable(master_path, notes) and fits.getheader(master_path).get("PLTSOLVD"):
         _log(f"[skip] {name}: solved master already present", notes)
         return master_path
 
@@ -134,33 +165,58 @@ def run_lrgb(
 
     # --- colour: composite at native resolution, then background + PCC ---
     rgb_native = final / "rgb_native.fit"
-    if not rgb_native.exists():
-        for filter_name in RGB_FILTERS:
-            shutil.copy2(result.masters[filter_name], final / f"{filter_name.lower()}.fit")
+    if not usable(rgb_native, notes):
+        # Each filter was registered against its OWN reference frame, so the
+        # three masters do not share a pointing -- and `rgbcomp` stacks them
+        # straight into R/G/B channels without aligning anything. Measured on
+        # this data, Green sat 8.8px from Red and Blue 4.4px, comparable to
+        # the stars' own ~5-9px FWHM, which showed up as red/green fringing
+        # on every star in the checkpoint preview. Reproject the other two
+        # onto Red's grid first so the channels actually correspond.
+        reference = result.masters["Red"]
+        shutil.copy2(reference, final / "red.fit")
+        for filter_name in ("Green", "Blue"):
+            out_path = final / f"{filter_name.lower()}.fit"
+            recon = reproject_to_reference(result.masters[filter_name], reference, out_path)
+            _log(
+                f"[run ] aligned {filter_name} onto Red's grid "
+                f"(footprint {recon.footprint_mean:.3f})",
+                notes,
+            )
+        # Crop away the slivers alignment left uncovered rather than filling
+        # them -- a constant fill is visible to GraXpert's background model
+        # and produced a green band across the finished image. See
+        # crop_to_common_coverage.
+        channel_paths = [final / f"{f.lower()}.fit" for f in RGB_FILTERS]
+        crop_to_common_coverage(channel_paths, final)
+        cropped_shape = fits.getdata(channel_paths[0], memmap=False).shape
+        _log(f"[run ] cropped channels to common coverage {cropped_shape}", notes)
+
         _log("[run ] rgbcomp at native resolution", notes)
         run_script(["rgbcomp red green blue -out=rgb_native"], workdir=final)
     else:
         _log("[skip] rgb_native.fit already present", notes)
 
     rgb_bg = final / "rgb_native_bg.fits"
-    if not rgb_bg.exists():
+    if not usable(rgb_bg, notes):
         _log("[run ] GraXpert background extraction on RGB", notes)
         rgb_bg = run_graxpert_background_extraction(rgb_native, output_stem="rgb_native_bg")
     else:
         _log("[skip] RGB background extraction already done", notes)
 
     pcc_marker = final / "rgb_pcc.fit"
-    if not pcc_marker.exists():
+    if not usable(pcc_marker, notes):
         shutil.copy2(rgb_bg, pcc_marker)
         _log("[run ] PCC colour calibration", notes)
         pcc = run_pcc(pcc_marker, final)
         _log(f"       PCC used {pcc.stars_used} stars, white balance {pcc.white_balance}", notes)
+
     else:
         _log("[skip] PCC already done", notes)
 
     # --- luminance: background extraction --------------------------------
     lum_bg = final / "lum_bg.fits"
-    if not lum_bg.exists():
+    if not usable(lum_bg, notes):
         shutil.copy2(result.masters[LUMINANCE_FILTER], final / "lum.fit")
         _log("[run ] GraXpert background extraction on L", notes)
         lum_bg = run_graxpert_background_extraction(final / "lum.fit", output_stem="lum_bg")
@@ -169,7 +225,7 @@ def run_lrgb(
 
     # --- reproject colour up onto L's grid -------------------------------
     rgb_reconciled = final / "rgb_reconciled.fit"
-    if not rgb_reconciled.exists():
+    if not usable(rgb_reconciled, notes):
         _log("[run ] reprojecting colour onto L's pixel grid", notes)
         recon = reproject_to_reference(pcc_marker, lum_bg, rgb_reconciled)
         _log(f"       footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f}", notes)
@@ -178,7 +234,7 @@ def run_lrgb(
 
     # --- stretch + LRGB composition --------------------------------------
     composite = final / "lrgb_final.fit"
-    if not composite.exists():
+    if not usable(composite, notes):
         lum_in = final / "lum_for_compose.fit"
         rgb_in = final / "rgb_for_compose.fit"
         shutil.copy2(lum_bg, lum_in)

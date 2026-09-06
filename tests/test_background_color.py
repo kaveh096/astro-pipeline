@@ -184,3 +184,33 @@ def test_pcc_works_both_before_and_after_background_extraction(tmp_path: Path) -
     assert_valid_pixel_data(bg_output)
     pcc_after = run_pcc(bg_output, tmp_path)
     assert pcc_after.stars_used is not None and pcc_after.stars_used > 50
+
+
+def test_catalogue_outage_is_distinguished_from_a_real_failure() -> None:
+    """Siril fetches PCC's reference photometry from VizieR over the
+    network. That server returned HTTP 403 mid-session after several
+    pipeline reruns in quick succession -- an outage or rate limit, not a
+    data problem. It must not look like a colour-calibration failure,
+    because the fix is entirely different."""
+    from astro_pipeline.background_color import _is_catalogue_unavailable
+
+    outage = (
+        "Contacting server\n"
+        "Server unreachable or unresponsive (HTTP code 403 ...)\n"
+        "Error: unable to retrieve the remote catalogue from the server at ...\n"
+        "Catalog error, no stars identified!"
+    )
+    assert _is_catalogue_unavailable(outage)
+
+
+def test_genuine_pcc_failure_is_not_mistaken_for_an_outage() -> None:
+    """The real photometry failure seen on NaN input must still surface as
+    an ordinary colour-calibration error."""
+    from astro_pipeline.background_color import _is_catalogue_unavailable
+
+    real_failure = (
+        "Findstar: processing for channel 0...\n"
+        "Error computing FWHM for photometry settings adjustment\n"
+        "Script execution failed."
+    )
+    assert not _is_catalogue_unavailable(real_failure)

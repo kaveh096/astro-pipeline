@@ -172,6 +172,86 @@ def reproject_to_reference(
     )
 
 
+def crop_to_common_coverage(paths: list[Path], output_dir: str | Path) -> list[Path]:
+    """Crop a set of same-grid images to the region all of them cover.
+
+    Aligning channels by reprojection leaves NaN slivers wherever one
+    channel does not reach. Padding those instead (filling with a constant
+    so downstream tools cope) is worse than it looks: the fill is visible to
+    GraXpert's background model, which then fits a subtly wrong background
+    over a much wider region than the sliver itself. On real data that
+    produced a green excess of only 0.0002 in the reconciled colour image --
+    invisible at that stage -- which the shadow-clipped stretch then
+    amplified into a conspicuous green band across the bottom of the final
+    composite. Restoring NaN after the fact does not help, because the
+    damage is in the fitted background, not in the filled pixels.
+
+    Cropping avoids the problem entirely: every remaining pixel has real
+    data in every channel. The cost is a few pixels at the frame edge,
+    which registration dithering has already made the least reliable part
+    of the image.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    arrays = [fits.getdata(Path(p), memmap=False) for p in paths]
+    valid = np.ones(arrays[0].shape[-2:], dtype=bool)
+    for data in arrays:
+        plane = np.all(np.isfinite(data), axis=0) if data.ndim == 3 else np.isfinite(data)
+        valid &= plane
+
+    # Trim greedily from whichever edge currently carries the most invalid
+    # pixels, until the box is clean. A simpler "keep fully-valid rows and
+    # columns" rule does not work here: reprojection applies a small
+    # rotation, so the invalid region is a thin diagonal wedge and NO row
+    # spans the full width validly -- that rule rejected every row and
+    # cropped to nothing.
+    ny, nx = valid.shape
+    y0, y1, x0, x1 = 0, ny, 0, nx
+    max_trim = 0.25  # refuse to eat more than a quarter of either axis
+    while True:
+        box = valid[y0:y1, x0:x1]
+        if box.all():
+            break
+        if (y1 - y0) < ny * (1 - max_trim) or (x1 - x0) < nx * (1 - max_trim):
+            raise ReprojectionError(
+                "Channels overlap too poorly to crop to common coverage "
+                f"(would need to discard more than {max_trim:.0%} of the frame)."
+            )
+        counts = {
+            "top": int((~box[0, :]).sum()),
+            "bottom": int((~box[-1, :]).sum()),
+            "left": int((~box[:, 0]).sum()),
+            "right": int((~box[:, -1]).sum()),
+        }
+        worst = max(counts, key=counts.get)
+        if worst == "top":
+            y0 += 1
+        elif worst == "bottom":
+            y1 -= 1
+        elif worst == "left":
+            x0 += 1
+        else:
+            x1 -= 1
+
+    outputs: list[Path] = []
+    for path, data in zip(paths, arrays):
+        path = Path(path)
+        header = fits.getheader(path).copy()
+        cropped = data[..., y0:y1, x0:x1]
+        # A crop moves the reference pixel; without this the WCS would
+        # silently describe the wrong part of the sky.
+        if "CRPIX1" in header:
+            header["CRPIX1"] = float(header["CRPIX1"]) - x0
+        if "CRPIX2" in header:
+            header["CRPIX2"] = float(header["CRPIX2"]) - y0
+        header["NAXIS1"], header["NAXIS2"] = cropped.shape[-1], cropped.shape[-2]
+        out_path = output_dir / path.name
+        fits.writeto(out_path, np.asarray(cropped, dtype=np.float32), header=header, overwrite=True)
+        outputs.append(out_path)
+    return outputs
+
+
 def reconcile_masters(
     master_paths: list[Path],
     work_dir: str | Path,
