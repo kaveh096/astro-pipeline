@@ -7,6 +7,7 @@ from astropy.io import fits
 
 from astro_pipeline.background_color import (
     BackgroundExtractionError,
+    CatalogueUnavailableError,
     ColorCalibrationError,
     _parse_pcc_result,
     calibrate_color_and_background,
@@ -42,6 +43,27 @@ from conftest import RGB_NATIVE as REAL_RGB_COMPOSITE
 from conftest import requires
 
 requires_real_composite = requires(REAL_RGB_COMPOSITE)
+
+
+
+def skip_if_catalogue_down(fn):
+    """PCC fetches reference photometry from VizieR over the network. When
+    that server is down or rate-limiting (seen for real as HTTP 403), these
+    tests are measuring a third party's uptime rather than this code, so
+    they skip instead of reporting the pipeline as broken. A genuine
+    colour-calibration failure still fails, because it raises the base
+    ColorCalibrationError rather than CatalogueUnavailableError.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except CatalogueUnavailableError as exc:
+            pytest.skip(f"online star catalogue unavailable: {exc}")
+
+    return wrapper
 
 
 def make_result(log_lines: list[str]) -> SirilResult:
@@ -140,6 +162,7 @@ def test_run_graxpert_raises_on_degenerate_nan_output(tmp_path: Path, monkeypatc
 @requires_siril
 @requires_graxpert
 @requires_real_composite
+@skip_if_catalogue_down
 def test_calibrate_color_and_background_real_composite(tmp_path: Path) -> None:
     staged = tmp_path / "rgb_composite.fit"
     shutil.copy2(REAL_RGB_COMPOSITE, staged)
@@ -164,6 +187,7 @@ def test_calibrate_color_and_background_real_composite(tmp_path: Path) -> None:
 @requires_siril
 @requires_graxpert
 @requires_real_composite
+@skip_if_catalogue_down
 def test_pcc_works_both_before_and_after_background_extraction(tmp_path: Path) -> None:
     """Corrects an earlier, wrong conclusion from this same investigation:
     a first pass found "PCC after GraXpert fails" and concluded the order
