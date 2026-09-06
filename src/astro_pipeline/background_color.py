@@ -1,53 +1,43 @@
-"""Stages 6-7: color calibration (PCC) and background extraction (GraXpert).
+"""Stages 6-7: color calibration (SPCC) and background extraction (GraXpert).
 
-THE ACTUAL RULE, arrived at over three wrong turns: **PCC requires
-NaN-free input.** Everything else about ordering follows from that, and
-nothing else about ordering matters.
+THE ACTUAL RULE, arrived at over three wrong turns: **colour calibration
+requires NaN-free input.** Everything else about ordering follows from
+that, and nothing else about ordering matters. This was discovered using
+PCC (Siril's older, broadband method, since removed from this codebase in
+favour of SPCC -- see docs/colour-calibration-catalogues.md for that
+history) but the constraint is in Siril's star-photometry engine, which
+SPCC also depends on, so it applies just the same.
 
 The wrong turns are worth recording, because each looked convincing:
 
-  1. "PCC must run before GraXpert" -- concluded when PCC failed on
-     GraXpert's output. The real cause was that GraXpert's output was 100%
-     NaN (from a background clipped to exact zero upstream), and PCC was
-     correctly refusing to do photometry on garbage.
-  2. "Order does not matter" -- concluded after fixing that, when PCC then
+  1. "Colour calibration must run before GraXpert" -- concluded when it
+     failed on GraXpert's output. The real cause was that GraXpert's
+     output was 100% NaN (from a background clipped to exact zero
+     upstream), and photometry was correctly refusing to run on garbage.
+  2. "Order does not matter" -- concluded after fixing that, when it then
      succeeded in both orders. True for that data, but only because it
      happened to be NaN-free by then.
   3. Both were symptoms of the same underlying constraint, which only
-     became visible when NaN was reintroduced deliberately: PCC dies with
+     became visible when NaN was reintroduced deliberately: it dies with
      "Error computing FWHM for photometry settings adjustment" the moment
      any NaN is present, at a fraction as small as 0.27%.
 
 Siril tolerates NaN perfectly well in stretching and compositing. It is
 specifically star photometry that cannot. So the invariant to preserve is
-that whatever reaches PCC has no NaN in it -- see the nan-filling in
+that whatever reaches SPCC has no NaN in it -- see the nan-filling in
 run_graxpert_background_extraction, and why `restore_nan` defaults to off.
-An earlier test run concluded "PCC must run before GraXpert" because PCC
-failed on GraXpert's output, but that failure's real cause was a upstream
-data-corruption bug (see calibration.py's `pedestal` parameter): Siril's
-stack output was clipping a slightly-negative-on-average background to
-exact 0.0, leaving >99.9% of the master exactly zero with only star peaks
-nonzero. GraXpert's background model silently produced 100% NaN output on
-that degenerate input (no error, no warning beyond a "divide by zero" that
-misleadingly also appears on healthy runs) -- and PCC then, correctly,
+The root cause behind wrong turn #1 was actually upstream (see
+calibration.py's `pedestal` parameter): Siril's stack output was clipping
+a slightly-negative-on-average background to exact 0.0, leaving >99.9% of
+the master exactly zero with only star peaks nonzero. GraXpert's
+background model silently produced 100% NaN output on that degenerate
+input (no error, no warning beyond a "divide by zero" that misleadingly
+also appears on healthy runs) -- and colour calibration then, correctly,
 failed to compute photometry on NaN garbage. Once the pedestal fix
-resolved the root cause, PCC succeeded both before AND after GraXpert
-(226 vs 225 stars used on the same real M51 composite -- also a large
-quality improvement over the 19 stars PCC could find on the old
-zero-clipped data). Background-extraction-first is kept as the *default*
-order here only because it's the more conventional practice (cleaner
-background for star photometry), not because the other order is broken.
-
-SPCC vs PCC: SPCC (Gaia DR3 spectrophotometric) is Siril's more accurate
-method, but needs a local Gaia photometric catalog (~20GB, chunked,
-normally installed via Siril's GUI download manager). Without it, SPCC
-falls back to an online catalog query that crashed outright (access
-violation, 0xC0000005 -- reproduced twice, deterministically) partway
-through aperture photometry on real data. PCC (NOMAD-based) works
-reliably online with no large local catalog. **PCC is the default for
-v1**; SPCC can be revisited if a local Gaia catalog is ever installed
-(tracked as a backlog item -- Kaveh doesn't consider color accuracy a
-priority for a hobby, so this is low urgency).
+resolved the root cause, it succeeded both before AND after GraXpert.
+Background-extraction-first is kept as the *default* order here only
+because it's the more conventional practice (cleaner background for star
+photometry), not because the other order is broken.
 
 GraXpert quirk verified empirically: it always appends '.fits' to
 whatever -output value is given, regardless of any extension already
@@ -87,15 +77,16 @@ class ColorCalibrationError(RuntimeError):
 
 
 class CatalogueUnavailableError(ColorCalibrationError):
-    """PCC's online star catalogue could not be reached.
+    """SPCC's star catalogue could not be read.
 
     Distinguished from a genuine colour-calibration failure because the fix
     is completely different: nothing is wrong with the data, the pipeline,
-    or the parameters. Siril queries VizieR over the network for reference
-    star photometry, and that server can be down, or can rate-limit a burst
-    of requests -- seen for real as HTTP 403 after several pipeline reruns
-    in quick succession. Retrying later usually works; installing Siril's
-    local Gaia extract removes the dependency for good.
+    or the parameters. With `-catalog=localgaia`, this almost always means
+    the local Gaia extract is missing or misconfigured -- see
+    docs/colour-calibration-catalogues.md. (This class predates SPCC: it
+    was written for PCC's online VizieR dependency, which returned HTTP 403
+    for hours during development. PCC has since been removed in favour of
+    SPCC's local catalogue, which has no such outage exposure.)
     """
 
 
@@ -117,7 +108,7 @@ class BackgroundExtractionError(RuntimeError):
 
 
 @dataclass
-class PCCResult:
+class SPCCResult:
     white_balance: tuple[float, float, float] | None
     stars_used: int | None
     log: SirilResult
@@ -132,7 +123,7 @@ def find_graxpert() -> Path:
     )
 
 
-def _parse_pcc_result(result: SirilResult) -> PCCResult:
+def _parse_spcc_result(result: SirilResult) -> SPCCResult:
     text = "\n".join(result.log_lines)
     k_values: dict[int, float] = {}
     for match in re.finditer(r"^K(\d): ([\d.]+)", text, re.MULTILINE):
@@ -144,46 +135,7 @@ def _parse_pcc_result(result: SirilResult) -> PCCResult:
     stars_match = re.search(r"Found a solution for color calibration using (\d+) stars", text)
     stars_used = int(stars_match.group(1)) if stars_match else None
 
-    return PCCResult(white_balance=white_balance, stars_used=stars_used, log=result)
-
-
-def run_pcc(
-    rgb_composite_path: str | Path,
-    work_dir: str | Path,
-    siril_cli: Path | None = None,
-) -> PCCResult:
-    """Run Siril's PCC on an RGB composite (already plate-solved). Verified
-    to work correctly whether called before or after GraXpert background
-    extraction on the same composite -- see module docstring. Raises
-    ColorCalibrationError if Siril's script fails (e.g. too few usable
-    stars) rather than silently reporting a null result.
-    """
-    rgb_composite_path = Path(rgb_composite_path)
-    work_dir = Path(work_dir)
-
-    try:
-        # Temp-save + replace rather than saving onto the loaded stem --
-        # see run_load_process_save's docstring for why in-place saving is
-        # unreliable in Siril.
-        result = run_load_process_save(
-            rgb_composite_path, ["pcc"], work_dir, siril_cli=siril_cli
-        )
-    except SirilError as exc:
-        log_text = "\n".join(exc.result.log_lines) if exc.result else ""
-        if _is_catalogue_unavailable(log_text):
-            raise CatalogueUnavailableError(
-                "PCC could not reach its online star catalogue (VizieR returned an "
-                "error or was unreachable). This is an external outage or rate limit, "
-                "not a problem with the data or the pipeline -- retrying later usually "
-                "works. To remove the dependency entirely, install Siril's local Gaia "
-                "extract via its Catalog_Installer.py script, which also enables SPCC.",
-                exc.result,
-            ) from exc
-        raise ColorCalibrationError(
-            f"PCC failed on {rgb_composite_path.name}: {exc}", exc.result
-        ) from exc
-
-    return _parse_pcc_result(result)
+    return SPCCResult(white_balance=white_balance, stars_used=stars_used, log=result)
 
 
 @dataclass(frozen=True)
@@ -221,21 +173,25 @@ def run_spcc(
     profile: InstrumentProfile = T24_PROFILE,
     catalog: str = "localgaia",
     siril_cli: Path | None = None,
-) -> PCCResult:
+) -> SPCCResult:
     """Run Siril's spectrophotometric colour calibration.
 
-    Preferred over PCC: it reads the LOCAL Gaia extract, so it has no
-    runtime dependency on VizieR (which returned HTTP 403 for hours during
-    development and blocked the pipeline entirely), and it calibrates
-    against modelled spectral response rather than broadband colour.
+    Reads the LOCAL Gaia extract, so it has no runtime dependency on any
+    third-party server, and it calibrates against modelled spectral
+    response rather than broadband colour. (An earlier version of this
+    pipeline used PCC, Siril's broadband method, which depends on VizieR at
+    runtime -- that server returned HTTP 403 for hours during development
+    and blocked the pipeline entirely. PCC has been removed; see
+    docs/colour-calibration-catalogues.md for the comparison that was run
+    before dropping it.)
 
     Requires Siril >= 1.4.4. On 1.4.3 this crashed the process outright
     with an access violation at the aperture-photometry step, regardless of
     catalogue source or sensor/filter configuration; 1.4.4 fixed it,
     despite its changelog not mentioning SPCC.
 
-    Expect far fewer stars than PCC (43 vs 246 on the same M51 data) -- SPCC
-    can only use stars that have Gaia XP sampled spectra, which is a much
+    Expect relatively few stars used -- 43 on real M51/T24 data -- since
+    SPCC can only use stars that have Gaia XP sampled spectra, a much
     smaller population than plain photometry. That is normal, not a sign of
     a coverage gap; verified for this field, which lies entirely inside one
     catalogue chunk even out to 3 degrees.
@@ -262,8 +218,8 @@ def run_spcc(
         if _is_catalogue_unavailable(log_text):
             raise CatalogueUnavailableError(
                 "SPCC could not read its star catalogue. With -catalog=localgaia this "
-                "usually means the local Gaia extract is missing or core."
-                "catalogue_gaia_photo points somewhere wrong -- note Siril expects a "
+                "usually means the local Gaia extract is missing, or "
+                "core.catalogue_gaia_photo points somewhere wrong -- note Siril expects a "
                 "DIRECTORY of chunk files despite the .dat name. See "
                 "docs/colour-calibration-catalogues.md.",
                 exc.result,
@@ -272,8 +228,7 @@ def run_spcc(
             f"SPCC failed on {rgb_composite_path.name}: {exc}", exc.result
         ) from exc
 
-    # SPCC reports its solution in the same format as PCC.
-    return _parse_pcc_result(result)
+    return _parse_spcc_result(result)
 
 
 def run_graxpert_background_extraction(
@@ -359,16 +314,17 @@ def run_graxpert_background_extraction(
         )
 
     # Optionally put the input's no-data regions back. Off by default,
-    # because the immediate downstream consumer is PCC, and Siril's star
-    # photometry cannot handle NaN either -- restoring it here made PCC fail
-    # with "Error computing FWHM for photometry settings adjustment", the
-    # same symptom that was previously (and wrongly) read as evidence that
-    # background extraction had to run *after* colour calibration.
+    # because the immediate downstream consumer is colour calibration
+    # (SPCC), and Siril's star photometry cannot handle NaN either --
+    # restoring it here made colour calibration fail with "Error computing
+    # FWHM for photometry settings adjustment", the same symptom that was
+    # previously (and wrongly) read as evidence that background extraction
+    # had to run *after* colour calibration.
     #
     # Siril tolerates NaN fine in stretching and compositing; it is
     # specifically photometry that cannot. So the no-data slivers stay
-    # filled with background through PCC, and genuine NaN reappears later
-    # when the colour image is reprojected onto L's grid.
+    # filled with background through colour calibration, and genuine NaN
+    # reappears later when the colour image is reprojected onto L's grid.
     if restore_nan and nan_mask.any():
         data, header = fits.getdata(output_path, header=True, memmap=False)
         data = np.where(nan_mask, np.nan, data).astype(np.float32)
@@ -380,14 +336,16 @@ def run_graxpert_background_extraction(
 def calibrate_color_and_background(
     rgb_composite_path: str | Path,
     work_dir: str | Path,
+    profile: InstrumentProfile = T24_PROFILE,
     siril_cli: Path | None = None,
     graxpert_exe: Path | None = None,
-) -> tuple[PCCResult, Path]:
+) -> tuple[SPCCResult, Path]:
     """Orchestrates Stages 6-7: GraXpert background extraction first, then
-    PCC on the result. Both orders are verified to work (see module
-    docstring); background-first is used here as the conventional default
-    (cleaner background for star photometry), not because PCC-first is
-    broken -- swap freely if there's a reason to.
+    SPCC on the result. Both orders are verified to work for colour
+    calibration in general (see module docstring); background-first is
+    used here as the conventional default (cleaner background for star
+    photometry), not because calibration-first is broken -- swap freely if
+    there's a reason to.
     """
     rgb_composite_path = Path(rgb_composite_path)
     work_dir = Path(work_dir)
@@ -398,6 +356,6 @@ def calibrate_color_and_background(
         graxpert_exe=graxpert_exe,
     )
 
-    pcc_result = run_pcc(bg_output, work_dir, siril_cli=siril_cli)
+    spcc_result = run_spcc(bg_output, work_dir, profile=profile, siril_cli=siril_cli)
 
-    return pcc_result, bg_output
+    return spcc_result, bg_output

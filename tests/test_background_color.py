@@ -9,11 +9,11 @@ from astro_pipeline.background_color import (
     BackgroundExtractionError,
     CatalogueUnavailableError,
     ColorCalibrationError,
-    _parse_pcc_result,
+    _parse_spcc_result,
     calibrate_color_and_background,
     find_graxpert,
     run_graxpert_background_extraction,
-    run_pcc,
+    run_spcc,
 )
 from astro_pipeline.siril_driver import SirilResult, find_siril_cli
 
@@ -47,12 +47,13 @@ requires_real_composite = requires(REAL_RGB_COMPOSITE)
 
 
 def skip_if_catalogue_down(fn):
-    """PCC fetches reference photometry from VizieR over the network. When
-    that server is down or rate-limiting (seen for real as HTTP 403), these
-    tests are measuring a third party's uptime rather than this code, so
-    they skip instead of reporting the pipeline as broken. A genuine
-    colour-calibration failure still fails, because it raises the base
-    ColorCalibrationError rather than CatalogueUnavailableError.
+    """SPCC reads its star catalogue from a local Gaia extract. If that
+    extract isn't installed on the machine running the tests (see
+    docs/colour-calibration-catalogues.md), these tests are measuring the
+    test environment's setup rather than this code, so they skip instead
+    of reporting the pipeline as broken. A genuine colour-calibration
+    failure still fails, because it raises the base ColorCalibrationError
+    rather than CatalogueUnavailableError.
     """
     import functools
 
@@ -61,7 +62,7 @@ def skip_if_catalogue_down(fn):
         try:
             return fn(*args, **kwargs)
         except CatalogueUnavailableError as exc:
-            pytest.skip(f"online star catalogue unavailable: {exc}")
+            pytest.skip(f"star catalogue unavailable: {exc}")
 
     return wrapper
 
@@ -83,22 +84,25 @@ def assert_valid_pixel_data(path: Path, max_nan_fraction: float = 0.05) -> None:
     assert valid.std() > 0, f"{path.name} has no real signal (degenerate/constant data)"
 
 
-def test_parse_pcc_result_extracts_white_balance_and_star_count() -> None:
-    # Real log lines captured from an actual PCC run on a real M51 RGB composite.
+def test_parse_spcc_result_extracts_white_balance_and_star_count() -> None:
+    # Real log lines captured from an actual SPCC run on the real M51/T24
+    # RGB composite, using the local Gaia catalogue.
     log_lines = [
-        "Found a solution for color calibration using 226 stars. Factors:",
-        "K0: 0.558\t(deviation: 0.412)",
-        "K1: 0.698\t(deviation: 0.301)",
-        "K2: 1.000\t(deviation: 1.008)",
-        "Photometric Color Calibration succeeded.",
+        "Applying aperture photometry to 73 stars.",
+        "30 stars excluded from the calculation",
+        "Found a solution for color calibration using 43 stars. Factors:",
+        "K0: 0.925",
+        "K1: 0.899",
+        "K2: 1.000",
+        "Spectrophotometric Color Calibration succeeded.",
     ]
-    result = _parse_pcc_result(make_result(log_lines))
-    assert result.white_balance == (0.558, 0.698, 1.000)
-    assert result.stars_used == 226
+    result = _parse_spcc_result(make_result(log_lines))
+    assert result.white_balance == (0.925, 0.899, 1.000)
+    assert result.stars_used == 43
 
 
-def test_parse_pcc_result_handles_missing_data_gracefully() -> None:
-    result = _parse_pcc_result(make_result(["something unrelated"]))
+def test_parse_spcc_result_handles_missing_data_gracefully() -> None:
+    result = _parse_spcc_result(make_result(["something unrelated"]))
     assert result.white_balance is None
     assert result.stars_used is None
 
@@ -167,12 +171,14 @@ def test_calibrate_color_and_background_real_composite(tmp_path: Path) -> None:
     staged = tmp_path / "rgb_composite.fit"
     shutil.copy2(REAL_RGB_COMPOSITE, staged)
 
-    pcc_result, bg_output = calibrate_color_and_background(staged, tmp_path)
+    spcc_result, bg_output = calibrate_color_and_background(staged, tmp_path)
 
-    # PCC must have found a real, non-degenerate solution -- not just "ran".
-    assert pcc_result.white_balance is not None
-    assert pcc_result.stars_used is not None
-    assert pcc_result.stars_used > 50  # real data: 225+ stars on clean input
+    # SPCC must have found a real, non-degenerate solution -- not just "ran".
+    assert spcc_result.white_balance is not None
+    assert spcc_result.stars_used is not None
+    assert spcc_result.stars_used > 20  # real data: 43 stars on clean input --
+    # far fewer than PCC's 225+, since SPCC needs Gaia XP sampled spectra,
+    # a much smaller population than plain broadband photometry.
 
     # GraXpert's output must exist, still carry the WCS solution, AND
     # contain real pixel data -- file-exists/WCS-survives is not sufficient
@@ -188,34 +194,37 @@ def test_calibrate_color_and_background_real_composite(tmp_path: Path) -> None:
 @requires_graxpert
 @requires_real_composite
 @skip_if_catalogue_down
-def test_pcc_works_both_before_and_after_background_extraction(tmp_path: Path) -> None:
+def test_spcc_works_both_before_and_after_background_extraction(tmp_path: Path) -> None:
     """Corrects an earlier, wrong conclusion from this same investigation:
-    a first pass found "PCC after GraXpert fails" and concluded the order
-    was hard-required. Re-tested after fixing the real root cause (see
-    calibration.py's pedestal parameter, which prevents the zero-clipped
-    background that was silently corrupting GraXpert's output to 100%
-    NaN) -- PCC succeeds in BOTH orders on clean data. This test guards
-    against reintroducing the false "order matters" belief.
+    a first pass found "colour calibration after GraXpert fails" and
+    concluded the order was hard-required. Re-tested after fixing the real
+    root cause (see calibration.py's pedestal parameter, which prevents the
+    zero-clipped background that was silently corrupting GraXpert's output
+    to 100% NaN) -- colour calibration succeeds in BOTH orders on clean
+    data. This test guards against reintroducing the false "order matters"
+    belief. (Originally verified with PCC, since removed; the mechanism is
+    Siril's shared photometry engine, so it applies equally to SPCC.)
     """
-    staged_a = tmp_path / "pcc_first.fit"
+    staged_a = tmp_path / "spcc_first.fit"
     shutil.copy2(REAL_RGB_COMPOSITE, staged_a)
-    pcc_before = run_pcc(staged_a, tmp_path)
-    assert pcc_before.stars_used is not None and pcc_before.stars_used > 50
+    spcc_before = run_spcc(staged_a, tmp_path)
+    assert spcc_before.stars_used is not None and spcc_before.stars_used > 20
 
     staged_b = tmp_path / "graxpert_first.fit"
     shutil.copy2(REAL_RGB_COMPOSITE, staged_b)
     bg_output = run_graxpert_background_extraction(staged_b, output_stem="graxpert_first_bg")
     assert_valid_pixel_data(bg_output)
-    pcc_after = run_pcc(bg_output, tmp_path)
-    assert pcc_after.stars_used is not None and pcc_after.stars_used > 50
+    spcc_after = run_spcc(bg_output, tmp_path)
+    assert spcc_after.stars_used is not None and spcc_after.stars_used > 20
 
 
 def test_catalogue_outage_is_distinguished_from_a_real_failure() -> None:
-    """Siril fetches PCC's reference photometry from VizieR over the
-    network. That server returned HTTP 403 mid-session after several
-    pipeline reruns in quick succession -- an outage or rate limit, not a
-    data problem. It must not look like a colour-calibration failure,
-    because the fix is entirely different."""
+    """The marker-detection helper backing CatalogueUnavailableError must
+    recognise a catalogue-access failure (this exact text was captured from
+    a real VizieR HTTP 403, back when PCC depended on it over the network)
+    so a missing/unreachable catalogue is never mistaken for a genuine
+    colour-calibration failure -- the fix for the two is entirely
+    different."""
     from astro_pipeline.background_color import _is_catalogue_unavailable
 
     outage = (
@@ -227,7 +236,7 @@ def test_catalogue_outage_is_distinguished_from_a_real_failure() -> None:
     assert _is_catalogue_unavailable(outage)
 
 
-def test_genuine_pcc_failure_is_not_mistaken_for_an_outage() -> None:
+def test_genuine_calibration_failure_is_not_mistaken_for_an_outage() -> None:
     """The real photometry failure seen on NaN input must still surface as
     an ordinary colour-calibration error."""
     from astro_pipeline.background_color import _is_catalogue_unavailable
@@ -244,9 +253,10 @@ def test_siril_version_meets_spcc_minimum() -> None:
     """SPCC crashes the whole process on Siril 1.4.3 -- an access violation
     at the aperture-photometry step, independent of catalogue source and of
     sensor/filter configuration. 1.4.4 fixed it, with no mention of SPCC in
-    its changelog. Since the pipeline now defaults to SPCC, a downgrade
-    would break colour calibration in a way that looks like a crash rather
-    than an error, so pin the requirement explicitly.
+    its changelog. Since SPCC is now the only colour calibration path (PCC
+    has been removed), a downgrade would break colour calibration in a way
+    that looks like a crash rather than an error, so pin the requirement
+    explicitly.
     """
     import re
     import subprocess

@@ -43,7 +43,7 @@ BLUE_MASTER = _master("Blue", 2)
 # entirely at the calibration pedestal, leaving GHT nothing to work with).
 RGB_NATIVE = FINAL_DIR / "rgb_native.fit"
 RGB_NATIVE_BG = FINAL_DIR / "rgb_native_bg.fits"
-RGB_PCC = FINAL_DIR / "rgb_pcc.fit"
+RGB_COLOUR_CALIBRATED = FINAL_DIR / "rgb_colour_calibrated.fit"
 LUM_BG = FINAL_DIR / "lum_bg.fits"
 RGB_RECONCILED = FINAL_DIR / "rgb_reconciled.fit"
 LRGB_FINAL = FINAL_DIR / "lrgb_final.fit"

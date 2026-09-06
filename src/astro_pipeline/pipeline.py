@@ -10,7 +10,7 @@ Stage order here reflects what was established empirically (see the
 individual modules' docstrings), not the original design sketch:
 
     per filter:  calibrate -> register+stack -> plate solve
-    colour:      rgbcomp at NATIVE resolution -> GraXpert -> PCC
+    colour:      rgbcomp at NATIVE resolution -> GraXpert -> SPCC
     luminance:   GraXpert
     combine:     reproject colour onto L's grid -> GHT both -> rgbcomp -lum
     export:      16-bit TIFF + faithful PNG preview
@@ -18,7 +18,16 @@ individual modules' docstrings), not the original design sketch:
 Colour processing happens at native (binned) resolution and is reprojected
 up to L's grid only at the end -- reprojection introduces NaN edges and
 interpolation artifacts that break Siril's star photometry, so anything
-photometric (PCC) must run before it.
+photometric (SPCC) must run before it.
+
+Colour calibration is SPCC only. An earlier version supported PCC as well
+(Siril's broadband method), selectable via a `colour_calibration`
+parameter -- removed once SPCC was confirmed working (needs Siril >=
+1.4.4) and preferred in every respect: no runtime dependency on VizieR,
+and better colour, modelled from the actual sensor/filter spectral
+response rather than inferred from broadband photometry. See
+docs/colour-calibration-catalogues.md for the PCC-vs-SPCC comparison run
+on real M51 data before PCC was dropped.
 """
 
 from __future__ import annotations
@@ -35,7 +44,6 @@ from .background_color import (
     INSTRUMENT_PROFILES,
     T24_PROFILE,
     run_graxpert_background_extraction,
-    run_pcc,
     run_spcc,
 )
 from .calibration import run_calibration
@@ -149,7 +157,6 @@ def run_lrgb(
     rgb_binning: int = 2,
     exptime: float = 300.0,
     stretch_method: str = "autostretch",
-    colour_calibration: str = "spcc",
 ) -> PipelineResult:
     project_dir = Path(project_dir)
     out = pipeline_dir(project_dir)
@@ -171,7 +178,7 @@ def run_lrgb(
             filter_name, binning, exptime, ra_hours, dec_deg, notes,
         )
 
-    # --- colour: composite at native resolution, then background + PCC ---
+    # --- colour: composite at native resolution, then background + SPCC --
     rgb_native = final / "rgb_native.fit"
     if not usable(rgb_native, notes):
         # Each filter was registered against its OWN reference frame, so the
@@ -212,33 +219,28 @@ def run_lrgb(
     else:
         _log("[skip] RGB background extraction already done", notes)
 
-    pcc_marker = final / "rgb_pcc.fit"
-    if not usable(pcc_marker, notes):
+    colour_calibrated = final / "rgb_colour_calibrated.fit"
+    if not usable(colour_calibrated, notes):
         # Do the work on a temporary name and only move it into place once
         # it succeeds. Copying the input to the final name up-front and then
         # processing in place leaves a valid-looking file behind when the
         # stage fails -- and `usable()` cannot tell the difference, because
         # the data IS intact, it simply has not been transformed. That
-        # actually happened: PCC failed on a catalogue outage, the untouched
-        # copy stayed on disk, and the next run reported "PCC already done"
-        # and shipped an uncalibrated image. Existence must mean completion.
-        staging = final / "rgb_pcc__inprogress.fit"
+        # actually happened: SPCC failed on a catalogue outage, the untouched
+        # copy stayed on disk, and the next run reported "already done" and
+        # shipped an uncalibrated image. Existence must mean completion.
+        staging = final / "rgb_colour_calibrated__inprogress.fit"
         shutil.copy2(rgb_bg, staging)
-        if colour_calibration == "spcc":
-            profile = INSTRUMENT_PROFILES.get(telescope, T24_PROFILE)
-            _log(f"[run ] SPCC colour calibration ({profile.mono_sensor}, local Gaia)", notes)
-            solution = run_spcc(staging, final, profile=profile)
-        else:
-            _log("[run ] PCC colour calibration", notes)
-            solution = run_pcc(staging, final)
-        os.replace(staging, pcc_marker)
+        profile = INSTRUMENT_PROFILES.get(telescope, T24_PROFILE)
+        _log(f"[run ] SPCC colour calibration ({profile.mono_sensor}, local Gaia)", notes)
+        solution = run_spcc(staging, final, profile=profile)
+        os.replace(staging, colour_calibrated)
         _log(
-            f"       {colour_calibration.upper()} used {solution.stars_used} stars, "
-            f"white balance {solution.white_balance}",
+            f"       SPCC used {solution.stars_used} stars, white balance {solution.white_balance}",
             notes,
         )
     else:
-        _log(f"[skip] {colour_calibration.upper()} already done", notes)
+        _log("[skip] SPCC already done", notes)
 
     # --- luminance: background extraction --------------------------------
     lum_bg = final / "lum_bg.fits"
@@ -253,7 +255,7 @@ def run_lrgb(
     rgb_reconciled = final / "rgb_reconciled.fit"
     if not usable(rgb_reconciled, notes):
         _log("[run ] reprojecting colour onto L's pixel grid", notes)
-        recon = reproject_to_reference(pcc_marker, lum_bg, rgb_reconciled)
+        recon = reproject_to_reference(colour_calibrated, lum_bg, rgb_reconciled)
         _log(f"       footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f}", notes)
     else:
         _log("[skip] reprojection already done", notes)
@@ -294,7 +296,7 @@ def run_lrgb(
         (f"01_master_{LUMINANCE_FILTER.lower()}", result.masters[LUMINANCE_FILTER], True),
         ("02_rgb_native", rgb_native, True),
         ("03_rgb_background_extracted", Path(rgb_bg), True),
-        ("04_rgb_colour_calibrated", pcc_marker, True),
+        ("04_rgb_colour_calibrated", colour_calibrated, True),
         ("05_lum_background_extracted", Path(lum_bg), True),
         ("06_rgb_reconciled", rgb_reconciled, True),
         ("07_lrgb_final", Path(composite), False),  # post-stretch: render faithfully

@@ -17,17 +17,18 @@ Red frame's actual field of view comes back as NaN (an honest "no data"
 marker), not a fabricated zero or extrapolated value.
 
 IMPORTANT pipeline-ordering finding, also verified against real data:
-reprojection must happen AFTER color calibration (PCC/SPCC), not before.
-Running PCC on a reprojected RGB composite failed with the same error as
-running it after GraXpert background extraction ("Error computing FWHM
-for photometry settings adjustment") -- the NaN edge pixels and
+reprojection must happen AFTER colour calibration (SPCC), not before.
+Running colour calibration on a reprojected RGB composite fails with the
+same error as running it on GraXpert's raw NaN output ("Error computing
+FWHM for photometry settings adjustment") -- the NaN edge pixels and
 interpolation artifacts introduced by reprojection break Siril's
 photometry statistics the same way background-subtraction artifacts do.
 The real pipeline order is: build R/G/B masters at native resolution ->
-rgbcomp -> PCC (Stage 6/7) -> GraXpert -> THEN reproject the processed RGB
-composite onto L's grid (this stage) -> GHT stretch both -> rgbcomp -lum=
-(Stages 8-9). Multi-channel (already-composited RGB) input is supported
-here specifically so reprojection can run this late in the chain.
+rgbcomp -> GraXpert -> SPCC (Stages 6/7) -> THEN reproject the processed
+RGB composite onto L's grid (this stage) -> GHT stretch both ->
+rgbcomp -lum= (Stages 8-9). Multi-channel (already-composited RGB) input
+is supported here specifically so reprojection can run this late in the
+chain.
 """
 
 from __future__ import annotations

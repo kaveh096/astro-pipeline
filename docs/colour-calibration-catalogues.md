@@ -1,7 +1,15 @@
 # Colour calibration: catalogues, and the per-project sky region
 
-How white balancing gets its reference data, what to download per project,
-and the current state of SPCC vs PCC.
+How white balancing gets its reference data, and what to download per
+project.
+
+Colour calibration is **SPCC only**. An earlier version of this pipeline
+used PCC (Siril's broadband method, keyed to an online VizieR query) and
+supported both, selectable via a `colour_calibration` parameter. PCC has
+since been removed: SPCC won the comparison run on real M51/T24 data (see
+below) and has no runtime dependency on a third-party server, where PCC's
+VizieR dependency returned HTTP 403 for hours during development and
+blocked the pipeline entirely.
 
 ## The intended workflow
 
@@ -9,23 +17,19 @@ For each new project, download only the sky region you are imaging, then
 calibrate against it locally. No dependency on a third-party server at
 processing time.
 
-The catalogues come from Gaia DR3, repackaged for Siril and hosted on
-Zenodo. There are **two different catalogues** and they are not
-interchangeable:
+SPCC's catalogue comes from Gaia DR3, repackaged for Siril and hosted on
+[Zenodo](https://zenodo.org/records/14738271) as 48 files, chunked by sky
+region (level-1 HEALPix, ~859 square degrees each) -- **10.6 GB total**,
+but a project only needs the chunk(s) covering its own target.
 
-| | used by | form | size |
-|---|---|---|---|
-| **Astrometric** ([Zenodo 14692304](https://zenodo.org/records/14692304)) | `pcc -catalog=localgaia` | one whole-sky file | **1.1 GB** compressed |
-| **Spectrophotometric** ([Zenodo 14738271](https://zenodo.org/records/14738271)) | `spcc` | 48 files, chunked by sky region | **10.6 GB** total, but you fetch only your chunks |
-
-Only the spectrophotometric one is regional. The astrometric one is a
-single whole-sky file, so "download just my region" does not apply to it.
+(There is a second, unrelated Gaia catalogue -- an "astrometric" extract,
+one whole-sky 1.1 GB file -- that only PCC used, via `pcc
+-catalog=localgaia`. It is not needed for anything in this codebase now
+that PCC is gone.)
 
 ## Finding your chunk
 
-The 48 spectrophotometric files are level-1 HEALPix pixels (48 = 12 x 4^1),
-nested ordering, each covering ~859 square degrees. `astropy_healpix` is
-already a dependency:
+`astropy_healpix` is already a dependency:
 
 ```python
 from astropy_healpix import HEALPix
@@ -44,7 +48,14 @@ Worked examples:
 | M42 | 83.822 | -5.391 | 20 | |
 
 A target near a chunk boundary, or a wide mosaic, may need the neighbouring
-chunk as well.
+chunk as well -- to check, cone-search the chunks the field actually
+touches:
+
+```python
+sorted(int(c) for c in hp.cone_search_lonlat(ra*u.deg, dec*u.deg, 1.5*u.deg))
+```
+
+If that returns more than one chunk, download them all.
 
 ## Installing a chunk
 
@@ -92,16 +103,22 @@ spcc -catalog=localgaia "-monosensor=KAF16803" "-rfilter=Astrodon Red (E series)
      "-gfilter=Astrodon Green (E series)" "-bfilter=Astrodon Blue (E / I series)"
 ```
 
-## Status: SPCC works, and is the default
+These are the `InstrumentProfile` entries in `background_color.py`
+(`INSTRUMENT_PROFILES`, keyed by telescope). Add a profile there for each
+new telescope/sensor combination.
 
-**SPCC requires Siril >= 1.4.4.** On 1.4.3 it crashed the process outright
-with an access violation (`0xC0000005`), always at
+## Status: works, requires Siril >= 1.4.4
+
+On Siril 1.4.3, SPCC crashed the process outright with an access
+violation (`0xC0000005`), always at
 `Applying aperture photometry to 73 stars`, regardless of catalogue source
 or sensor/filter configuration. Upgrading to 1.4.4 fixed it -- despite
 1.4.4's changelog mentioning nothing about SPCC, photometry, or colour
 calibration. Three hypotheses about the crash were tested against 1.4.3
-and all three were wrong (it was not the online-catalogue fallback, and
-not the unset sensor/filters); the answer was simply the version.
+and all three were wrong (it was not an online-catalogue fallback, and not
+unset sensor/filters); the answer was simply the version. A test
+(`test_siril_version_meets_spcc_minimum`) pins the requirement so a
+downgrade fails loudly instead of crashing the process.
 
 Verified working on the real M51/T24 data:
 
@@ -115,40 +132,29 @@ K0: 0.925  K1: 0.899  K2: 1.000
 Spectrophotometric Color Calibration succeeded.
 ```
 
-`colour_calibration="spcc"` is the pipeline default. PCC remains available
-(`colour_calibration="pcc"`) for comparison, but has no advantage here: it
-depends on VizieR at runtime, which is exactly what broke.
+### Expect relatively few stars
 
-### Expect far fewer stars than PCC
+SPCC used **43** stars on the M51/T24 data (PCC, before removal, used
+**246** on the same data). That is normal, not a coverage gap -- SPCC can
+only use stars that have Gaia XP *sampled spectra*, a much smaller
+population than plain broadband photometry. Checked explicitly for this
+field: it lies entirely within chunk 10 even out to a 3-degree radius, so
+nothing is missing. If star count looks unexpectedly low on a new target,
+suspect a chunk-boundary gap (see "Finding your chunk" above) before
+suspecting SPCC.
 
-SPCC used **43** stars where PCC used **246** on the same data. That is
-normal, not a coverage gap -- SPCC can only use stars that have Gaia XP
-*sampled spectra*, a much smaller population than plain broadband
-photometry. Checked explicitly for this field: it lies entirely within
-chunk 10 even out to a 3-degree radius, so nothing is missing.
+### Why SPCC over PCC
 
-To rule out a genuine boundary problem on a new target, cone-search the
-chunks the field actually touches:
+The comparison that motivated dropping PCC, on the same M51/T24 composite:
 
-```python
-from astropy_healpix import HEALPix
-import astropy.units as u
-hp = HEALPix(nside=2, order="nested")
-sorted(int(c) for c in hp.cone_search_lonlat(ra*u.deg, dec*u.deg, 1.5*u.deg))
-```
+| | PCC | SPCC |
+|---|---|---|
+| stars used | 246 | 43 |
+| white balance | (0.533, 0.684, 1.0) | (0.925, 0.899, 1.0) |
+| catalogue | VizieR, online | local chunk, offline |
 
-If that returns more than one chunk, download them all.
-
-## PCC and the VizieR dependency
-
-PCC defaults to NOMAD over the network, which broke mid-session when
-VizieR returned HTTP 403 for several hours. `pcc -catalog=localgaia`
-avoids that, but wants the **astrometric** catalogue (1.1 GB) — the
-spectrophotometric chunks do not satisfy it:
-
-```
-Local Gaia catalog is unavailable, reverting to online Gaia catalog via Vizier
-```
-
-So making PCC fully offline costs the 1.1 GB download, and is
-independent of anything SPCC needs.
+SPCC's factors sit near unity because it models the actual spectral
+response of the sensor and filters rather than inferring from broadband
+colour. Visually the difference was real on the rendered image: NGC 5195's
+core rendered warm against M51's bluer star-forming arms under SPCC, where
+PCC left both grey-cyan.

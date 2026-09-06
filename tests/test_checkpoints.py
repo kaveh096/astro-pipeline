@@ -170,8 +170,12 @@ def test_save_checkpoints_round_trips(tmp_path: Path) -> None:
 
 
 @requires(LUM_BG)
-def test_checkpoint_on_real_linear_master() -> None:
-    result = checkpoint(LUM_BG, "real_lum", output_dir=Path(LUM_BG).parent, linear=True)
+def test_checkpoint_on_real_linear_master(tmp_path: Path) -> None:
+    # output_dir=tmp_path, NOT the real project's _pipeline/final -- an
+    # earlier version wrote test previews directly into Kaveh's live project
+    # folder (output_dir=Path(LUM_BG).parent), which meant every test run
+    # left checkpoint_real_*.png files mixed in with actual pipeline output.
+    result = checkpoint(LUM_BG, "real_lum", output_dir=tmp_path, linear=True)
     assert result.stats.nan_fraction < 0.05
     assert result.stats.noise > 0
     assert result.stats.pixel_scale_arcsec is not None  # plate-solved
@@ -179,8 +183,8 @@ def test_checkpoint_on_real_linear_master() -> None:
 
 
 @requires(LRGB_FINAL)
-def test_checkpoint_on_real_final_composite() -> None:
-    result = checkpoint(LRGB_FINAL, "real_final", output_dir=Path(LRGB_FINAL).parent, linear=False)
+def test_checkpoint_on_real_final_composite(tmp_path: Path) -> None:
+    result = checkpoint(LRGB_FINAL, "real_final", output_dir=tmp_path, linear=False)
     assert result.stats.channels == 3
     # The delivered result must not trip the over-stretch warning that the
     # original GHT default would have.
