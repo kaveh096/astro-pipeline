@@ -23,6 +23,7 @@ photometric (PCC) must run before it.
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -206,9 +207,19 @@ def run_lrgb(
 
     pcc_marker = final / "rgb_pcc.fit"
     if not usable(pcc_marker, notes):
-        shutil.copy2(rgb_bg, pcc_marker)
+        # Do the work on a temporary name and only move it into place once
+        # it succeeds. Copying the input to the final name up-front and then
+        # processing in place leaves a valid-looking file behind when the
+        # stage fails -- and `usable()` cannot tell the difference, because
+        # the data IS intact, it simply has not been transformed. That
+        # actually happened: PCC failed on a catalogue outage, the untouched
+        # copy stayed on disk, and the next run reported "PCC already done"
+        # and shipped an uncalibrated image. Existence must mean completion.
+        staging = final / "rgb_pcc__inprogress.fit"
+        shutil.copy2(rgb_bg, staging)
         _log("[run ] PCC colour calibration", notes)
-        pcc = run_pcc(pcc_marker, final)
+        pcc = run_pcc(staging, final)
+        os.replace(staging, pcc_marker)
         _log(f"       PCC used {pcc.stars_used} stars, white balance {pcc.white_balance}", notes)
 
     else:
