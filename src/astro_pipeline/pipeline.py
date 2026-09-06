@@ -33,6 +33,7 @@ from .background_color import run_graxpert_background_extraction, run_pcc
 from .calibration import run_calibration
 from .export_image import ExportResult, export
 from .ingest import scan_session
+from .checkpoints import Checkpoint, checkpoint, save_checkpoints
 from .reconciliation import reproject_to_reference
 from .registration_stacking import register_and_stack
 from .siril_driver import run_script
@@ -49,6 +50,7 @@ class PipelineResult:
     masters: dict[str, Path] = field(default_factory=dict)
     composite_path: Path | None = None
     export_result: ExportResult | None = None
+    checkpoints: list[Checkpoint] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
 
@@ -199,4 +201,34 @@ def run_lrgb(
         f"high {result.export_result.clipped_high_fraction:.4f}",
         notes,
     )
+
+    # --- checkpoints -------------------------------------------------------
+    # Always produced, even on a fully-resumed run: they describe the state
+    # of the outputs, not the work done to get there, so a run that skipped
+    # everything should still be inspectable.
+    _log("[run ] checkpoints", notes)
+    checkpoint_dir = out / "checkpoints"
+    stages: list[tuple[str, Path, bool]] = [
+        (f"01_master_{LUMINANCE_FILTER.lower()}", result.masters[LUMINANCE_FILTER], True),
+        ("02_rgb_native", rgb_native, True),
+        ("03_rgb_background_extracted", Path(rgb_bg), True),
+        ("04_rgb_colour_calibrated", pcc_marker, True),
+        ("05_lum_background_extracted", Path(lum_bg), True),
+        ("06_rgb_reconciled", rgb_reconciled, True),
+        ("07_lrgb_final", Path(composite), False),  # post-stretch: render faithfully
+    ]
+    previous = None
+    previous_linear: bool | None = None
+    for label, path, linear in stages:
+        if not Path(path).exists():
+            continue
+        cp = checkpoint(
+            path, label, output_dir=checkpoint_dir, linear=linear,
+            previous=previous, previous_linear=previous_linear,
+        )
+        result.checkpoints.append(cp)
+        previous, previous_linear = cp.stats, linear
+        _log(cp.summary(), notes)
+
+    save_checkpoints(result.checkpoints, checkpoint_dir / "checkpoints.json")
     return result

@@ -1,0 +1,214 @@
+from pathlib import Path
+
+import numpy as np
+import pytest
+from astropy.io import fits
+
+from astro_pipeline.checkpoints import (
+    FrameStats,
+    autostretch_for_display,
+    checkpoint,
+    frame_stats,
+    save_checkpoints,
+)
+from conftest import LRGB_FINAL, LUM_BG, requires
+
+
+def write_fits(path: Path, data: np.ndarray) -> Path:
+    header = fits.Header()
+    header["ROWORDER"] = "TOP-DOWN"
+    fits.writeto(path, data.astype(np.float32), header=header, overwrite=True)
+    return path
+
+
+def star_field(shape=(256, 256), background=0.1, noise=0.001, n_stars=25) -> np.ndarray:
+    rng = np.random.default_rng(0)
+    data = rng.normal(background, noise, size=shape).astype(np.float32)
+    ys, xs = np.mgrid[0 : shape[0], 0 : shape[1]]
+    for _ in range(n_stars):
+        cy, cx = rng.integers(20, shape[0] - 20), rng.integers(20, shape[1] - 20)
+        data += 0.5 * np.exp(-(((ys - cy) ** 2 + (xs - cx) ** 2) / (2 * 2.0**2)))
+    return data
+
+
+# --- display stretch -------------------------------------------------------
+
+
+def test_autostretch_lifts_background_toward_target() -> None:
+    """Linear data sits near black; the display stretch must lift the
+    background to roughly the target, or previews of pre-stretch stages
+    are unreadable."""
+    data = star_field()
+    out = autostretch_for_display(data, target_background=0.25)
+    assert 0.15 < float(np.median(out)) < 0.40
+
+
+def test_autostretch_preserves_ordering() -> None:
+    """A display stretch may be non-linear but must stay monotonic --
+    otherwise it would invent structure that is not in the data."""
+    data = np.linspace(0.0, 1.0, 500, dtype=np.float32)
+    out = autostretch_for_display(data)
+    assert np.all(np.diff(out) >= -1e-6)
+
+
+def test_autostretch_handles_all_nan_without_raising() -> None:
+    out = autostretch_for_display(np.full((16, 16), np.nan, dtype=np.float32))
+    assert np.all(out == 0)
+
+
+# --- statistics ------------------------------------------------------------
+
+
+def test_frame_stats_measures_background_and_noise(tmp_path: Path) -> None:
+    path = write_fits(tmp_path / "field.fit", star_field(background=0.1, noise=0.002))
+    stats = frame_stats(path)
+    assert stats.background == pytest.approx(0.1, abs=0.02)
+    assert stats.noise == pytest.approx(0.002, rel=0.5)
+    assert stats.channels == 1
+
+
+def test_frame_stats_detects_stars(tmp_path: Path) -> None:
+    path = write_fits(tmp_path / "stars.fit", star_field(n_stars=25))
+    stats = frame_stats(path)
+    assert stats.star_count is not None and stats.star_count > 5
+
+
+def test_frame_stats_reports_nan_and_zero_fractions(tmp_path: Path) -> None:
+    data = star_field()
+    data[:64] = np.nan
+    data[64:128] = 0.0
+    path = write_fits(tmp_path / "mixed.fit", data)
+    stats = frame_stats(path)
+    assert stats.nan_fraction == pytest.approx(0.25, abs=0.01)
+    assert stats.zero_fraction == pytest.approx(0.25, abs=0.01)
+
+
+def test_frame_stats_handles_colour_cube(tmp_path: Path) -> None:
+    data = np.stack([star_field() for _ in range(3)])
+    path = write_fits(tmp_path / "rgb.fit", data)
+    stats = frame_stats(path)
+    assert stats.channels == 3
+    assert len(stats.shape) == 3
+
+
+# --- warnings: the failures this project actually hit ----------------------
+
+
+def test_checkpoint_warns_on_all_nan(tmp_path: Path) -> None:
+    """The exact shape of the silent GraXpert corruption."""
+    path = write_fits(tmp_path / "nan.fit", np.full((64, 64), np.nan, dtype=np.float32))
+    result = checkpoint(path, "nan", output_dir=tmp_path, detect_stars=False)
+    assert any("nan" in w.lower() for w in result.warnings)
+
+
+def test_checkpoint_warns_on_mostly_zero(tmp_path: Path) -> None:
+    """The exact shape of the stack-clipped background that caused it."""
+    data = np.zeros((64, 64), dtype=np.float32)
+    data[0, 0] = 1.0
+    path = write_fits(tmp_path / "zeros.fit", data)
+    result = checkpoint(path, "zeros", output_dir=tmp_path, detect_stars=False)
+    assert any("zero" in w.lower() for w in result.warnings)
+
+
+def test_checkpoint_warns_on_over_stretch(tmp_path: Path) -> None:
+    """The exact shape of the blown-out GHT default."""
+    path = write_fits(tmp_path / "hot.fit", np.full((64, 64), 1.0, dtype=np.float32))
+    result = checkpoint(path, "hot", output_dir=tmp_path, detect_stars=False)
+    assert any("stretch" in w.lower() or "full scale" in w.lower() for w in result.warnings)
+
+
+# --- checkpoint mechanics ---------------------------------------------------
+
+
+def test_checkpoint_writes_preview_and_labels_display_stretch(tmp_path: Path) -> None:
+    path = write_fits(tmp_path / "linear.fit", star_field())
+    result = checkpoint(path, "linear", output_dir=tmp_path)
+
+    assert result.preview_mode == "autostretch"
+    assert result.preview_path is not None and Path(result.preview_path).exists()
+    # The summary must disclose that the preview was stretched for display,
+    # or a viewer will judge linear data through a flattering lie.
+    assert "display stretch" in result.summary()
+
+
+def test_checkpoint_faithful_mode_is_not_labelled_as_stretched(tmp_path: Path) -> None:
+    path = write_fits(tmp_path / "stretched.fit", star_field(background=0.3))
+    result = checkpoint(path, "stretched", output_dir=tmp_path, linear=False)
+    assert result.preview_mode == "faithful"
+    assert "display stretch" not in result.summary()
+
+
+def test_checkpoint_does_not_modify_the_source_file(tmp_path: Path) -> None:
+    """Previews are display-only; the pipeline's data must be untouched."""
+    path = write_fits(tmp_path / "src.fit", star_field())
+    before = fits.getdata(path, memmap=False).copy()
+    checkpoint(path, "src", output_dir=tmp_path)
+    after = fits.getdata(path, memmap=False)
+    assert np.array_equal(before, after)
+
+
+def test_checkpoint_comparison_reports_movement(tmp_path: Path) -> None:
+    first = frame_stats(write_fits(tmp_path / "a.fit", star_field(background=0.10)))
+    path_b = write_fits(tmp_path / "b.fit", star_field(background=0.20))
+    result = checkpoint(path_b, "b", output_dir=tmp_path, previous=first, detect_stars=False)
+    assert "background" in result.comparison
+
+
+def test_save_checkpoints_round_trips(tmp_path: Path) -> None:
+    import json
+
+    path = write_fits(tmp_path / "c.fit", star_field())
+    result = checkpoint(path, "c", output_dir=tmp_path, detect_stars=False)
+    out = tmp_path / "checkpoints.json"
+    save_checkpoints([result], out)
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+    assert loaded[0]["label"] == "c"
+    assert "stats" in loaded[0]
+
+
+# --- against the real pipeline output --------------------------------------
+
+
+@requires(LUM_BG)
+def test_checkpoint_on_real_linear_master() -> None:
+    result = checkpoint(LUM_BG, "real_lum", output_dir=Path(LUM_BG).parent, linear=True)
+    assert result.stats.nan_fraction < 0.05
+    assert result.stats.noise > 0
+    assert result.stats.pixel_scale_arcsec is not None  # plate-solved
+    assert not any("nan" in w.lower() for w in result.warnings)
+
+
+@requires(LRGB_FINAL)
+def test_checkpoint_on_real_final_composite() -> None:
+    result = checkpoint(LRGB_FINAL, "real_final", output_dir=Path(LRGB_FINAL).parent, linear=False)
+    assert result.stats.channels == 3
+    # The delivered result must not trip the over-stretch warning that the
+    # original GHT default would have.
+    assert not any("stretch" in w.lower() for w in result.warnings)
+
+
+def test_comparison_suppressed_across_stretch_boundary(tmp_path: Path) -> None:
+    """Comparing a stretched frame to a linear one produced confident
+    nonsense in an earlier version ("noise +167759%"). It must now say the
+    two are not comparable instead."""
+    linear_stats = frame_stats(write_fits(tmp_path / "lin.fit", star_field(background=0.08)))
+    stretched = write_fits(tmp_path / "str.fit", star_field(background=0.30, noise=0.05))
+
+    result = checkpoint(
+        stretched, "str", output_dir=tmp_path, linear=False,
+        previous=linear_stats, previous_linear=True, detect_stars=False,
+    )
+    assert "background" not in result.comparison
+    assert "not comparable" in " ".join(result.comparison.values())
+
+
+def test_comparison_suppressed_across_shape_change(tmp_path: Path) -> None:
+    """Star counts across a resolution change are not like-for-like."""
+    small = frame_stats(write_fits(tmp_path / "small.fit", star_field(shape=(128, 128))))
+    big = write_fits(tmp_path / "big.fit", star_field(shape=(256, 256)))
+
+    result = checkpoint(
+        big, "big", output_dir=tmp_path, linear=True,
+        previous=small, previous_linear=True, detect_stars=False,
+    )
+    assert set(result.comparison) == {"shape"}

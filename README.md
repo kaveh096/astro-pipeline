@@ -45,6 +45,12 @@ py -3.12 -m venv .venv
 .venv\Scripts\python.exe -m pip install -e ".[windows,dev]"
 ```
 
+## Notes
+
+- [Calibration frames: when to use bias, darks, and how many is
+  enough](docs/calibration-frame-counts.md) — why lights are calibrated
+  against darks only, and what to expect per telescope.
+
 ## Layout
 
 ```
