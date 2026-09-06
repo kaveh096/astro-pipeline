@@ -47,6 +47,9 @@ py -3.12 -m venv .venv
 
 ## Notes
 
+- [Colour calibration: catalogues, and the per-project sky
+  region](docs/colour-calibration-catalogues.md) — which Gaia catalogue to
+  download for a target, how to install it, and why SPCC is currently unusable.
 - [Calibration frames: when to use bias, darks, and how many is
   enough](docs/calibration-frame-counts.md) — why lights are calibrated
   against darks only, and what to expect per telescope.
