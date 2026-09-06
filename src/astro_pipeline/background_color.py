@@ -186,6 +186,96 @@ def run_pcc(
     return _parse_pcc_result(result)
 
 
+@dataclass(frozen=True)
+class InstrumentProfile:
+    """Sensor and filter names for SPCC, as they appear in Siril's
+    spcc-database.
+
+    SPCC models the actual spectral response of the optical train, so it
+    needs to know which sensor and filters produced the data -- unlike PCC,
+    which only matches broadband photometry. Names must match the `name`
+    field in the database JSON exactly, spaces and punctuation included.
+    """
+
+    mono_sensor: str
+    red_filter: str
+    green_filter: str
+    blue_filter: str
+
+
+# iTelescope T24: the FITS headers give 9um pixels at 4096x4096, which is a
+# KAF-16803, and iTelescope run Astrodon filters on it.
+T24_PROFILE = InstrumentProfile(
+    mono_sensor="KAF16803",
+    red_filter="Astrodon Red (E series)",
+    green_filter="Astrodon Green (E series)",
+    blue_filter="Astrodon Blue (E / I series)",
+)
+
+INSTRUMENT_PROFILES: dict[str, InstrumentProfile] = {"T24": T24_PROFILE}
+
+
+def run_spcc(
+    rgb_composite_path: str | Path,
+    work_dir: str | Path,
+    profile: InstrumentProfile = T24_PROFILE,
+    catalog: str = "localgaia",
+    siril_cli: Path | None = None,
+) -> PCCResult:
+    """Run Siril's spectrophotometric colour calibration.
+
+    Preferred over PCC: it reads the LOCAL Gaia extract, so it has no
+    runtime dependency on VizieR (which returned HTTP 403 for hours during
+    development and blocked the pipeline entirely), and it calibrates
+    against modelled spectral response rather than broadband colour.
+
+    Requires Siril >= 1.4.4. On 1.4.3 this crashed the process outright
+    with an access violation at the aperture-photometry step, regardless of
+    catalogue source or sensor/filter configuration; 1.4.4 fixed it,
+    despite its changelog not mentioning SPCC.
+
+    Expect far fewer stars than PCC (43 vs 246 on the same M51 data) -- SPCC
+    can only use stars that have Gaia XP sampled spectra, which is a much
+    smaller population than plain photometry. That is normal, not a sign of
+    a coverage gap; verified for this field, which lies entirely inside one
+    catalogue chunk even out to 3 degrees.
+    """
+    rgb_composite_path = Path(rgb_composite_path)
+    work_dir = Path(work_dir)
+
+    # Filter names contain spaces, and Siril's .ssf parser splits arguments
+    # on whitespace, so each argument has to be quoted.
+    command = (
+        f"spcc -catalog={catalog} "
+        f'"-monosensor={profile.mono_sensor}" '
+        f'"-rfilter={profile.red_filter}" '
+        f'"-gfilter={profile.green_filter}" '
+        f'"-bfilter={profile.blue_filter}"'
+    )
+
+    try:
+        result = run_load_process_save(
+            rgb_composite_path, [command], work_dir, siril_cli=siril_cli
+        )
+    except SirilError as exc:
+        log_text = "\n".join(exc.result.log_lines) if exc.result else ""
+        if _is_catalogue_unavailable(log_text):
+            raise CatalogueUnavailableError(
+                "SPCC could not read its star catalogue. With -catalog=localgaia this "
+                "usually means the local Gaia extract is missing or core."
+                "catalogue_gaia_photo points somewhere wrong -- note Siril expects a "
+                "DIRECTORY of chunk files despite the .dat name. See "
+                "docs/colour-calibration-catalogues.md.",
+                exc.result,
+            ) from exc
+        raise ColorCalibrationError(
+            f"SPCC failed on {rgb_composite_path.name}: {exc}", exc.result
+        ) from exc
+
+    # SPCC reports its solution in the same format as PCC.
+    return _parse_pcc_result(result)
+
+
 def run_graxpert_background_extraction(
     fits_path: str | Path,
     output_stem: str,

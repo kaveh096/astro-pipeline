@@ -31,7 +31,13 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 
-from .background_color import run_graxpert_background_extraction, run_pcc
+from .background_color import (
+    INSTRUMENT_PROFILES,
+    T24_PROFILE,
+    run_graxpert_background_extraction,
+    run_pcc,
+    run_spcc,
+)
 from .calibration import run_calibration
 from .export_image import ExportResult, export
 from .ingest import scan_session
@@ -143,6 +149,7 @@ def run_lrgb(
     rgb_binning: int = 2,
     exptime: float = 300.0,
     stretch_method: str = "autostretch",
+    colour_calibration: str = "spcc",
 ) -> PipelineResult:
     project_dir = Path(project_dir)
     out = pipeline_dir(project_dir)
@@ -217,13 +224,21 @@ def run_lrgb(
         # and shipped an uncalibrated image. Existence must mean completion.
         staging = final / "rgb_pcc__inprogress.fit"
         shutil.copy2(rgb_bg, staging)
-        _log("[run ] PCC colour calibration", notes)
-        pcc = run_pcc(staging, final)
+        if colour_calibration == "spcc":
+            profile = INSTRUMENT_PROFILES.get(telescope, T24_PROFILE)
+            _log(f"[run ] SPCC colour calibration ({profile.mono_sensor}, local Gaia)", notes)
+            solution = run_spcc(staging, final, profile=profile)
+        else:
+            _log("[run ] PCC colour calibration", notes)
+            solution = run_pcc(staging, final)
         os.replace(staging, pcc_marker)
-        _log(f"       PCC used {pcc.stars_used} stars, white balance {pcc.white_balance}", notes)
-
+        _log(
+            f"       {colour_calibration.upper()} used {solution.stars_used} stars, "
+            f"white balance {solution.white_balance}",
+            notes,
+        )
     else:
-        _log("[skip] PCC already done", notes)
+        _log(f"[skip] {colour_calibration.upper()} already done", notes)
 
     # --- luminance: background extraction --------------------------------
     lum_bg = final / "lum_bg.fits"

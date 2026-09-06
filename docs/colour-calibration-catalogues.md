@@ -92,31 +92,52 @@ spcc -catalog=localgaia "-monosensor=KAF16803" "-rfilter=Astrodon Red (E series)
      "-gfilter=Astrodon Green (E series)" "-bfilter=Astrodon Blue (E / I series)"
 ```
 
-## Current status: SPCC does not work here
+## Status: SPCC works, and is the default
 
-**SPCC crashes deterministically** on this setup — Siril 1.4.3, Windows —
-with an access violation (`0xC0000005`), always at the same point:
-`Applying aperture photometry to 73 stars`.
+**SPCC requires Siril >= 1.4.4.** On 1.4.3 it crashed the process outright
+with an access violation (`0xC0000005`), always at
+`Applying aperture photometry to 73 stars`, regardless of catalogue source
+or sensor/filter configuration. Upgrading to 1.4.4 fixed it -- despite
+1.4.4's changelog mentioning nothing about SPCC, photometry, or colour
+calibration. Three hypotheses about the crash were tested against 1.4.3
+and all three were wrong (it was not the online-catalogue fallback, and
+not the unset sensor/filters); the answer was simply the version.
 
-Three hypotheses were tested and all three were wrong:
+Verified working on the real M51/T24 data:
 
-1. *"It falls back to the online catalogue and that path is broken."*
-   Wrong — with the local catalogue installed and demonstrably in use, it
-   still crashes.
-2. *"Sensor and filters are unset (`(NULL)`), so it dereferences null."*
-   Wrong — with `KAF16803` and the Astrodon filters resolving correctly
-   in the log, it still crashes.
-3. Whatever remains is inside Siril's SPCC implementation. The crash is
-   independent of catalogue source and of sensor/filter configuration.
+```
+SPCC will use mono senor "KAF16803" and filters "Astrodon Red (E series)", ...
+Getting stars from local catalogue Gaia DR3 xp_sampled for SPCC
+Applying aperture photometry to 73 stars.
+30 stars excluded from the calculation
+Found a solution for color calibration using 43 stars.
+K0: 0.925  K1: 0.899  K2: 1.000
+Spectrophotometric Color Calibration succeeded.
+```
 
-PCC on comparable data reaches "Applying aperture photometry to **652**
-stars" and completes; SPCC consistently finds 73 and dies there.
+`colour_calibration="spcc"` is the pipeline default. PCC remains available
+(`colour_calibration="pcc"`) for comparison, but has no advantage here: it
+depends on VizieR at runtime, which is exactly what broke.
 
-So **PCC remains the only working colour calibration path** for now,
-contrary to the plan of dropping it. Worth trying:
+### Expect far fewer stars than PCC
 
-- Siril 1.5.0, where SPCC has seen further development.
-- Reporting upstream, with the reproducer above.
+SPCC used **43** stars where PCC used **246** on the same data. That is
+normal, not a coverage gap -- SPCC can only use stars that have Gaia XP
+*sampled spectra*, a much smaller population than plain broadband
+photometry. Checked explicitly for this field: it lies entirely within
+chunk 10 even out to a 3-degree radius, so nothing is missing.
+
+To rule out a genuine boundary problem on a new target, cone-search the
+chunks the field actually touches:
+
+```python
+from astropy_healpix import HEALPix
+import astropy.units as u
+hp = HEALPix(nside=2, order="nested")
+sorted(int(c) for c in hp.cone_search_lonlat(ra*u.deg, dec*u.deg, 1.5*u.deg))
+```
+
+If that returns more than one chunk, download them all.
 
 ## PCC and the VizieR dependency
 

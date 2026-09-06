@@ -32,7 +32,8 @@ architecture.
 
 External tools (installed side-by-side with existing software, nothing removed):
 
-- Siril 1.4.3 — `C:\Program Files\SiriL\bin\siril-cli.exe`
+- Siril 1.4.4 — `C:\Program Files\SiriL\bin\siril-cli.exe` (**1.4.4+ required**:
+  SPCC crashes the process outright on 1.4.3)
 - GraXpert 3.0.2 — `%LOCALAPPDATA%\Programs\GraXpert\GraXpert.exe` (has a real `-cli` flag)
 - ASTAP + D20 star database — `C:\Program Files\astap\astap_cli.exe`
 - Photoshop CS6 64-bit (already installed) — COM ProgID `Photoshop.Application`
@@ -49,7 +50,7 @@ py -3.12 -m venv .venv
 
 - [Colour calibration: catalogues, and the per-project sky
   region](docs/colour-calibration-catalogues.md) — which Gaia catalogue to
-  download for a target, how to install it, and why SPCC is currently unusable.
+  download for a target, how to install it, and why SPCC needs Siril 1.4.4+.
 - [Calibration frames: when to use bias, darks, and how many is
   enough](docs/calibration-frame-counts.md) — why lights are calibrated
   against darks only, and what to expect per telescope.

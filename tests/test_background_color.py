@@ -238,3 +238,62 @@ def test_genuine_pcc_failure_is_not_mistaken_for_an_outage() -> None:
         "Script execution failed."
     )
     assert not _is_catalogue_unavailable(real_failure)
+
+
+def test_siril_version_meets_spcc_minimum() -> None:
+    """SPCC crashes the whole process on Siril 1.4.3 -- an access violation
+    at the aperture-photometry step, independent of catalogue source and of
+    sensor/filter configuration. 1.4.4 fixed it, with no mention of SPCC in
+    its changelog. Since the pipeline now defaults to SPCC, a downgrade
+    would break colour calibration in a way that looks like a crash rather
+    than an error, so pin the requirement explicitly.
+    """
+    import re
+    import subprocess
+
+    if not SIRIL_AVAILABLE:
+        pytest.skip("Siril not installed")
+
+    out = subprocess.run(
+        [str(find_siril_cli()), "--version"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    ).stdout
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
+    assert match, f"could not parse Siril version from {out!r}"
+    version = tuple(int(g) for g in match.groups())
+    assert version >= (1, 4, 4), (
+        f"Siril {'.'.join(map(str, version))} is too old for SPCC -- it crashes on "
+        "1.4.3. Upgrade, or pass colour_calibration='pcc'."
+    )
+
+
+def test_t24_profile_names_exist_in_the_spcc_database() -> None:
+    """SPCC sensor/filter names must match the spcc-database JSON `name`
+    field exactly. A typo does not error -- Siril logs "(NULL)" and
+    calibrates against nothing in particular, so guard the strings."""
+    import json
+    from pathlib import Path as _Path
+
+    from astro_pipeline.background_color import T24_PROFILE
+
+    db = _Path.home() / "AppData/Local/siril/siril-spcc-database"
+    if not db.is_dir():
+        pytest.skip("spcc-database not cloned; see docs/colour-calibration-catalogues.md")
+
+    names = set()
+    for jf in db.rglob("*.json"):
+        try:
+            data = json.loads(jf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for entry in (data if isinstance(data, list) else [data]):
+            if isinstance(entry, dict) and "name" in entry:
+                names.add(entry["name"])
+
+    for label, value in (
+        ("mono sensor", T24_PROFILE.mono_sensor),
+        ("red filter", T24_PROFILE.red_filter),
+        ("green filter", T24_PROFILE.green_filter),
+        ("blue filter", T24_PROFILE.blue_filter),
+    ):
+        assert value in names, f"T24 {label} {value!r} not found in the SPCC database"
