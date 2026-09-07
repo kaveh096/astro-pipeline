@@ -9,6 +9,7 @@ from astro_pipeline.ingest import scan_session
 from astro_pipeline.pipeline import (
     ColourContributor,
     _build_colour_contributor,
+    contributor_dir,
     contributor_fwhm_arcsec,
     discover_luminance_contributors,
     resolve_instrument_profile,
@@ -369,6 +370,49 @@ def test_build_colour_contributor_skips_on_missing_green_not_just_red(tmp_path: 
     green_lights, _ = resolve_lights(report, "T24", "M51", "Green", 2)
     assert red_lights  # present
     assert not green_lights  # missing -- this is the one that should skip
+
+
+# --- Slice 3.3: contributor naming is telescope-explicit and keyed, -------
+# --- not positional ---------------------------------------------------------
+
+
+def test_contributor_dir_primary_keeps_legacy_top_level_path(tmp_path: Path) -> None:
+    """The PRIMARY contributor (binning == rgb_binning) must keep the
+    legacy top-level `final` directory -- renaming it would trigger the
+    hours-of-recompute cost usable()'s resume gating is meant to avoid."""
+    final = tmp_path / "final"
+    assert contributor_dir(final, "T24", 2, rgb_binning=2) == final
+
+
+def test_contributor_dir_secondary_is_telescope_explicit(tmp_path: Path) -> None:
+    final = tmp_path / "final"
+    assert contributor_dir(final, "T24", 1, rgb_binning=2) == final / "contrib_T24_bin1"
+
+
+def test_contributor_dir_does_not_collide_across_telescopes(tmp_path: Path) -> None:
+    """The actual defect Slice 3.3 fixes: the old `contrib_bin{n}` naming
+    was telescope-blind, so a second telescope shooting the same
+    non-primary binning would collide with an existing directory. The new
+    naming must not."""
+    final = tmp_path / "final"
+    t24_path = contributor_dir(final, "T24", 1, rgb_binning=2)
+    t21_path = contributor_dir(final, "T21", 1, rgb_binning=2)
+    assert t24_path != t21_path
+
+
+def test_contributor_dir_is_pure_not_positional(tmp_path: Path) -> None:
+    """A pure function of (telescope, binning, rgb_binning) -- calling it
+    for the same combo must give the same path regardless of what order a
+    caller's discovery loop happens to visit binnings in (the old
+    `rgb_reconciled_contrib{i}.fit` positional naming's actual failure
+    mode: sorted(rgb_binnings) put BIN1 at loop index 0 even though BIN2
+    was the primary contributor)."""
+    final = tmp_path / "final"
+    # Simulate two different discovery orders finding the same binning.
+    order_a = [contributor_dir(final, "T24", b, rgb_binning=2) for b in [1, 2]]
+    order_b = [contributor_dir(final, "T24", b, rgb_binning=2) for b in [2, 1]]
+    assert order_a[0] == order_b[1]  # BIN1's path is identical either way
+    assert order_a[1] == order_b[0]  # BIN2's path is identical either way
 
 
 def test_colour_contributor_key_identifies_by_telescope_and_binning() -> None:

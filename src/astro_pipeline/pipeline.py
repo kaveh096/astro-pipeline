@@ -84,11 +84,13 @@ imaged the same target on the same telescope:
   with existing fixtures/tests: its files stay at the legacy top-level
   paths, e.g. final/rgb_native.fit). Any OTHER binning discovered for the
   same telescope+target+RGB-filters becomes an additional contributor
-  under final/contrib_bin<n>/, and only actually runs if all three R/G/B
-  are present for it -- a partial contributor (missing one channel) is
-  logged and skipped (Slice 3: was a RuntimeError that aborted the whole
-  run; see _build_colour_contributor), not silently built into an
-  incomplete composite.
+  under final/contrib_<telescope>_bin<n>/ (Slice 3: telescope-explicit,
+  not just contrib_bin<n> -- a second telescope shooting the same
+  non-primary binning would otherwise collide), and only actually runs if
+  all three R/G/B are present for it -- a partial contributor (missing one
+  channel) is logged and skipped (Slice 3: was a RuntimeError that
+  aborted the whole run; see _build_colour_contributor), not silently
+  built into an incomplete composite.
 """
 
 from __future__ import annotations
@@ -474,6 +476,27 @@ def resolve_instrument_profile(telescope: str):
     return profile
 
 
+def contributor_dir(final: Path, telescope: str, binning: int, rgb_binning: int) -> Path:
+    """Where one RGB contributor's per-binning files live (Slice 3.3).
+
+    The PRIMARY contributor (`binning == rgb_binning`) keeps the legacy
+    top-level `final` directory itself -- e.g. final/rgb_native.fit --
+    kept backward compatible with existing fixtures/tests and so this
+    naming fix doesn't trigger the hours-of-recompute a full rename of the
+    primary's paths would (see usable()'s resume gating). Any OTHER
+    binning gets its own telescope-explicit subdirectory:
+    `contrib_<telescope>_bin<n>`, not just `contrib_bin<n>` -- the old,
+    telescope-blind name that would collide the moment a second telescope
+    contributes the same non-primary binning. A pure function of
+    (telescope, binning, rgb_binning), not of loop position, so it is
+    directly testable and stable across however run_lrgb's discovery
+    order changes (see test_pipeline.py).
+    """
+    if binning == rgb_binning:
+        return final
+    return final / f"contrib_{telescope}_bin{binning}"
+
+
 def _build_colour_contributor(
     project_dir: Path,
     contrib_dir: Path,
@@ -684,7 +707,7 @@ def run_lrgb(
 
     contributors: list[ColourContributor] = []
     for binning in rgb_binnings:
-        contrib_dir = final if binning == rgb_binning else final / f"contrib_bin{binning}"
+        contrib_dir = contributor_dir(final, telescope, binning, rgb_binning)
         contributor = _build_colour_contributor(
             project_dir, contrib_dir, report, telescope, target, binning,
             ra_hours, dec_deg, notes,
@@ -735,11 +758,17 @@ def run_lrgb(
             _log(f"       footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f}", notes)
         else:
             reprojected_paths = []
-            for i, contributor in enumerate(contributors):
-                out_path = final / f"rgb_reconciled_contrib{i}.fit"
+            for contributor in contributors:
+                # Slice 3.3: keyed by (telescope, binning) identity, not
+                # loop position -- verified on real data that positional
+                # naming (`contrib{i}` over sorted(rgb_binnings)) put
+                # BIN1's contributor at index 0 even though BIN2 is the
+                # PRIMARY one, a real footgun for anyone reading these
+                # files by number expecting index 0 = primary.
+                out_path = final / f"rgb_reconciled_contrib_{contributor.key}.fit"
                 recon = reproject_to_reference(contributor.composite_path, lum_bg, out_path)
                 _log(
-                    f"[run ] reprojected contributor {i} onto L's grid "
+                    f"[run ] reprojected {contributor.key} onto L's grid "
                     f"(footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f})",
                     notes,
                 )
