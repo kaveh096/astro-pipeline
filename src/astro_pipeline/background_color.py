@@ -107,6 +107,21 @@ class BackgroundExtractionError(RuntimeError):
     pass
 
 
+class UnknownInstrumentError(RuntimeError):
+    """A telescope has no registered InstrumentProfile in
+    INSTRUMENT_PROFILES.
+
+    Slice 3 safety fix: `INSTRUMENT_PROFILES.get(telescope, T24_PROFILE)`
+    used to silently mis-profile any unrecognized telescope as T24's
+    sensor/filters. SPCC models the actual spectral response of the
+    sensor and filters that produced the data (see InstrumentProfile's
+    docstring) -- guessing wrong here doesn't fail loudly, it just
+    produces a plausible-looking but physically wrong colour solution.
+    Never guess: register the telescope's real InstrumentProfile in
+    INSTRUMENT_PROFILES, or refuse to run SPCC for it.
+    """
+
+
 @dataclass
 class SPCCResult:
     white_balance: tuple[float, float, float] | None

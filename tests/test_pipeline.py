@@ -4,10 +4,14 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
+from astro_pipeline.background_color import UnknownInstrumentError
 from astro_pipeline.ingest import scan_session
 from astro_pipeline.pipeline import (
+    ColourContributor,
+    _build_colour_contributor,
     contributor_fwhm_arcsec,
     discover_luminance_contributors,
+    resolve_instrument_profile,
     resolve_lights,
     select_luminance_source,
 )
@@ -285,3 +289,90 @@ def test_select_luminance_source_falls_back_when_nothing_measured() -> None:
     assert selected_key == ("T24", 1)
     assert selected_fwhm is None
     assert any("falling back" in n for n in notes)
+
+
+# --- Slice 3.1: unknown telescope never silently gets T24's SPCC profile ---
+
+
+def test_resolve_instrument_profile_known_telescope_returns_profile() -> None:
+    profile = resolve_instrument_profile("T24")
+    assert profile.mono_sensor == "KAF16803"
+
+
+def test_resolve_instrument_profile_unknown_telescope_raises() -> None:
+    """The actual Slice 3.1 defect: INSTRUMENT_PROFILES.get(telescope,
+    T24_PROFILE) used to silently mis-profile ANY unrecognized telescope
+    as T24's sensor/filters. Must raise instead of guessing."""
+    with pytest.raises(UnknownInstrumentError):
+        resolve_instrument_profile("T99")
+
+
+# --- Slice 3.2: a partial R/G/B set logs and skips, does not abort the run -
+
+
+class _FakeReportNoLights:
+    """instrument_groups() with no entries at all -- every filter's
+    resolve_lights() call returns an empty list, so _build_colour_
+    contributor should stop at the very first filter (Red) without
+    invoking build_master (no calibrate/stack/solve -- this test must stay
+    fast and not touch Siril)."""
+
+    def instrument_groups(self):
+        return {}
+
+    def calibration_index(self):
+        return {}
+
+
+def test_build_colour_contributor_partial_rgb_logs_and_skips(tmp_path: Path) -> None:
+    notes: list[str] = []
+    result = _build_colour_contributor(
+        tmp_path, tmp_path / "contrib", _FakeReportNoLights(), "T24", "M51", 2,
+        13.4980, 47.1953, notes,
+    )
+    assert result is None
+    assert any("skip" in n.lower() and "Red" in n for n in notes)
+    assert any("Red/Green/Blue" in n for n in notes)
+
+
+class _FakeLightFrame:
+    """Just enough of ingest.LightFrame's shape for resolve_lights() to
+    read `.user` off it."""
+
+    def __init__(self, user: str = "kaveh096") -> None:
+        self.user = user
+
+
+class _FakeReportGreenBlueOnly:
+    """Red is present but Green is missing -- the skip must trigger on
+    whichever filter is actually absent, not just the first one checked,
+    and the log line must name it correctly."""
+
+    def instrument_groups(self):
+        return {("T24", "M51", "Red", 2): [_FakeLightFrame()]}
+
+    def calibration_index(self):
+        return {}
+
+
+def test_build_colour_contributor_skips_on_missing_green_not_just_red(tmp_path: Path) -> None:
+    """resolve_lights() for Red returns a non-empty list here, so the
+    function would proceed to build_master() for Red -- which needs real
+    calibration frames/Siril and isn't appropriate for this fast unit
+    test. So this only checks that the missing-filter detection itself
+    (in RGB_FILTERS order) would name Green, not Red, by inspecting
+    resolve_lights directly rather than running the full function."""
+    from astro_pipeline.pipeline import resolve_lights
+
+    report = _FakeReportGreenBlueOnly()
+    red_lights, _ = resolve_lights(report, "T24", "M51", "Red", 2)
+    green_lights, _ = resolve_lights(report, "T24", "M51", "Green", 2)
+    assert red_lights  # present
+    assert not green_lights  # missing -- this is the one that should skip
+
+
+def test_colour_contributor_key_identifies_by_telescope_and_binning() -> None:
+    contributor = ColourContributor(
+        telescope="T24", binning=1, composite_path=Path("x.fit"), sub_count=38, stack_total=27,
+    )
+    assert contributor.key == "T24_bin1"

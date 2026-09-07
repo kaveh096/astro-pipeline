@@ -85,8 +85,9 @@ imaged the same target on the same telescope:
   paths, e.g. final/rgb_native.fit). Any OTHER binning discovered for the
   same telescope+target+RGB-filters becomes an additional contributor
   under final/contrib_bin<n>/, and only actually runs if all three R/G/B
-  are present for it -- a partial contributor (missing one channel) is a
-  real data problem and raises rather than silently building an
+  are present for it -- a partial contributor (missing one channel) is
+  logged and skipped (Slice 3: was a RuntimeError that aborted the whole
+  run; see _build_colour_contributor), not silently built into an
   incomplete composite.
 """
 
@@ -102,7 +103,7 @@ from astropy.io import fits
 
 from .background_color import (
     INSTRUMENT_PROFILES,
-    T24_PROFILE,
+    UnknownInstrumentError,
     run_graxpert_background_extraction,
     run_spcc,
 )
@@ -429,6 +430,50 @@ def resolve_lights(
     return lights, group_name
 
 
+@dataclass
+class ColourContributor:
+    """One (telescope, binning) RGB contributor, once built -- Slice 3's
+    naming fix (3.3) means downstream code identifies a contributor by
+    this, not by its position in a loop (see run_lrgb's combine-multiple-
+    contributors branch and its earlier positional `contrib{i}` bug)."""
+
+    telescope: str
+    binning: int
+    composite_path: Path
+    sub_count: int
+    stack_total: int
+
+    @property
+    def key(self) -> str:
+        """Stable identity string for filenames/logging, e.g. 'T24_bin1'."""
+        return f"{self.telescope}_bin{self.binning}"
+
+
+def resolve_instrument_profile(telescope: str):
+    """SPCC's InstrumentProfile for `telescope`, or raise -- never guess.
+
+    Factored out of _build_colour_contributor as its own function (Slice
+    3.1) so this safety check is directly unit-testable without invoking
+    the full calibrate/stack/solve/rgbcomp/GraXpert chain that runs before
+    it in the real pipeline. Previously
+    `INSTRUMENT_PROFILES.get(telescope, T24_PROFILE)` silently mis-
+    profiled ANY unrecognized telescope as T24's KAF16803/Astrodon
+    sensor+filters -- SPCC models the actual spectral response of the
+    optical train that produced the data, so a wrong profile doesn't fail
+    loudly, it just produces a plausible-looking, physically wrong colour
+    solution. Raises UnknownInstrumentError instead.
+    """
+    profile = INSTRUMENT_PROFILES.get(telescope)
+    if profile is None:
+        raise UnknownInstrumentError(
+            f"No SPCC InstrumentProfile registered for telescope {telescope!r} "
+            f"(known: {sorted(INSTRUMENT_PROFILES)}) -- refusing to guess a "
+            "sensor/filter profile for colour calibration. Register an "
+            f"InstrumentProfile for {telescope!r} in INSTRUMENT_PROFILES first."
+        )
+    return profile
+
+
 def _build_colour_contributor(
     project_dir: Path,
     contrib_dir: Path,
@@ -439,18 +484,21 @@ def _build_colour_contributor(
     ra_hours: float,
     dec_deg: float,
     notes: list[str],
-) -> tuple[Path, int, int]:
+) -> ColourContributor | None:
     """Build one binning's R/G/B masters, align + crop + composite them,
     then background-extract and colour-calibrate -- everything the
     single-contributor pipeline always did, just namespaced under
-    `contrib_dir` so multiple binnings can coexist. Returns the
-    colour-calibrated composite's path, the number of raw subs that went
-    into it (summed across channels, used to WEIGHT this contributor when
-    combining with others later -- unchanged by Slice 1, stays on this
-    sub_count basis until Slice 3), and the STACKCNT summed across the
-    three channel masters' own headers (used for LOGGING only -- how many
-    subs actually survived quality filtering/rejection to make it into the
-    stacked masters, which sub_count alone cannot show).
+    `contrib_dir` so multiple binnings can coexist.
+
+    Returns None -- logging why, rather than raising -- if any of R/G/B is
+    missing for this (telescope, binning): a colour contributor needs all
+    three, but a partial set is a real, survivable state once RGB
+    discovery broadens beyond one telescope (this function's own
+    behaviour is scoped narrowly here; broadening the discovery loop
+    itself is a separate, later concern -- see run_lrgb). Before Slice 3
+    this raised RuntimeError and aborted the entire run over one missing
+    filter on one binning; that's disproportionate once a partial
+    contributor is an expected, not exceptional, outcome.
     """
     contrib_dir.mkdir(parents=True, exist_ok=True)
     cal_index = report.calibration_index()
@@ -461,10 +509,13 @@ def _build_colour_contributor(
     for filter_name in RGB_FILTERS:
         lights, group_name = resolve_lights(report, telescope, target, filter_name, binning)
         if not lights:
-            raise RuntimeError(
-                f"No {filter_name}/BIN{binning} lights found for {telescope}/{target} -- "
-                "a colour contributor needs all three of Red/Green/Blue."
+            _log(
+                f"[skip] BIN{binning}: no {filter_name} lights found for {telescope}/{target} "
+                "-- a colour contributor needs all three of Red/Green/Blue; skipping this "
+                "contributor rather than aborting the whole run",
+                notes,
             )
+            return None
         sub_count += len(lights)
         master_path = build_master(
             project_dir, lights, cal_index, group_name, filter_name,
@@ -523,7 +574,7 @@ def _build_colour_contributor(
         # has not been transformed. Existence must mean completion.
         staging = contrib_dir / "rgb_colour_calibrated__inprogress.fit"
         shutil.copy2(rgb_bg, staging)
-        profile = INSTRUMENT_PROFILES.get(telescope, T24_PROFILE)
+        profile = resolve_instrument_profile(telescope)
         _log(f"[run ] BIN{binning}: SPCC colour calibration ({profile.mono_sensor}, local Gaia)", notes)
         solution = run_spcc(staging, contrib_dir, profile=profile)
         os.replace(staging, colour_calibrated)
@@ -535,7 +586,10 @@ def _build_colour_contributor(
     else:
         _log(f"[skip] BIN{binning}: SPCC already done", notes)
 
-    return colour_calibrated, sub_count, stack_total
+    return ColourContributor(
+        telescope=telescope, binning=binning, composite_path=colour_calibrated,
+        sub_count=sub_count, stack_total=stack_total,
+    )
 
 
 def run_lrgb(
@@ -628,21 +682,30 @@ def run_lrgb(
     if rgb_binning not in rgb_binnings:
         rgb_binnings = [rgb_binning, *rgb_binnings]
 
-    contributors: list[tuple[Path, int]] = []
+    contributors: list[ColourContributor] = []
     for binning in rgb_binnings:
         contrib_dir = final if binning == rgb_binning else final / f"contrib_bin{binning}"
-        composite, sub_count, stack_total = _build_colour_contributor(
+        contributor = _build_colour_contributor(
             project_dir, contrib_dir, report, telescope, target, binning,
             ra_hours, dec_deg, notes,
         )
-        # Weighting stays on sub_count (raw sub count) -- unchanged from
-        # today, and deliberately so (see combine_same_grid call below).
-        # Only the LOG line switches to STACKCNT, i.e. how many subs
-        # actually survived quality filtering/rejection into the stacked
-        # masters, which sub_count alone can't show.
-        contributors.append((composite, sub_count))
+        if contributor is None:
+            # Logged inside _build_colour_contributor already (Slice 3.2:
+            # log-and-skip, not abort-the-run).
+            continue
+        contributors.append(contributor)
         if len(rgb_binnings) > 1:
-            _log(f"       BIN{binning} contributor: {stack_total} stacked subs across R/G/B (STACKCNT)", notes)
+            _log(
+                f"       {contributor.key} contributor: {contributor.stack_total} stacked "
+                "subs across R/G/B (STACKCNT)",
+                notes,
+            )
+
+    if not contributors:
+        raise RuntimeError(
+            f"No usable RGB colour contributor for {telescope}/{target} -- every discovered "
+            f"binning ({rgb_binnings}) was missing at least one of Red/Green/Blue."
+        )
 
     # --- luminance: background extraction --------------------------------
     lum_bg = final / "lum_bg.fits"
@@ -668,21 +731,19 @@ def run_lrgb(
     if not usable(rgb_reconciled, notes):
         if len(contributors) == 1:
             _log("[run ] reprojecting colour onto L's pixel grid", notes)
-            recon = reproject_to_reference(contributors[0][0], lum_bg, rgb_reconciled)
+            recon = reproject_to_reference(contributors[0].composite_path, lum_bg, rgb_reconciled)
             _log(f"       footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f}", notes)
         else:
             reprojected_paths = []
-            weights = []
-            for i, (composite, sub_count) in enumerate(contributors):
+            for i, contributor in enumerate(contributors):
                 out_path = final / f"rgb_reconciled_contrib{i}.fit"
-                recon = reproject_to_reference(composite, lum_bg, out_path)
+                recon = reproject_to_reference(contributor.composite_path, lum_bg, out_path)
                 _log(
                     f"[run ] reprojected contributor {i} onto L's grid "
                     f"(footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f})",
                     notes,
                 )
                 reprojected_paths.append(out_path)
-                weights.append(float(sub_count))
 
             # Crop L and every reprojected contributor to their common
             # coverage BEFORE combining, rather than combining with a
@@ -709,6 +770,10 @@ def run_lrgb(
                 notes,
             )
             shutil.copy2(cropped[0], lum_for_compose_path)
+            # Weighting stays on sub_count (raw sub count) -- unchanged from
+            # today; Slice 3.4-3.6 replaces this with a gain/offset-matched,
+            # STACKCNT-weighted combine.
+            weights = [float(c.sub_count) for c in contributors]
             combine_same_grid(cropped[1:], rgb_reconciled, weights=weights)
             _log(
                 f"[run ] combined {len(contributors)} colour contributors "
