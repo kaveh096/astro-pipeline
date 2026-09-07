@@ -21,7 +21,6 @@ if __name__ == "__main__":
     result = run_lrgb(
         PROJECT_DIR,
         telescope="T24",
-        user="kaveh096",
         target="M51",
         ra_hours=M51_RA_HOURS,
         dec_deg=M51_DEC_DEG,

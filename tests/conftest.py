@@ -26,13 +26,18 @@ PIPELINE_DIR = PROJECT_DIR / "_pipeline"
 FINAL_DIR = PIPELINE_DIR / "final"
 
 
-def _master(filter_name: str, binning: int) -> Path:
-    group = f"T24-kaveh096-M51-{filter_name}-bin{binning}"
+def _master(filter_name: str, binning: int, user: str = "kaveh096") -> Path:
+    group = f"T24-{user}-M51-{filter_name}-bin{binning}"
     return PIPELINE_DIR / group / "lights" / f"master_{filter_name.lower()}.fit"
 
 
-# Plate-solved per-filter masters (Stages 2-4).
-LUM_MASTER = _master("Luminance", 1)
+# Plate-solved per-filter masters (Stages 2-4). Luminance is the merged
+# multi-user group (Kaveh + collaborator jmwill both shoot Luminance/BIN1
+# on T24 -- pipeline.py combines them at the raw-sub level, see its module
+# docstring), so its group directory name reflects both users, sorted.
+# Red/Green/Blue at BIN2 are Kaveh-only (jmwill's RGB is BIN1), so their
+# group names are unchanged.
+LUM_MASTER = _master("Luminance", 1, user="jmwill+kaveh096")
 RED_MASTER = _master("Red", 2)
 GREEN_MASTER = _master("Green", 2)
 BLUE_MASTER = _master("Blue", 2)

@@ -278,3 +278,84 @@ def reconcile_masters(
         out_path = work_dir / f"reconciled_{path.stem}.fit"
         results[path] = reproject_to_reference(path, reference_path, out_path)
     return reference_path, results
+
+
+def combine_same_grid(
+    paths: list[Path],
+    output_path: str | Path,
+    weights: list[float] | None = None,
+) -> Path:
+    """Combine N images that already share an identical grid (same WCS,
+    same shape -- typically the output of reproject_to_reference against a
+    common reference) into one, via a NaN-aware weighted mean.
+
+    This is how multiple contributors (e.g. two users' RGB at different
+    binnings, each independently colour-calibrated and reprojected onto a
+    common Luminance grid) get folded into one final channel: average
+    rather than pick-one, so every contributor's signal counts. NaN-aware
+    per pixel, not per frame -- wherever only some contributors have real
+    data (edge regions outside a smaller frame's field of view), the
+    average uses only those that do, rather than one NaN dragging the
+    whole pixel to NaN. A pixel is NaN in the output only if it is NaN in
+    every contributor.
+
+    `weights` (default: equal) lets a contributor with more stacked subs
+    count for more -- e.g. weight by sub count so a 21-sub contributor
+    outweighs an 8-sub one, closer to what a single combined stack would
+    have produced.
+
+    KNOWN RESIDUAL ARTIFACT, not fixed by cropping to common coverage
+    first (crop_to_common_coverage): even where every contributor has
+    genuinely valid data (0% NaN after cropping), a smooth background
+    GRADIENT can remain near a smaller contributor's own field edge.
+    Measured on real data: two contributors' linear backgrounds matched to
+    within 0.1% through most of the frame, but diverged smoothly starting
+    ~300px before one contributor's true edge (its Blue channel rising
+    ~0.1% -> ~1% relative to Red over that span) -- small in absolute
+    linear terms, but a shadow-clipped stretch operates right at the
+    steepest part of its curve near the background level, so that gradient
+    got amplified into a strong, clearly visible colour-shifted band along
+    that edge in the final image. Root cause is almost certainly each
+    contributor's independent GraXpert background-extraction being less
+    reliable near ITS OWN frame boundary (a background model has less
+    supporting data to fit near an edge than in the interior) -- which
+    crop_to_common_coverage cannot detect, because it only distinguishes
+    valid data from NaN, not confident background modelling from
+    uncertain-but-technically-valid modelling near an edge.
+
+    Not fixed here: the pragmatic mitigation is trimming an extra margin
+    off the affected edge before stretching (standard practice for
+    combined/mosaicked astro images anyway), which was not automated as of
+    this writing -- final framing/cropping is Kaveh's own manual step in
+    Photoshop, so the artifact sits inside the region he crops away
+    regardless. Worth automating if this pipeline ever needs to hand off a
+    combined multi-contributor frame somewhere the edges matter.
+    """
+    paths = [Path(p) for p in paths]
+    if len(paths) < 2:
+        raise ValueError("Need at least two images to combine.")
+    if weights is None:
+        weights = [1.0] * len(paths)
+    if len(weights) != len(paths):
+        raise ValueError("weights must have the same length as paths.")
+
+    arrays = [fits.getdata(p, memmap=False).astype(np.float32) for p in paths]
+    shapes = {a.shape for a in arrays}
+    if len(shapes) != 1:
+        raise ReprojectionError(f"Cannot combine images of different shapes: {shapes}")
+
+    stack = np.stack(arrays, axis=0)
+    weight_arr = np.asarray(weights, dtype=np.float32).reshape((-1,) + (1,) * arrays[0].ndim)
+    valid = np.isfinite(stack)
+
+    weighted_sum = np.where(valid, stack * weight_arr, 0.0).sum(axis=0)
+    weight_total = np.where(valid, weight_arr, 0.0).sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        combined = weighted_sum / weight_total
+    combined[weight_total == 0] = np.nan
+
+    header = fits.getheader(paths[0])
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fits.writeto(output_path, combined.astype(np.float32), header=header, overwrite=True)
+    return output_path

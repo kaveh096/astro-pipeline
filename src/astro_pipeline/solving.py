@@ -97,7 +97,7 @@ def solve(
     dec_deg: float | None = None,
     search_radius_deg: float = 5.0,
     astap_cli: Path | None = None,
-    timeout: float | None = 120,
+    timeout: float | None = 300,
 ) -> SolveResult:
     """Plate-solve fits_path in place via ASTAP, using a coordinate hint
     (either resolved from `target` or given directly) to keep the search
@@ -110,6 +110,14 @@ def solve(
     sensor QE / more atmospheric scattering in blue -- and only solved once
     ASTAP's auto-downsampling was turned off so it didn't throw away the
     faint stars that were the only ones available.
+
+    Timeout defaults to 300s, not 120s: a 4096x4096 BIN1 master genuinely
+    took 179s to solve (ASTAP worked through 8 FOV guesses, from 9.5 deg
+    down to 0.56 deg, before finding a 48/48-quad match) -- confirmed by
+    running ASTAP directly outside the timeout after the pipeline call
+    twice raised subprocess.TimeoutExpired on the identical file. Not a
+    hang; genuinely slower on some real masters than the smaller BIN2
+    masters this was originally tuned against.
     """
     fits_path = Path(fits_path)
 

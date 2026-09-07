@@ -206,25 +206,38 @@ def test_missing_calibration_warnings_flags_missing_bias_and_dark(tmp_path: Path
 #
 # This tree supersedes the original tidy single-telescope sample: it's messy
 # on purpose (real iTelescope deliveries across two telescopes, two users,
-# multiple filename conventions, zip-wrapped exposures). scan_session only
-# covers loose .fit/.fits/.fts files under root -- zip-wrapped T21 lights and
-# non-FITS files (previews, master calibration TIFFs) are index.py's job,
-# covered in test_index.py.
+# multiple filename conventions, zip-wrapped exposures). scan_session
+# extracts zip-wrapped raw lights into _pipeline/_extracted_zips/ so they
+# become real, pipeline-usable files -- non-FITS files (previews, master
+# calibration TIFFs) remain index.py's job, covered in test_index.py.
 
 
 @pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
 def test_scan_real_multi_telescope_session() -> None:
     report = scan_session(REAL_SESSION_DIR)
 
+    raw_lights = [f for f in report.lights if f.provenance == "raw"]
+
     # T24 raw lights: 95, from TWO different iTelescope users -- Kaveh
     # (kaveh096) and a collaborator (jmwill) who independently imaged the
     # same target on the same telescope with different binning choices for
-    # RGB. T21's lights are zip-wrapped and invisible to a bare fit-glob
-    # scan -- that's expected here, not a bug (see test_index.py).
-    raw_lights = [f for f in report.lights if f.provenance == "raw"]
-    assert len(raw_lights) == 95
-    assert all(f.telescope == "T24" for f in raw_lights)
-    assert {f.user for f in raw_lights} == {"kaveh096", "jmwill"}
+    # RGB.
+    t24_lights = [f for f in raw_lights if f.telescope == "T24"]
+    assert len(t24_lights) == 95
+    assert {f.user for f in t24_lights} == {"kaveh096", "jmwill"}
+
+    # T21 raw lights: only 2 in this delivery, both zip-wrapped and both
+    # Luminance -- but at two different exposure lengths (600s and 300s),
+    # so they land in the same light_groups() bucket (grouping is by
+    # binning, not exptime) while still needing separate dark matching at
+    # calibration time (calibration_index is keyed by exptime too).
+    t21_lights = [f for f in raw_lights if f.telescope == "T21"]
+    assert len(t21_lights) == 2
+    assert {f.exptime for f in t21_lights} == {600.0, 300.0}
+    assert all(f.user == "kaveh096" for f in t21_lights)
+    # Extracted to real files, not the zip path -- calibration.py needs an
+    # actual FITS file it can copy/stage into a Siril sequence directory.
+    assert all(f.path.suffix.lower() == ".fit" and f.path.exists() for f in t21_lights)
 
     # iTelescope-side-calibrated duplicates of the same exposures are present
     # too, and must NOT show up in light_groups() (which only ever returns
@@ -267,3 +280,26 @@ def test_scan_real_multi_telescope_session() -> None:
     # -- correctly refused rather than guessed at.
     assert len(report.unrecognized) == 11
     assert all("master_flat" in f.path.name.lower() for f in report.unrecognized)
+
+
+@pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
+def test_instrument_groups_merges_users_sharing_telescope_and_binning() -> None:
+    """The unit build_master actually stacks from: Kaveh's and jmwill's
+    T24/BIN1 Luminance subs share a telescope and binning, so they must
+    merge into ONE group (13 + 8 = 21) for raw-sub-level combining --
+    better outlier rejection than averaging two separately-stacked
+    masters. Their RGB, at different binnings (BIN2 vs BIN1), must NOT
+    merge -- Siril can't register/stack frames of different pixel scale
+    together at all.
+    """
+    report = scan_session(REAL_SESSION_DIR)
+    groups = report.instrument_groups()
+
+    assert ("T24", "M51", "Luminance", 1) in groups
+    assert len(groups[("T24", "M51", "Luminance", 1)]) == 21
+    assert {f.user for f in groups[("T24", "M51", "Luminance", 1)]} == {"kaveh096", "jmwill"}
+
+    assert ("T24", "M51", "Red", 2) in groups
+    assert {f.user for f in groups[("T24", "M51", "Red", 2)]} == {"kaveh096"}
+    assert ("T24", "M51", "Red", 1) in groups
+    assert {f.user for f in groups[("T24", "M51", "Red", 1)]} == {"jmwill"}

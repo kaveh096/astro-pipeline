@@ -222,3 +222,69 @@ def test_crop_to_common_coverage_updates_wcs_reference_pixel(tmp_path: Path) -> 
     trimmed_rows = original["NAXIS2"] - fits.getdata(outputs[0], memmap=False).shape[0]
     assert trimmed_rows > 0
     assert cropped["CRPIX2"] == pytest.approx(original["CRPIX2"] - trimmed_rows)
+
+
+def test_combine_same_grid_averages_with_weights(tmp_path: Path) -> None:
+    from astro_pipeline.reconciliation import combine_same_grid
+
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    fits.writeto(a, np.full((4, 4), 10.0, dtype=np.float32))
+    fits.writeto(b, np.full((4, 4), 20.0, dtype=np.float32))
+
+    out = combine_same_grid([a, b], tmp_path / "combined.fit")
+    data = fits.getdata(out, memmap=False)
+    assert np.allclose(data, 15.0)  # equal weights -> plain mean
+
+    weighted = combine_same_grid([a, b], tmp_path / "weighted.fit", weights=[3.0, 1.0])
+    wdata = fits.getdata(weighted, memmap=False)
+    assert np.allclose(wdata, 12.5)  # (3*10 + 1*20) / 4
+
+
+def test_combine_same_grid_is_nan_aware_per_pixel(tmp_path: Path) -> None:
+    """Where only one contributor has real data (e.g. a smaller frame's
+    edge), the average must use only the contributors that do -- a single
+    NaN must not drag the whole pixel to NaN."""
+    from astro_pipeline.reconciliation import combine_same_grid
+
+    a = np.full((4, 4), 10.0, dtype=np.float32)
+    a[0, 0] = np.nan
+    b = np.full((4, 4), 20.0, dtype=np.float32)
+
+    a_path, b_path = tmp_path / "a.fit", tmp_path / "b.fit"
+    fits.writeto(a_path, a)
+    fits.writeto(b_path, b)
+
+    out = combine_same_grid([a_path, b_path], tmp_path / "combined.fit")
+    data = fits.getdata(out, memmap=False)
+    assert data[0, 0] == pytest.approx(20.0)  # only b contributed here
+    assert data[1, 1] == pytest.approx(15.0)  # both contributed elsewhere
+
+
+def test_combine_same_grid_nan_only_where_all_contributors_are_nan(tmp_path: Path) -> None:
+    from astro_pipeline.reconciliation import combine_same_grid
+
+    a = np.full((4, 4), np.nan, dtype=np.float32)
+    a[0, 0] = 5.0
+    b = np.full((4, 4), np.nan, dtype=np.float32)
+    b[0, 0] = 7.0
+
+    a_path, b_path = tmp_path / "a.fit", tmp_path / "b.fit"
+    fits.writeto(a_path, a)
+    fits.writeto(b_path, b)
+
+    out = combine_same_grid([a_path, b_path], tmp_path / "combined.fit")
+    data = fits.getdata(out, memmap=False)
+    assert data[0, 0] == pytest.approx(6.0)
+    assert np.isnan(data[1, 1])
+
+
+def test_combine_same_grid_rejects_mismatched_shapes(tmp_path: Path) -> None:
+    from astro_pipeline.reconciliation import combine_same_grid
+
+    a_path, b_path = tmp_path / "a.fit", tmp_path / "b.fit"
+    fits.writeto(a_path, np.zeros((4, 4), dtype=np.float32))
+    fits.writeto(b_path, np.zeros((8, 8), dtype=np.float32))
+
+    with pytest.raises(ReprojectionError):
+        combine_same_grid([a_path, b_path], tmp_path / "combined.fit")

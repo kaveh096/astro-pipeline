@@ -45,12 +45,14 @@ telescope+binning(+exptime for darks)), not to a single capture night.
 from __future__ import annotations
 
 import re
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from astropy.io import fits
 
 FIT_GLOB_PATTERNS = ("*.fit", "*.fits", "*.fts")
+ARCHIVE_GLOB_PATTERNS = ("*.zip",)
 
 # Directory (inside a project folder) holding pipeline-generated data. Must
 # never be scanned as input -- see is_generated(). Kept as a literal here
@@ -137,15 +139,15 @@ class IngestReport:
     unrecognized: list[UnrecognizedFrame] = field(default_factory=list)
 
     def light_groups(self) -> dict[tuple[str, str, str, str, int], list[LightFrame]]:
-        """Group RAW lights by (telescope, user, target, filter, binning) --
-        the unit Stage 4 stacks into one master. `user` is part of the key
-        deliberately: a real delivery has two different iTelescope accounts
-        (collaborators) shooting the same target on the same telescope with
-        different binning choices for RGB -- silently merging their subs
-        into one group would mix incompatible data without anyone deciding
-        to. Combining multiple users' *masters* later is a legitimate,
-        separate step (same pattern as combining multiple instruments'
-        masters), not something this grouping does implicitly.
+        """Group RAW lights by (telescope, user, target, filter, binning).
+        `user` is part of the key deliberately: a real delivery has two
+        different iTelescope accounts (collaborators) shooting the same
+        target on the same telescope with different binning choices for
+        RGB -- silently merging their subs into one group here would mix
+        incompatible data without anyone deciding to. See
+        `instrument_groups()` for the merged view actually used to build a
+        master, which combines across users only where doing so is
+        physically valid (same telescope + binning).
 
         Deliberately excludes "calibrated"/"jpeg" provenance frames -- those
         are catalog-only, never fed back into the calibration/stacking
@@ -160,6 +162,31 @@ class IngestReport:
                 continue
             key = (frame.telescope, frame.user, frame.target, frame.filter_name, frame.binning)
             groups.setdefault(key, []).append(frame)
+        return groups
+
+    def instrument_groups(self) -> dict[tuple[str, str, str, int], list[LightFrame]]:
+        """Group RAW lights by (telescope, target, filter, binning), merging
+        across users.
+
+        This is the unit that actually gets calibrated + registered +
+        stacked into ONE master: when two users share a telescope and
+        binning for a filter (e.g. two collaborators' Luminance/BIN1 subs),
+        combining their raw frames into a single stack gives Siril's
+        rejection algorithm visibility into every individual frame, which
+        rejects outliers (satellite trails, etc) better than averaging two
+        independently-stacked masters would.
+
+        Different-binning contributions for the same filter (e.g. one
+        user's BIN1 RGB against another's BIN2 RGB) necessarily stay in
+        separate groups here -- they have different pixel scale/dimensions
+        and cannot be combined at the raw-sub level at all. That case is
+        reconciled at the MASTER level instead, once each binning's own
+        master exists (see reconciliation.py).
+        """
+        groups: dict[tuple[str, str, str, int], list[LightFrame]] = {}
+        for (telescope, _user, target, filter_name, binning), frames in self.light_groups().items():
+            key = (telescope, target, filter_name, binning)
+            groups.setdefault(key, []).extend(frames)
         return groups
 
     def calibration_index(self) -> dict[tuple[str, str, int, float], list[CalibrationFrame]]:
@@ -344,9 +371,60 @@ def is_generated(path: Path, root: Path) -> bool:
     return GENERATED_DIRNAME in relative.parts
 
 
+def _extract_zipped_lights(zip_path: Path, extract_dir: Path) -> list[LightFrame]:
+    """Peek inside a zip and extract any RAW light frame(s) it contains, so
+    they become real files scan_session can hand to the calibration stage.
+
+    Only "raw" provenance is extracted -- calibrated/jpeg entries inside a
+    zip are the same iTelescope-side duplicates that light_groups() already
+    excludes for bare-file lights, and extracting them would just create
+    more files to ignore. Calibration frames (bias/dark/flat) are not
+    handled here: every real delivery seen so far ships those as bare
+    files, never zipped: this only needs to cover what has actually been
+    observed, not every hypothetical zip layout.
+
+    Idempotent: if the extracted file already exists, it is reused rather
+    than re-extracted, so a resumed scan doesn't redo the work.
+    """
+    telescope_hint = _infer_telescope_from_path(zip_path)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+    except (zipfile.BadZipFile, OSError):
+        return []
+
+    extracted: list[LightFrame] = []
+    for inner_name in names:
+        basename = Path(inner_name).name
+        classified = classify_filename(basename, telescope_hint=telescope_hint)
+        if classified is None:
+            continue
+        kind, fields = classified
+        if kind != "light" or fields["provenance"] != "raw":
+            continue
+
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        out_path = extract_dir / basename
+        if not out_path.exists():
+            with zipfile.ZipFile(zip_path) as zf:
+                with zf.open(inner_name) as src, open(out_path, "wb") as dst:
+                    dst.write(src.read())
+        extracted.append(LightFrame(path=out_path, **fields))
+    return extracted
+
+
 def scan_session(root: str | Path) -> IngestReport:
     root = Path(root)
     report = IngestReport()
+    # Zip-wrapped lights are extracted into the pipeline's own generated
+    # directory. That is deliberate, not incidental: is_generated() already
+    # excludes everything under GENERATED_DIRNAME from the raw-file scan
+    # below, so the extracted copies can never be re-discovered as if they
+    # were additional raw deliveries on a second run (see is_generated's
+    # docstring for the real bug that exact mistake caused with staged
+    # calibration copies).
+    extract_dir = root / GENERATED_DIRNAME / "_extracted_zips"
+
     seen: set[Path] = set()
     for pattern in FIT_GLOB_PATTERNS:
         for path in root.rglob(pattern):
@@ -360,4 +438,12 @@ def scan_session(root: str | Path) -> IngestReport:
                 report.calibration.append(classified)
             else:
                 report.unrecognized.append(classified)
+
+    for pattern in ARCHIVE_GLOB_PATTERNS:
+        for path in root.rglob(pattern):
+            if path in seen or is_generated(path, root):
+                continue
+            seen.add(path)
+            report.lights.extend(_extract_zipped_lights(path, extract_dir))
+
     return report
