@@ -55,10 +55,15 @@ imaged the same target on the same telescope:
   pixel scale from T24, so its Luminance can never raw-sub-combine with
   T24's regardless of exptime; each telescope's Luminance gets its own
   master-level contributor instead (see the discovery loop in run_lrgb --
-  multiple telescopes' worth of Luminance masters get built there, though
-  which one actually drives the rendered composite is still just the
-  caller's own `telescope`/`lum_binning`, unchanged; selecting among them
-  is Slice 2's job, not this pass's).
+  every discovered telescope's worth of Luminance masters get built there).
+  Which one actually drives the rendered composite is a MEASURED
+  RECOMMENDATION, not an automatic rule (Slice 2): each contributor's
+  median stellar FWHM is read off Siril's own per-frame registration data
+  (`r_pp_lights_.seq`'s `R0` lines, see contributor_fwhm_arcsec()) and
+  converted to arcsec against its own plate-solved master's pixel scale,
+  the sharpest one wins by default, and every other Luminance master still
+  gets built (so it's on disk and inspectable) but excluded from the
+  composite -- see `lum_source` on run_lrgb for the explicit override.
 
   RGB combines at the MASTER level, across "contributors" -- one
   contributor per (telescope, binning) that has all three R/G/B present.
@@ -104,7 +109,7 @@ from .background_color import (
 from .calibration import select_dark, run_calibration
 from .export_image import ExportResult, export
 from .ingest import scan_session
-from .checkpoints import Checkpoint, checkpoint, save_checkpoints
+from .checkpoints import Checkpoint, checkpoint, save_checkpoints, _pixel_scale_arcsec
 from .reconciliation import combine_same_grid, crop_to_common_coverage, reproject_to_reference
 from .registration_stacking import register_and_stack
 from .siril_driver import run_script
@@ -233,6 +238,149 @@ def build_master(
     stackcnt = fits.getheader(stack_result.master_path).get("STACKCNT", n)
     _log(f"       {group_name}: STACKCNT={stackcnt}", notes)
     return stack_result.master_path
+
+
+def contributor_fwhm_arcsec(
+    master_path: Path, notes: list[str], label: str | None = None
+) -> float | None:
+    """Median stellar FWHM, in arcsec, for one build_master() output --
+    the sharpness figure Slice 2's Luminance-source selection is measured
+    against (see run_lrgb).
+
+    A sibling accessor rather than a change to build_master's own return
+    type: build_master's plain Path return is left alone (its colour-
+    contributor call sites are unrelated to this slice), and this reads
+    the same on-disk outputs independently, given nothing but the master
+    Path build_master already handed back.
+
+    Mechanics, verified against real T21 and T24 fixture data (not
+    assumed from the plan): Siril's `register` step -- which always runs
+    immediately before `stack`, see registration_stacking.py -- writes its
+    own per-frame FWHM into `r_pp_lights_.seq`, one `R0 <fwhm_x> <fwhm_y>
+    <roundness> ...` line per SELECTED frame (confirmed: T21's real file
+    has exactly 2 R0 lines for its 2-sub group; T24's real file has
+    exactly 20 for its 20-sub group, matching `nb_selected` in each file's
+    own header line). That file sits at `master_path.parent /
+    "r_pp_lights_.seq"` on both a fresh and a resumed run -- confirmed
+    present in every real Luminance work_dir/lights/ on disk. Median (not
+    mean) of the first field across every R0 line, so one bad frame's
+    outlier FWHM doesn't skew the figure the way an average would.
+
+    The `.seq` file's FWHM is in PIXELS of the pre-solve `pp_`/`r_pp_`
+    frames it measured, and those frames carry no WCS of their own (see
+    module docstring) -- so the pixel scale has to come from the frame
+    that DOES have one: the plate-solved MASTER this contributor became
+    (same pixel grid as the frames it was measured on; stacking and plate
+    solving don't resample), read via checkpoints._pixel_scale_arcsec(),
+    which already does exactly this WCS-header-to-arcsec/px conversion for
+    checkpoint statistics.
+
+    Returns None, never raises, if the .seq file is missing/empty, has no
+    R0 lines, or the master's header has no usable WCS -- a missing
+    sharpness figure should degrade Slice 2's selection (see run_lrgb's
+    fallback), not take down the whole run.
+    """
+    label = label or master_path.parent.parent.name
+    seq_path = master_path.parent / "r_pp_lights_.seq"
+    if not seq_path.exists():
+        _log(f"       {label}: no {seq_path.name} found -- cannot measure FWHM", notes)
+        return None
+
+    fwhm_px: list[float] = []
+    for line in seq_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith("R0 "):
+            continue
+        fields = line.split()
+        try:
+            fwhm_px.append(float(fields[1]))
+        except (IndexError, ValueError):
+            continue
+    if not fwhm_px:
+        _log(f"       {label}: {seq_path.name} has no R0 (FWHM) lines -- cannot measure FWHM", notes)
+        return None
+
+    pixel_scale = _pixel_scale_arcsec(fits.getheader(master_path))
+    if pixel_scale is None:
+        _log(f"       {label}: master has no usable WCS -- cannot convert FWHM to arcsec", notes)
+        return None
+    return float(np.median(fwhm_px)) * pixel_scale
+
+
+LumCandidate = tuple[tuple[str, int], Path, float | None]
+
+
+def select_luminance_source(
+    candidates: list[LumCandidate],
+    lum_source: tuple[str, int] | None,
+    fallback_key: tuple[str, int],
+    notes: list[str],
+) -> LumCandidate:
+    """Pick which already-built Luminance contributor drives the composite,
+    and log why every other one didn't -- Slice 2's measured recommendation,
+    factored out of run_lrgb as its own function (side effect: log lines
+    only) so the selection rule itself is directly testable without
+    invoking the full Siril/GraXpert/SPCC pipeline that builds `candidates`
+    in the first place.
+
+    Rule, in order:
+    1. `lum_source`, if given, always wins -- an explicit human override,
+       logged as such (not a measured choice). Raises ValueError if it
+       names a combo that isn't actually among `candidates` (Slice 1's
+       discovery would have to have missed it, or the caller made a typo --
+       either way, silently ignoring the override would be worse).
+    2. Otherwise, the candidate with the lowest measured FWHM wins ("lowest
+       FWHM" = sharpest), logged with the number that decided it.
+    3. If NOTHING could be measured (every contributor's `.seq` file was
+       missing or unreadable), fall back to `fallback_key` -- the caller's
+       own (telescope, lum_binning), i.e. the pre-Slice-2 behaviour --
+       rather than raising, since a missing sharpness figure is a real but
+       survivable degraded mode (see contributor_fwhm_arcsec).
+    """
+    if lum_source is not None:
+        match = next((c for c in candidates if c[0] == lum_source), None)
+        if match is None:
+            raise ValueError(
+                f"lum_source={lum_source!r} was not among the discovered Luminance "
+                f"contributors {[c[0] for c in candidates]}"
+            )
+        selected = match
+        _log(
+            f"[run ] Luminance source: {selected[0][0]}-bin{selected[0][1]} selected via "
+            "EXPLICIT OVERRIDE (lum_source=...) -- not a measured choice",
+            notes,
+        )
+    else:
+        measured = [c for c in candidates if c[2] is not None]
+        if measured:
+            selected = min(measured, key=lambda c: c[2])
+            _log(
+                f"[run ] Luminance source: {selected[0][0]}-bin{selected[0][1]} selected as "
+                f"sharpest (FWHM {selected[2]:.2f}\")",
+                notes,
+            )
+        else:
+            fallback = next((c for c in candidates if c[0] == fallback_key), None)
+            selected = fallback or candidates[0]
+            _log(
+                f"[warn] no Luminance contributor FWHM could be measured; falling back to "
+                f"{selected[0][0]}-bin{selected[0][1]}",
+                notes,
+            )
+
+    for key, _path, fwhm in candidates:
+        if key == selected[0]:
+            continue
+        if fwhm is not None and selected[2] is not None:
+            reason = f"FWHM {fwhm:.2f}\" vs selected {selected[2]:.2f}\""
+        else:
+            reason = "not selected"
+        _log(
+            f"       Luminance-{key[0]}-bin{key[1]}: master built but NOT selected for the "
+            f"composite ({reason})",
+            notes,
+        )
+
+    return selected
 
 
 def discover_luminance_contributors(
@@ -399,7 +547,18 @@ def run_lrgb(
     lum_binning: int = 1,
     rgb_binning: int = 2,
     stretch_method: str = "autostretch",
+    lum_source: tuple[str, int] | None = None,
 ) -> PipelineResult:
+    """`lum_source`, if given, names an explicit `(telescope, binning)`
+    among the discovered Luminance contributors to drive the composite --
+    overriding Slice 2's default sharpest-wins measurement. This is
+    deliberately a direct parameter, not an automatic override rule: a
+    fully-automatic sharpness rule is genuinely underspecified in real
+    edge cases (same telescope shot at two binnings; a near-tie), so the
+    project's own checkpointed-not-black-box design principle keeps the
+    final call available to a human (Slice 4's skill wraps this as a real
+    menu choice; here it's just an argument). Raises ValueError if the
+    named combo wasn't actually discovered for this target."""
     project_dir = Path(project_dir)
     out = pipeline_dir(project_dir)
     final = out / "final"
@@ -415,18 +574,25 @@ def run_lrgb(
     # the caller's `telescope`, otherwise a telescope that only ever
     # contributes colour under Kaveh's colour-only rule (T21 today) would
     # never get its own Luminance master built under any slice, including
-    # this one. This slice only BUILDS these masters -- it does not select
-    # or blend which one drives the rendered composite (that's Slice 2):
-    # the caller's own (telescope, lum_binning) keeps driving the composite
-    # exactly as before, via the unchanged result.masters[LUMINANCE_FILTER]
-    # key, so nothing about the rendered output changes here. Each user
-    # sharing a (telescope, binning) is still merged at the raw-sub level
-    # (see module docstring) -- that combining logic is per-contributor,
-    # unaffected by there now being more than one contributor.
+    # this one. Each user sharing a (telescope, binning) is still merged at
+    # the raw-sub level (see module docstring) -- that combining logic is
+    # per-contributor, unaffected by there now being more than one
+    # contributor.
+    #
+    # Which contributor actually drives the rendered composite is Slice 2's
+    # measured recommendation: every contributor's master gets built (so
+    # every one is on disk and inspectable, even the ones not selected --
+    # per this project's checkpointed-not-black-box design principle), its
+    # median FWHM gets measured and logged, and the sharpest one wins by
+    # default. This is deliberately NOT folded into the build loop below --
+    # the winner can only be known after every candidate has been measured.
     cal_index = report.calibration_index()
     lum_contributors = discover_luminance_contributors(report, target, telescope, lum_binning)
 
+    lum_candidates: list[LumCandidate] = []
     for lum_telescope, contrib_lum_binning in lum_contributors:
+        lum_key = (lum_telescope, contrib_lum_binning)
+        lum_label = f"Luminance-{lum_telescope}-bin{contrib_lum_binning}"
         lum_lights, lum_group_name = resolve_lights(
             report, lum_telescope, target, LUMINANCE_FILTER, contrib_lum_binning
         )
@@ -437,9 +603,16 @@ def run_lrgb(
             project_dir, lum_lights, cal_index, lum_group_name, LUMINANCE_FILTER,
             lum_telescope, contrib_lum_binning, ra_hours, dec_deg, notes,
         )
-        result.masters[f"Luminance-{lum_telescope}-bin{contrib_lum_binning}"] = lum_master_path
-        if (lum_telescope, contrib_lum_binning) == (telescope, lum_binning):
-            result.masters[LUMINANCE_FILTER] = lum_master_path
+        result.masters[lum_label] = lum_master_path
+        fwhm_arcsec = contributor_fwhm_arcsec(lum_master_path, notes, label=lum_label)
+        if fwhm_arcsec is not None:
+            _log(f"       {lum_label}: median FWHM {fwhm_arcsec:.2f}\"", notes)
+        lum_candidates.append((lum_key, lum_master_path, fwhm_arcsec))
+
+    selected_key, selected_path, selected_fwhm = select_luminance_source(
+        lum_candidates, lum_source, (telescope, lum_binning), notes
+    )
+    result.masters[LUMINANCE_FILTER] = selected_path
 
     # --- colour contributors: one per binning that has a full R/G/B set,
     # for this telescope+target. rgb_binning is the PRIMARY contributor and
