@@ -73,12 +73,17 @@ imaged the same target on the same telescope:
   matching frames). Each contributor is independently aligned across its
   own R/G/B, background-extracted, and colour-calibrated (mirroring the
   single-contributor pipeline exactly), THEN reprojected onto the
-  Luminance grid, THEN averaged together (reconciliation.combine_same_grid,
-  weighted by how many raw subs each contributor stacked) into one final
-  RGB. This is exactly the pattern reconciliation.py's own module
-  docstring anticipated: "each instrument/user's data is independently
-  calibrated, registered, and stacked first, and only the resulting
-  masters get reprojected together."
+  Luminance grid, THEN gain/offset-matched onto a reference contributor's
+  flux scale (see reconciliation.match_gain_offset/fit_gain -- necessary
+  because different-binning contributors sit at genuinely different flux
+  scales, measured ~5x between BIN1/BIN2 on real M51 data), THEN averaged
+  together (reconciliation.combine_same_grid, weighted by STACKCNT -- subs
+  that actually survived quality filtering/rejection into each
+  contributor's stacked masters, not raw sub count) into one final RGB.
+  This is exactly the pattern reconciliation.py's own module docstring
+  anticipated: "each instrument/user's data is independently calibrated,
+  registered, and stacked first, and only the resulting masters get
+  reprojected together."
 
   `rgb_binning` names the PRIMARY contributor (kept backward compatible
   with existing fixtures/tests: its files stay at the legacy top-level
@@ -113,7 +118,12 @@ from .calibration import select_dark, run_calibration
 from .export_image import ExportResult, export
 from .ingest import scan_session
 from .checkpoints import Checkpoint, checkpoint, save_checkpoints, _pixel_scale_arcsec
-from .reconciliation import combine_same_grid, crop_to_common_coverage, reproject_to_reference
+from .reconciliation import (
+    combine_same_grid,
+    crop_to_common_coverage,
+    match_gain_offset,
+    reproject_to_reference,
+)
 from .registration_stacking import register_and_stack
 from .siril_driver import run_script
 from .solving import solve
@@ -799,13 +809,49 @@ def run_lrgb(
                 notes,
             )
             shutil.copy2(cropped[0], lum_for_compose_path)
-            # Weighting stays on sub_count (raw sub count) -- unchanged from
-            # today; Slice 3.4-3.6 replaces this with a gain/offset-matched,
-            # STACKCNT-weighted combine.
-            weights = [float(c.sub_count) for c in contributors]
-            combine_same_grid(cropped[1:], rgb_reconciled, weights=weights)
+            cropped_rgb = cropped[1:]  # aligned 1:1 with `contributors`
+
+            # Slice 3.4/3.5: the designated reference is the contributor
+            # with the most STACKCNT -- both the gain/offset fit (3.4) and
+            # the weighting (3.5) are measured against/by it, and it also
+            # supplies the combined output's FITS header (3.6), replacing
+            # the old paths[0] positional pick.
+            reference_pos = max(range(len(contributors)), key=lambda i: contributors[i].stack_total)
+            reference = contributors[reference_pos]
             _log(
-                f"[run ] combined {len(contributors)} colour contributors "
+                f"[run ] gain/offset reference: {reference.key} "
+                f"(STACKCNT {reference.stack_total}, highest)",
+                notes,
+            )
+
+            gain_matched: list[Path] = []
+            for i, (contributor, path) in enumerate(zip(contributors, cropped_rgb)):
+                if i == reference_pos:
+                    gain_matched.append(path)
+                    continue
+                matched_path = final / "combined_crop" / f"gain_matched_{contributor.key}.fit"
+                fit_results = match_gain_offset(path, cropped_rgb[reference_pos], matched_path)
+                for fit in fit_results:
+                    _log(
+                        f"       {contributor.key} vs {reference.key} ch{fit.channel}: "
+                        f"gain={fit.gain:.4f} on {fit.n_pixels} high-signal px "
+                        f"(ref bkg {fit.reference_background:.5f}, "
+                        f"contrib bkg {fit.contributor_background:.5f})",
+                        notes,
+                    )
+                gain_matched.append(matched_path)
+
+            # Slice 3.5: weight by STACKCNT (subs that actually survived
+            # quality filtering/rejection into the stacked masters), not
+            # sub_count (raw light count) -- see combine_same_grid's own
+            # docstring for why an inverse-variance scheme was tried and
+            # rejected in between.
+            weights = [float(c.stack_total) for c in contributors]
+            combine_same_grid(
+                gain_matched, rgb_reconciled, weights=weights, reference_index=reference_pos,
+            )
+            _log(
+                f"[run ] combined {len(contributors)} colour contributors by STACKCNT "
                 f"(weights {weights})",
                 notes,
             )

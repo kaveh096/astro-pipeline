@@ -6,6 +6,9 @@ from astropy.io import fits
 
 from astro_pipeline.reconciliation import (
     ReprojectionError,
+    combine_same_grid,
+    fit_gain,
+    match_gain_offset,
     pick_finest_reference,
     pixel_scale_deg,
     reconcile_masters,
@@ -288,3 +291,223 @@ def test_combine_same_grid_rejects_mismatched_shapes(tmp_path: Path) -> None:
 
     with pytest.raises(ReprojectionError):
         combine_same_grid([a_path, b_path], tmp_path / "combined.fit")
+
+
+# --- Slice 3.4: gain + offset matching --------------------------------------
+
+
+def _bright_structure(shape: tuple[int, int] = (200, 200)) -> np.ndarray:
+    """A few Gaussian blobs on zero background -- stands in for real
+    galaxy/star structure, at a fixed random seed so tests are
+    deterministic. ~99% background/1% structure, matching the real data's
+    proportions well enough to exercise the high-signal-only selection."""
+    yy, xx = np.mgrid[0 : shape[0], 0 : shape[1]]
+    structure = np.zeros(shape, dtype=np.float64)
+    for cy, cx, amp, sigma in [(50, 50, 500.0, 8.0), (120, 140, 800.0, 6.0), (90, 160, 300.0, 10.0)]:
+        structure += amp * np.exp(-(((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sigma**2)))
+    return structure
+
+
+def test_fit_gain_recovers_known_injected_gain() -> None:
+    """The core claim of Slice 3.4: fit_gain must recover a KNOWN,
+    injected multiplicative gain difference between two contributors,
+    within a few percent -- this is the actual defect measured on real
+    M51 data (gain(BIN1/BIN2) ~= 0.17-0.20, i.e. ~5x), reproduced here
+    with a synthetic fixture with a known answer rather than trusted from
+    real data alone."""
+    rng = np.random.default_rng(1234)
+    structure = _bright_structure()
+    reference_background, contributor_background = 0.100, 0.085
+    injected_gain = 5.4  # reference carries injected_gain x the contributor's flux
+    noise_sigma = 0.002
+
+    reference_plane = reference_background + structure + rng.normal(0, noise_sigma, structure.shape)
+    contributor_plane = (
+        contributor_background + structure / injected_gain + rng.normal(0, noise_sigma, structure.shape)
+    )
+
+    fit = fit_gain(reference_plane, contributor_plane)
+
+    assert fit.gain == pytest.approx(injected_gain, rel=0.05)  # within a few percent
+    assert fit.reference_background == pytest.approx(reference_background, abs=0.01)
+    assert fit.contributor_background == pytest.approx(contributor_background, abs=0.01)
+    assert fit.n_pixels > 0
+
+
+def test_fit_gain_raises_with_too_few_high_signal_pixels() -> None:
+    """Two flat, featureless (background-only) planes have nothing above
+    the high-signal threshold -- must refuse to report a meaningless fit
+    rather than divide-by-near-zero silently."""
+    rng = np.random.default_rng(0)
+    shape = (50, 50)
+    reference_plane = 0.1 + rng.normal(0, 0.001, shape)
+    contributor_plane = 0.09 + rng.normal(0, 0.001, shape)
+
+    with pytest.raises(ReprojectionError):
+        fit_gain(reference_plane, contributor_plane)
+
+
+def test_fit_gain_sigma_clip_rejects_outliers() -> None:
+    """A handful of injected outlier pixels (e.g. a cosmic ray in one
+    contributor but not the other) must not drag the fitted gain far from
+    the true value -- the 3-iteration sigma-clip is what's supposed to
+    catch these."""
+    rng = np.random.default_rng(7)
+    structure = _bright_structure()
+    injected_gain = 5.0
+    noise_sigma = 0.002
+
+    reference_plane = 0.1 + structure + rng.normal(0, noise_sigma, structure.shape)
+    contributor_plane = 0.085 + structure / injected_gain + rng.normal(0, noise_sigma, structure.shape)
+
+    # A small number of wildly discrepant pixels, on top of otherwise
+    # clean high-signal structure.
+    contributor_plane[48:52, 48:52] += 50.0
+
+    fit = fit_gain(reference_plane, contributor_plane)
+    assert fit.gain == pytest.approx(injected_gain, rel=0.05)
+
+
+def test_match_gain_offset_applies_gain_and_offset_per_channel(tmp_path: Path) -> None:
+    """End-to-end mechanics of Slice 3.4's `corrected = gain * (contributor
+    - contributor_bkg) + reference_bkg`, over a 3-channel (RGB) contributor
+    -- each channel independently, matching real rgbcomp output shape
+    (channel axis first)."""
+    rng = np.random.default_rng(99)
+    structure = _bright_structure()
+    injected_gains = [5.0, 4.5, 5.5]  # deliberately different per channel
+    ref_bkgs = [0.10, 0.11, 0.09]
+    contrib_bkgs = [0.085, 0.086, 0.084]
+
+    reference = np.stack(
+        [rb + structure + rng.normal(0, 0.002, structure.shape) for rb in ref_bkgs]
+    ).astype(np.float32)
+    contributor = np.stack(
+        [
+            cb + structure / g + rng.normal(0, 0.002, structure.shape)
+            for cb, g in zip(contrib_bkgs, injected_gains)
+        ]
+    ).astype(np.float32)
+
+    ref_path = tmp_path / "reference.fit"
+    contrib_path = tmp_path / "contributor.fit"
+    fits.writeto(ref_path, reference)
+    fits.writeto(contrib_path, contributor, header=fits.Header({"FILTER": "test"}))
+
+    out_path = tmp_path / "matched.fit"
+    fit_results = match_gain_offset(contrib_path, ref_path, out_path)
+
+    assert len(fit_results) == 3
+    for channel, fit in enumerate(fit_results):
+        assert fit.gain == pytest.approx(injected_gains[channel], rel=0.05)
+
+    corrected, header = fits.getdata(out_path, header=True)
+    # Corrected contributor should now sit close to the reference's own
+    # scale/background over the same high-signal region used for the fit.
+    for c in range(3):
+        high_signal = (reference[c] - ref_bkgs[c]) > 10 * 0.002
+        assert np.median(corrected[c][high_signal] - reference[c][high_signal]) == pytest.approx(0.0, abs=0.05)
+    # Non-WCS metadata (e.g. FILTER) is preserved from the contributor, per
+    # reproject_to_reference's own convention for "still that filter's
+    # data, just corrected".
+    assert header.get("FILTER") == "test"
+
+
+def test_match_gain_offset_rejects_mismatched_shapes(tmp_path: Path) -> None:
+    a_path = tmp_path / "a.fit"
+    b_path = tmp_path / "b.fit"
+    fits.writeto(a_path, np.zeros((3, 10, 10), dtype=np.float32))
+    fits.writeto(b_path, np.zeros((3, 20, 20), dtype=np.float32))
+
+    with pytest.raises(ReprojectionError):
+        match_gain_offset(b_path, a_path, tmp_path / "out.fit")
+
+
+# --- Slice 3.5/3.6: STACKCNT weighting, incremental accumulation, ----------
+# --- reference-header selection --------------------------------------------
+
+
+def test_combine_same_grid_incremental_matches_manual_weighted_mean_three_contributors(
+    tmp_path: Path,
+) -> None:
+    """Generalizes the existing 2-contributor weighted-mean test to three,
+    covering the incremental accumulation loop (Slice 3.6) rather than
+    just the N=2 case np.stack would have handled the same way."""
+    paths = []
+    values = [10.0, 20.0, 40.0]
+    for i, v in enumerate(values):
+        p = tmp_path / f"c{i}.fit"
+        fits.writeto(p, np.full((4, 4), v, dtype=np.float32))
+        paths.append(p)
+
+    weights = [1.0, 2.0, 3.0]
+    out = combine_same_grid(paths, tmp_path / "combined.fit", weights=weights)
+    data = fits.getdata(out, memmap=False)
+
+    expected = sum(v * w for v, w in zip(values, weights)) / sum(weights)
+    assert np.allclose(data, expected)
+
+
+def test_combine_same_grid_reference_index_selects_header(tmp_path: Path) -> None:
+    """Slice 3.6: the output header comes from `reference_index`, not
+    always paths[0] -- verified here by a header keyword that differs per
+    input, distinguishing which one the output actually inherited from.
+    Default (unset) stays paths[0], preserving old behaviour for callers
+    that don't care which header they get."""
+    a_path, b_path = tmp_path / "a.fit", tmp_path / "b.fit"
+    fits.writeto(a_path, np.full((4, 4), 10.0, dtype=np.float32), header=fits.Header({"SRC": "A"}))
+    fits.writeto(b_path, np.full((4, 4), 20.0, dtype=np.float32), header=fits.Header({"SRC": "B"}))
+
+    default_out = combine_same_grid([a_path, b_path], tmp_path / "default.fit")
+    assert fits.getheader(default_out)["SRC"] == "A"
+
+    keyed_out = combine_same_grid([a_path, b_path], tmp_path / "keyed.fit", reference_index=1)
+    assert fits.getheader(keyed_out)["SRC"] == "B"
+
+
+def test_combine_same_grid_rejects_out_of_range_reference_index(tmp_path: Path) -> None:
+    a_path, b_path = tmp_path / "a.fit", tmp_path / "b.fit"
+    fits.writeto(a_path, np.zeros((4, 4), dtype=np.float32))
+    fits.writeto(b_path, np.zeros((4, 4), dtype=np.float32))
+
+    with pytest.raises(ValueError):
+        combine_same_grid([a_path, b_path], tmp_path / "out.fit", reference_index=2)
+
+
+def test_combine_same_grid_stackcnt_weighting_favors_different_contributor_than_subcount(
+    tmp_path: Path,
+) -> None:
+    """The actual claim Slice 3.5 exists to satisfy, using the REAL numbers
+    measured on the M51 T24 data (see plan-rev4.md / handoff notes):
+    jmwill's BIN1 RGB contributor has MORE raw subs (14+12+12=38) than
+    kaveh's BIN2 (12+12+12=36), so sub_count weighting favours BIN1 --
+    but kaveh's BIN2 has slightly MORE STACKCNT (10+10+9=29 vs
+    9+9+9=27, i.e. more subs actually survived quality filtering into the
+    stacked masters), so STACKCNT weighting favours BIN2 instead. The two
+    schemes disagree on which contributor should dominate, and this test
+    is exactly the case Slice 3.5 exists to get right (STACKCNT, not
+    sub_count) -- not a synthetic worst case, the real data's own
+    numbers."""
+    bin1_path = tmp_path / "bin1.fit"  # jmwill, more raw subs, less STACKCNT
+    bin2_path = tmp_path / "bin2.fit"  # kaveh, fewer raw subs, more STACKCNT
+    fits.writeto(bin1_path, np.full((4, 4), 100.0, dtype=np.float32))
+    fits.writeto(bin2_path, np.full((4, 4), 200.0, dtype=np.float32))
+
+    sub_count_weights = [38.0, 36.0]
+    stackcnt_weights = [27.0, 29.0]
+
+    by_sub_count = fits.getdata(
+        combine_same_grid([bin1_path, bin2_path], tmp_path / "by_sub_count.fit", weights=sub_count_weights),
+        memmap=False,
+    )
+    by_stackcnt = fits.getdata(
+        combine_same_grid([bin1_path, bin2_path], tmp_path / "by_stackcnt.fit", weights=stackcnt_weights),
+        memmap=False,
+    )
+
+    midpoint = 150.0  # equal-weight average of 100 and 200
+    # sub_count weighting pulls toward BIN1 (100, below the midpoint);
+    # STACKCNT weighting pulls toward BIN2 (200, above it) -- a real,
+    # measurable disagreement in which contributor dominates.
+    assert by_sub_count.flat[0] < midpoint
+    assert by_stackcnt.flat[0] > midpoint
