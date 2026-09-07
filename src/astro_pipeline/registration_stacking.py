@@ -43,12 +43,15 @@ def _stack_command(
     sigma_high: float,
     filter_fwhm_pct: float | None,
     filter_round_pct: float | None,
+    norm: str | None,
 ) -> str:
     cmd = f"stack {registered_sequence} {rejection} {sigma_low} {sigma_high}"
     if filter_fwhm_pct is not None:
         cmd += f" -filter-fwhm={filter_fwhm_pct}%"
     if filter_round_pct is not None:
         cmd += f" -filter-round={filter_round_pct}%"
+    if norm is not None:
+        cmd += f" -norm={norm}"
     cmd += f" -out={out_name}"
     return cmd
 
@@ -86,14 +89,28 @@ def stack(
     sigma_high: float = 3.0,
     filter_fwhm_pct: float | None = 90.0,
     filter_round_pct: float | None = 90.0,
+    norm: str | None = None,
     siril_cli: Path | None = None,
 ) -> tuple[Path, SirilResult]:
     """Stack `registered_sequence` with rejection and, by default,
     quality-based frame filtering. Pass filter_fwhm_pct/filter_round_pct=
-    None to disable a given filter."""
+    None to disable a given filter.
+
+    `norm` defaults to None, which omits `-norm=` entirely and keeps
+    Siril's own default for `rej`/`mean` stacking -- verified real on this
+    installed Siril 1.4.4: despite `help stack` describing "additive with
+    scale" as the default, an actual stacked master's HISTORY card reads
+    "unnormalized input, unnormalized output" when no `-norm=` is passed
+    (discrepancy between the help text and the observed real behavior).
+    Pass norm="addscale" (the caller's job to decide when -- see
+    pipeline.build_master) for a mixed-exposure-time group, where the
+    unnormalized default would stack frames at genuinely different flux
+    scales against each other.
+    """
     work_dir = Path(work_dir)
     cmd = _stack_command(
-        registered_sequence, out_name, rejection, sigma_low, sigma_high, filter_fwhm_pct, filter_round_pct
+        registered_sequence, out_name, rejection, sigma_low, sigma_high,
+        filter_fwhm_pct, filter_round_pct, norm,
     )
     result = run_script([cmd], workdir=work_dir, siril_cli=siril_cli)
 
@@ -115,6 +132,7 @@ def register_and_stack(
     sigma_high: float = 3.0,
     filter_fwhm_pct: float | None = 90.0,
     filter_round_pct: float | None = 90.0,
+    norm: str | None = None,
     siril_cli: Path | None = None,
 ) -> StackResult:
     """Convenience wrapper chaining register() -> stack()."""
@@ -135,6 +153,7 @@ def register_and_stack(
         sigma_high=sigma_high,
         filter_fwhm_pct=filter_fwhm_pct,
         filter_round_pct=filter_round_pct,
+        norm=norm,
         siril_cli=siril_cli,
     )
     return StackResult(

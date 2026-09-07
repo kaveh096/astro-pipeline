@@ -34,8 +34,10 @@ valid (0% NaN) output.
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
@@ -43,7 +45,7 @@ import numpy as np
 from astropy.io import fits
 
 from .ingest import CalibrationFrame, LightFrame
-from .siril_driver import run_script
+from .siril_driver import SirilError, SirilResult, run_script
 from .staging import stage_frames
 
 DEFAULT_PEDESTAL = 0.1
@@ -63,6 +65,164 @@ class CalibrationFramesMissingError(RuntimeError):
     """
 
 
+def _log(message: str, notes: list[str] | None) -> None:
+    print(message, flush=True)
+    if notes is not None:
+        notes.append(message)
+
+
+@dataclass
+class DarkSelection:
+    frames: list[CalibrationFrame]
+    exptime: float
+    scaled: bool
+
+
+def select_dark(
+    cal_index: dict[tuple[str, str, int, float], list[CalibrationFrame]],
+    telescope: str,
+    binning: int,
+    light_exptimes: set[float],
+) -> DarkSelection:
+    """Pick which dark master to calibrate a contributor group's lights
+    against, following the policy verified against real T21/T24 data and
+    the real installed Siril 1.4.4 binary (`help calibrate`: `-opt`
+    "requires the supply of bias and dark masters"; confirmed empirically
+    that `-opt=exp` computes a per-image coefficient k0 = light exptime /
+    dark exptime, e.g. T21's real 600s/300s lights against its real 900s
+    dark measured k0=0.667/0.333 exactly):
+
+    1. An exact-exptime dark exists for this (telescope, binning) and the
+       group is single-exptime -> use it as-is, no scaling. This is
+       today's only path, and every existing real T24 group hits it --
+       it must not change.
+    2. No exact match, but a dark exists at this binning for some other
+       exptime -> scale it via `calibrate -opt=exp`, choosing whichever
+       available exptime is closest from above (minimizes the scaling
+       extrapolation) among those at least as long as every light's
+       exptime -- scaling a dark DOWN is the safe direction; scaling one
+       UP is refused below. NEVER falls back to a different binning: a
+       different binning is a different pixel dimension, not just a
+       different exposure time, and Siril's `calibrate` hard-fails
+       (verified real: exit 1, "Images must have same dimensions") if fed
+       mismatched-dimension frames, so a cross-binning fallback would only
+       ever break loudly, not silently -- but it's also just physically
+       wrong, so it is not attempted at all.
+    3. No dark at this binning at all -> CalibrationFramesMissingError,
+       naming the exposure time(s) that have nothing to calibrate against.
+    4. Every available dark at this binning is SHORTER than the longest
+       light exptime -> CalibrationFramesMissingError (refuses to scale a
+       dark UP, the unsafe direction).
+    """
+    if len(light_exptimes) == 1:
+        exptime = next(iter(light_exptimes))
+        exact = cal_index.get((telescope, "Dark", binning, exptime))
+        if exact:
+            return DarkSelection(exact, exptime, scaled=False)
+
+    available = {
+        e: frames
+        for (t, ftype, b, e), frames in cal_index.items()
+        if t == telescope and ftype == "Dark" and b == binning and frames
+    }
+    if not available:
+        exptimes_str = ", ".join(f"{e:.0f}s" for e in sorted(light_exptimes))
+        raise CalibrationFramesMissingError(
+            f"No Dark frames at any exposure time found for {telescope} BIN{binning} "
+            f"(needed for lights at {exptimes_str})."
+        )
+
+    max_light_exptime = max(light_exptimes)
+    safe = {e: frames for e, frames in available.items() if max_light_exptime / e <= 1}
+    if not safe:
+        longest = max(available)
+        raise CalibrationFramesMissingError(
+            f"No Dark at {telescope} BIN{binning} is as long as the longest light "
+            f"exptime ({max_light_exptime:.0f}s); longest available dark is "
+            f"{longest:.0f}s. Scaling a dark UP is the unsafe direction and is refused."
+        )
+    chosen_exptime = min(safe)
+    return DarkSelection(safe[chosen_exptime], chosen_exptime, scaled=True)
+
+
+_NOT_USING_DARK_RE = re.compile(r"NOT USING DARK:.*", re.IGNORECASE)
+_NEGATIVE_PIXELS_RE = re.compile(r"contains many negative pixels.*", re.IGNORECASE)
+_K0_RE = re.compile(r"Dark optimization of image \d+: k0=[-\d.]+")
+
+
+def _check_calibration_log(result: SirilResult) -> None:
+    """Exit code 0 alone is not proof calibration actually worked. Both
+    strings below are real, verified-present strings in the installed
+    Siril 1.4.4 binary (`siril-cli.exe`), found by direct inspection, not
+    documented anywhere obvious:
+
+        "NOT USING DARK: image dimensions are different" (and siblings --
+        cannot open the file, could not parse the expression, etc.)
+        "After dark subtraction, the image contains many negative pixels
+        (%d%%), calibration frames are probably incorrect"
+
+    Both mean the calibrate command reported success while the result is
+    not what was asked for -- escalate rather than trust the exit code.
+    Verified NOT present in a real T24 calibrate run (dark-only path), so
+    this cannot regress existing behaviour.
+    """
+    problems = [
+        line
+        for line in result.log_lines
+        if _NOT_USING_DARK_RE.search(line) or _NEGATIVE_PIXELS_RE.search(line)
+    ]
+    if problems:
+        raise SirilError(
+            "calibrate reported success (exit 0) but its own log flags a problem "
+            "that would otherwise pass silently: " + " | ".join(problems),
+            result,
+        )
+
+
+def _log_dark_optimization(result: SirilResult, notes: list[str] | None) -> None:
+    for line in result.log_lines:
+        if _K0_RE.search(line):
+            _log(f"       {line}", notes)
+
+
+def _dark_light_gap_note(master_dark: Path, light_frames: list[LightFrame]) -> str | None:
+    """Informational only, not a blocker: how far apart in time are the
+    dark and the lights being calibrated against it? Calibration validity
+    is scoped to what was delivered/organized together, not to a single
+    capture night (see ingest.py's module docstring), and SET-TEMP
+    matching is what actually determines a dark's validity -- but a
+    multi-month gap (T21's real case: darks from 2024-06, lights from
+    2025-01) is still worth a human seeing rather than silently buried in
+    a "calibrate succeeded" log line.
+    """
+    try:
+        dark_header = fits.getheader(master_dark)
+        dark_date = datetime.fromisoformat(str(dark_header["DATE-OBS"])[:19])
+        dark_set_temp = dark_header.get("SET-TEMP")
+    except Exception:
+        return None
+
+    light_dates = []
+    for frame in light_frames:
+        try:
+            light_dates.append(datetime.strptime(frame.date, "%Y%m%d"))
+        except Exception:
+            continue
+    if not light_dates:
+        return None
+
+    gap_days = abs((min(light_dates) - dark_date).days)
+    if gap_days < 14:
+        return None
+    months = gap_days / 30.44
+    temp_note = f"SET-TEMP={dark_set_temp}" if dark_set_temp is not None else "SET-TEMP unknown"
+    return (
+        f"[info] dark master's reference frame is {gap_days} days (~{months:.1f} months) "
+        f"before the lights being calibrated against it ({temp_note} -- check this "
+        f"matches the lights' own SET-TEMP; not a blocker by itself, just worth surfacing)."
+    )
+
+
 @dataclass
 class CalibrationResult:
     calibrated_lights: list[Path]
@@ -70,6 +230,7 @@ class CalibrationResult:
     master_dark: Path
     master_flat: Path | None
     flat_corrected: bool
+    dark_scaled: bool = False
 
 
 def sequence_name(basename: str) -> str:
@@ -77,6 +238,35 @@ def sequence_name(basename: str) -> str:
     (verified against the real CLI) -- callers referencing the sequence in
     later commands must use this, not the bare basename."""
     return f"{basename}_"
+
+
+def _calibrate_command(
+    seq: str,
+    dark_stem: str,
+    bias_stem: str | None,
+    flat_stem: str | None,
+    dark_optimize: bool,
+) -> str:
+    """Pure command-string builder, split out from calibrate_lights so the
+    "nothing changes for existing T24 data" claim is checkable without
+    invoking Siril: with bias_stem=None, flat_stem=None, dark_optimize=
+    False (today's only real path), this must produce byte-identical
+    output to before this function existed.
+    """
+    command = f"calibrate {seq} -dark={dark_stem}"
+    if not dark_optimize:
+        # -cc=dark's hot/cold-pixel thresholds are fit to the dark's own
+        # exposure time -- meaningless (and not requested) on the scaled
+        # path.
+        command += " -cc=dark"
+    if bias_stem is not None:
+        command += f" -bias={bias_stem}"
+    if dark_optimize:
+        command += " -opt=exp"
+    if flat_stem is not None:
+        command += f" -flat={flat_stem}"
+    command += " -prefix=pp_"
+    return command
 
 
 def build_master(
@@ -148,10 +338,12 @@ def calibrate_lights(
     basename: str = "lights",
     pedestal: float = DEFAULT_PEDESTAL,
     subtract_bias: bool = False,
-) -> list[Path]:
+    dark_optimize: bool = False,
+    notes: list[str] | None = None,
+) -> tuple[list[Path], SirilResult]:
     """Convert light_frames to a sequence and run Siril's `calibrate`
-    against the given masters. Returns calibrated file paths (prefix
-    "pp_"), sorted.
+    against the given masters. Returns (calibrated file paths, sorted,
+    prefixed "pp_"; the calibrate command's SirilResult).
 
     Adds `pedestal` to every calibrated frame before returning (default
     0.1) -- see module docstring. Pass pedestal=0.0 to disable, but be
@@ -182,9 +374,22 @@ def calibrate_lights(
     Dropping the redundant bias subtraction is the part that is fixable
     here. Siril's `fixbanding` was also tried and moved the metric only
     3.24 -> 3.21, so it is not used.
+
+    `dark_optimize=True` is the path for a dark whose exposure time does
+    not match the lights' (see `select_dark`): passes `-opt=exp` instead
+    of `-cc=dark` (the hot/cold-pixel thresholds `-cc=dark` fits are tuned
+    to the dark's own exposure time, not a scaled one) and forces
+    `subtract_bias=True`, since `-opt` requires a bias master (confirmed
+    in the real installed Siril 1.4.4's own `help calibrate` text). Verified
+    end-to-end against T21's real 600s/300s Luminance lights and 900s dark:
+    Siril computes a per-image coefficient (`k0 = light exptime / dark
+    exptime`) and applies it individually, exactly as documented.
     """
     if not light_frames:
         raise CalibrationFramesMissingError("No light frames provided to calibrate.")
+
+    if dark_optimize:
+        subtract_bias = True
 
     stage_dir = Path(work_dir) / basename
     stage_frames([f.path for f in light_frames], stage_dir)
@@ -214,19 +419,27 @@ def calibrate_lights(
 
     staged_dark = stage_dir / "masterdark.fit"
     shutil.copy2(master_dark, staged_dark)
-
-    command = f"calibrate {seq} -dark={staged_dark.stem} -cc=dark"
+    staged_bias = stage_dir / "masterbias.fit"
     if subtract_bias:
-        staged_bias = stage_dir / "masterbias.fit"
         shutil.copy2(master_bias, staged_bias)
-        command += f" -bias={staged_bias.stem}"
+    staged_flat = stage_dir / "masterflat.fit"
     if master_flat is not None:
-        staged_flat = stage_dir / "masterflat.fit"
         shutil.copy2(master_flat, staged_flat)
-        command += f" -flat={staged_flat.stem}"
-    command += " -prefix=pp_"
 
-    run_script([command], workdir=stage_dir, script_name="calibrate.ssf")
+    command = _calibrate_command(
+        seq, staged_dark.stem,
+        staged_bias.stem if subtract_bias else None,
+        staged_flat.stem if master_flat is not None else None,
+        dark_optimize=dark_optimize,
+    )
+
+    result = run_script([command], workdir=stage_dir, script_name="calibrate.ssf")
+    _check_calibration_log(result)
+    if dark_optimize:
+        _log_dark_optimization(result, notes)
+        gap_note = _dark_light_gap_note(master_dark, light_frames)
+        if gap_note:
+            _log(gap_note, notes)
 
     calibrated = sorted(stage_dir.glob(f"pp_{seq}*.fit*"))
     if not calibrated:
@@ -237,7 +450,7 @@ def calibrate_lights(
     if pedestal:
         _apply_pedestal(calibrated, pedestal)
 
-    return calibrated
+    return calibrated, result
 
 
 def run_calibration(
@@ -249,6 +462,8 @@ def run_calibration(
     flat_policy: FlatPolicy = FlatPolicy.SKIP_IF_MISSING,
     pedestal: float = DEFAULT_PEDESTAL,
     subtract_bias: bool = False,
+    dark_scaled: bool = False,
+    notes: list[str] | None = None,
 ) -> CalibrationResult:
     """Orchestrate one (telescope, binning[, exptime]) calibration group.
 
@@ -261,6 +476,12 @@ def run_calibration(
     it is the correct thing to calibrate flats against), but by default they
     are NOT subtracted from the lights -- see calibrate_lights' docstring
     for the measurements behind that.
+
+    `dark_scaled=True` is passed by the caller when `dark_frames` was
+    selected (via `select_dark`) at an exposure time that doesn't match
+    the lights' -- it forces `calibrate_lights`' `-opt=exp` dark-scaling
+    path (which in turn forces bias subtraction, since `-opt` requires
+    it) instead of today's dark-only path.
     """
     if not bias_frames:
         raise CalibrationFramesMissingError("No bias frames available; cannot calibrate.")
@@ -281,7 +502,7 @@ def run_calibration(
     if flat_frames:
         master_flat = build_master_flat(flat_frames, work_dir)
 
-    calibrated = calibrate_lights(
+    calibrated, _result = calibrate_lights(
         light_frames,
         master_bias,
         master_dark,
@@ -289,6 +510,8 @@ def run_calibration(
         master_flat=master_flat,
         pedestal=pedestal,
         subtract_bias=subtract_bias,
+        dark_optimize=dark_scaled,
+        notes=notes,
     )
 
     return CalibrationResult(
@@ -297,4 +520,5 @@ def run_calibration(
         master_dark=master_dark,
         master_flat=master_flat,
         flat_corrected=master_flat is not None,
+        dark_scaled=dark_scaled,
     )
