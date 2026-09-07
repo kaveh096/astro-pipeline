@@ -36,24 +36,29 @@ MULTI-USER / MULTI-CONTRIBUTOR COMBINING, added once real data showed two
 users (collaborators sharing an iTelescope account arrangement) had
 imaged the same target on the same telescope:
 
-  Luminance combines at the RAW-SUB level. Two users sharing a telescope
-  and binning for the same filter (e.g. both shooting Luminance/BIN1) get
-  their raw lights merged into ONE calibrate+register+stack call, via
-  IngestReport.instrument_groups(). This gives Siril's sigma-rejection
-  visibility into every individual frame -- better outlier/satellite-trail
-  rejection than averaging two independently-stacked masters would be.
-  This works here because both users, on this data, share the same
-  telescope AND exposure time -- calibration_index() has no user
-  dimension, so the shared bias/dark for that telescope+binning+exptime
-  already applies correctly to a merged light list with no changes needed
-  to calibration.py. (A merge across DIFFERING exposure times would need
-  calibration.py to route each light to its own matching dark master
-  before stacking -- not implemented, because nothing in this delivery
-  needs it yet: T21's 2 lights are 300s/600s mixed, but T21 is a separate
-  telescope with a genuinely different pixel scale from T24, so its
-  Luminance can never raw-sub-combine with T24's regardless; it would need
-  its own master-level contributor, which is a real follow-up, not built
-  here because two frames doesn't justify the calibration.py work yet.)
+  Luminance combines at the RAW-SUB level within one (telescope, binning).
+  Two users sharing a telescope and binning for the same filter (e.g. both
+  shooting Luminance/BIN1) get their raw lights merged into ONE
+  calibrate+register+stack call, via IngestReport.instrument_groups().
+  This gives Siril's sigma-rejection visibility into every individual
+  frame -- better outlier/satellite-trail rejection than averaging two
+  independently-stacked masters would be. calibration_index() has no user
+  dimension, so the shared bias/dark for that telescope+binning already
+  applies correctly to a merged light list. A merge across DIFFERING
+  exposure times (T21's real case: 300s/600s Luminance lights, single
+  user) calibrates fine too -- calibration.select_dark() picks one dark
+  master at the group's own binning and calibrate_lights() passes
+  `-opt=exp`, which Siril applies as a PER-IMAGE scaling coefficient
+  (verified against the real installed 1.4.4 binary), so a mixed-exptime
+  merge needs no per-exptime bucketing. What still never happens is
+  merging Luminance ACROSS telescopes -- T21 has a genuinely different
+  pixel scale from T24, so its Luminance can never raw-sub-combine with
+  T24's regardless of exptime; each telescope's Luminance gets its own
+  master-level contributor instead (see the discovery loop in run_lrgb --
+  multiple telescopes' worth of Luminance masters get built there, though
+  which one actually drives the rendered composite is still just the
+  caller's own `telescope`/`lum_binning`, unchanged; selecting among them
+  is Slice 2's job, not this pass's).
 
   RGB combines at the MASTER level, across "contributors" -- one
   contributor per (telescope, binning) that has all three R/G/B present.
@@ -96,7 +101,7 @@ from .background_color import (
     run_graxpert_background_extraction,
     run_spcc,
 )
-from .calibration import run_calibration
+from .calibration import select_dark, run_calibration
 from .export_image import ExportResult, export
 from .ingest import scan_session
 from .checkpoints import Checkpoint, checkpoint, save_checkpoints
@@ -163,7 +168,6 @@ def build_master(
     filter_name: str,
     telescope: str,
     binning: int,
-    exptime: float,
     ra_hours: float,
     dec_deg: float,
     notes: list[str],
@@ -174,6 +178,12 @@ def build_master(
     collaborators is decided by the caller (see resolve_lights below), not
     here. Calibration and stacking don't care about user identity at all,
     only about telescope/binning/exptime matching the calibration frames.
+
+    Exposure time is derived from the lights themselves (`{f.exptime for f
+    in lights}`), not passed in -- every existing real group is
+    single-exptime, so this changes nothing for them, but a mixed-exptime
+    group (T21's real 600s/300s Luminance) now calibrates correctly
+    instead of the caller having to guess a single exptime up front.
     """
     work_dir = pipeline_dir(project_dir) / group_name
     master_path = work_dir / "lights" / f"master_{filter_name.lower()}.fit"
@@ -182,24 +192,74 @@ def build_master(
         _log(f"[skip] {group_name}: solved master already present", notes)
         return master_path
 
+    light_exptimes = {f.exptime for f in lights}
     bias = cal_index[(telescope, "Bias", binning, 0.0)]
-    dark = cal_index[(telescope, "Dark", binning, exptime)]
+    dark_selection = select_dark(cal_index, telescope, binning, light_exptimes)
 
+    exptimes_str = ", ".join(f"{e:.0f}s" for e in sorted(light_exptimes))
+    scaling_note = (
+        f", scaled from {dark_selection.exptime:.0f}s via -opt=exp" if dark_selection.scaled else ""
+    )
     _log(
-        f"[run ] {group_name}: calibrating {len(lights)} lights "
-        f"({len(bias)} bias, {len(dark)} dark)",
+        f"[run ] {group_name}: calibrating {len(lights)} lights at {exptimes_str} "
+        f"({len(bias)} bias, {len(dark_selection.frames)} dark{scaling_note})",
         notes,
     )
-    run_calibration(lights, bias, dark, work_dir=work_dir, flat_frames=None)
+    run_calibration(
+        lights, bias, dark_selection.frames, work_dir=work_dir, flat_frames=None,
+        dark_scaled=dark_selection.scaled, notes=notes,
+    )
+
+    n = len(lights)
+    filter_fwhm_pct = 90.0 if n >= 10 else None
+    filter_round_pct = 90.0 if n >= 10 else None
+    if n < 10:
+        _log(
+            f"       {group_name}: only {n} lights, disabling FWHM/roundness "
+            "quality filtering (not enough subs for a percentile cut to be meaningful)",
+            notes,
+        )
+    norm = "addscale" if len(light_exptimes) > 1 else None
 
     _log(f"[run ] {group_name}: register + stack", notes)
     stack_result = register_and_stack(
-        "pp_lights_", work_dir / "lights", out_name=f"master_{filter_name.lower()}"
+        "pp_lights_", work_dir / "lights", out_name=f"master_{filter_name.lower()}",
+        filter_fwhm_pct=filter_fwhm_pct, filter_round_pct=filter_round_pct, norm=norm,
     )
 
     _log(f"[run ] {group_name}: plate solve", notes)
     solve(stack_result.master_path, ra_hours=ra_hours, dec_deg=dec_deg, search_radius_deg=5.0)
+
+    stackcnt = fits.getheader(stack_result.master_path).get("STACKCNT", n)
+    _log(f"       {group_name}: STACKCNT={stackcnt}", notes)
     return stack_result.master_path
+
+
+def discover_luminance_contributors(
+    report, target: str, telescope: str, lum_binning: int
+) -> list[tuple[str, int]]:
+    """Every (telescope, binning) with Luminance data for `target`, across
+    ALL telescopes -- not scoped to `telescope` -- so a telescope that only
+    ever contributes colour under Kaveh's colour-only rule (T21 today)
+    still gets its own Luminance master built (Slice 2 will select among
+    these; this only discovers them). Mirrors exactly how RGB binning
+    discovery already handles "caller-supplied but not necessarily
+    discovered first" (see run_lrgb's `rgb_binnings` below): sort every
+    discovered (telescope, binning), then prepend the caller's own
+    (telescope, lum_binning) only if it wasn't already found -- so the
+    single-contributor case (T24-only data) returns exactly
+    `[(telescope, lum_binning)]`, unchanged from today.
+    """
+    contributors = sorted(
+        {
+            (key[0], key[3])
+            for key in report.instrument_groups()
+            if key[1] == target and key[2] == LUMINANCE_FILTER
+        }
+    )
+    if (telescope, lum_binning) not in contributors:
+        contributors = [(telescope, lum_binning), *contributors]
+    return contributors
 
 
 def resolve_lights(
@@ -228,24 +288,28 @@ def _build_colour_contributor(
     telescope: str,
     target: str,
     binning: int,
-    exptime: float,
     ra_hours: float,
     dec_deg: float,
     notes: list[str],
-) -> tuple[Path, int]:
+) -> tuple[Path, int, int]:
     """Build one binning's R/G/B masters, align + crop + composite them,
     then background-extract and colour-calibrate -- everything the
     single-contributor pipeline always did, just namespaced under
     `contrib_dir` so multiple binnings can coexist. Returns the
-    colour-calibrated composite's path and the number of raw subs that
-    went into it (summed across channels), used to weight this
-    contributor when combining with others later.
+    colour-calibrated composite's path, the number of raw subs that went
+    into it (summed across channels, used to WEIGHT this contributor when
+    combining with others later -- unchanged by Slice 1, stays on this
+    sub_count basis until Slice 3), and the STACKCNT summed across the
+    three channel masters' own headers (used for LOGGING only -- how many
+    subs actually survived quality filtering/rejection to make it into the
+    stacked masters, which sub_count alone cannot show).
     """
     contrib_dir.mkdir(parents=True, exist_ok=True)
     cal_index = report.calibration_index()
 
     channel_masters: dict[str, Path] = {}
     sub_count = 0
+    stack_total = 0
     for filter_name in RGB_FILTERS:
         lights, group_name = resolve_lights(report, telescope, target, filter_name, binning)
         if not lights:
@@ -254,10 +318,12 @@ def _build_colour_contributor(
                 "a colour contributor needs all three of Red/Green/Blue."
             )
         sub_count += len(lights)
-        channel_masters[filter_name] = build_master(
+        master_path = build_master(
             project_dir, lights, cal_index, group_name, filter_name,
-            telescope, binning, exptime, ra_hours, dec_deg, notes,
+            telescope, binning, ra_hours, dec_deg, notes,
         )
+        channel_masters[filter_name] = master_path
+        stack_total += int(fits.getheader(master_path).get("STACKCNT", len(lights)))
 
     rgb_native = contrib_dir / "rgb_native.fit"
     if not usable(rgb_native, notes):
@@ -321,7 +387,7 @@ def _build_colour_contributor(
     else:
         _log(f"[skip] BIN{binning}: SPCC already done", notes)
 
-    return colour_calibrated, sub_count
+    return colour_calibrated, sub_count, stack_total
 
 
 def run_lrgb(
@@ -332,7 +398,6 @@ def run_lrgb(
     dec_deg: float,
     lum_binning: int = 1,
     rgb_binning: int = 2,
-    exptime: float = 300.0,
     stretch_method: str = "autostretch",
 ) -> PipelineResult:
     project_dir = Path(project_dir)
@@ -345,17 +410,36 @@ def run_lrgb(
     _log(f"=== scanning {project_dir.name} ===", notes)
     report = scan_session(project_dir)
 
-    # --- luminance master: merged across every user sharing this telescope
-    # and binning (raw-sub-level combining -- see module docstring) -------
+    # --- luminance masters: every (telescope, binning) that has Luminance
+    # data for this target gets its own master built here -- NOT scoped to
+    # the caller's `telescope`, otherwise a telescope that only ever
+    # contributes colour under Kaveh's colour-only rule (T21 today) would
+    # never get its own Luminance master built under any slice, including
+    # this one. This slice only BUILDS these masters -- it does not select
+    # or blend which one drives the rendered composite (that's Slice 2):
+    # the caller's own (telescope, lum_binning) keeps driving the composite
+    # exactly as before, via the unchanged result.masters[LUMINANCE_FILTER]
+    # key, so nothing about the rendered output changes here. Each user
+    # sharing a (telescope, binning) is still merged at the raw-sub level
+    # (see module docstring) -- that combining logic is per-contributor,
+    # unaffected by there now being more than one contributor.
     cal_index = report.calibration_index()
-    lum_lights, lum_group_name = resolve_lights(report, telescope, target, LUMINANCE_FILTER, lum_binning)
-    lum_users = sorted({f.user for f in lum_lights})
-    if len(lum_users) > 1:
-        _log(f"[run ] combining Luminance across users: {', '.join(lum_users)}", notes)
-    result.masters[LUMINANCE_FILTER] = build_master(
-        project_dir, lum_lights, cal_index, lum_group_name, LUMINANCE_FILTER,
-        telescope, lum_binning, exptime, ra_hours, dec_deg, notes,
-    )
+    lum_contributors = discover_luminance_contributors(report, target, telescope, lum_binning)
+
+    for lum_telescope, contrib_lum_binning in lum_contributors:
+        lum_lights, lum_group_name = resolve_lights(
+            report, lum_telescope, target, LUMINANCE_FILTER, contrib_lum_binning
+        )
+        lum_users = sorted({f.user for f in lum_lights})
+        if len(lum_users) > 1:
+            _log(f"[run ] combining Luminance across users: {', '.join(lum_users)}", notes)
+        lum_master_path = build_master(
+            project_dir, lum_lights, cal_index, lum_group_name, LUMINANCE_FILTER,
+            lum_telescope, contrib_lum_binning, ra_hours, dec_deg, notes,
+        )
+        result.masters[f"Luminance-{lum_telescope}-bin{contrib_lum_binning}"] = lum_master_path
+        if (lum_telescope, contrib_lum_binning) == (telescope, lum_binning):
+            result.masters[LUMINANCE_FILTER] = lum_master_path
 
     # --- colour contributors: one per binning that has a full R/G/B set,
     # for this telescope+target. rgb_binning is the PRIMARY contributor and
@@ -374,13 +458,18 @@ def run_lrgb(
     contributors: list[tuple[Path, int]] = []
     for binning in rgb_binnings:
         contrib_dir = final if binning == rgb_binning else final / f"contrib_bin{binning}"
-        composite, sub_count = _build_colour_contributor(
+        composite, sub_count, stack_total = _build_colour_contributor(
             project_dir, contrib_dir, report, telescope, target, binning,
-            exptime, ra_hours, dec_deg, notes,
+            ra_hours, dec_deg, notes,
         )
+        # Weighting stays on sub_count (raw sub count) -- unchanged from
+        # today, and deliberately so (see combine_same_grid call below).
+        # Only the LOG line switches to STACKCNT, i.e. how many subs
+        # actually survived quality filtering/rejection into the stacked
+        # masters, which sub_count alone can't show.
         contributors.append((composite, sub_count))
         if len(rgb_binnings) > 1:
-            _log(f"       BIN{binning} contributor: {sub_count} raw subs across R/G/B", notes)
+            _log(f"       BIN{binning} contributor: {stack_total} stacked subs across R/G/B (STACKCNT)", notes)
 
     # --- luminance: background extraction --------------------------------
     lum_bg = final / "lum_bg.fits"
