@@ -14,10 +14,11 @@ from astro_pipeline.pipeline import (
     discover_luminance_contributors,
     resolve_instrument_profile,
     resolve_lights,
+    run_lrgb,
     select_luminance_source,
 )
 
-from conftest import PIPELINE_DIR, PROJECT_DIR as REAL_SESSION_DIR
+from conftest import FINAL_DIR, PIPELINE_DIR, PROJECT_DIR as REAL_SESSION_DIR, requires
 
 requires_real_session = pytest.mark.skipif(
     not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine"
@@ -420,3 +421,121 @@ def test_colour_contributor_key_identifies_by_telescope_and_binning() -> None:
         telescope="T24", binning=1, composite_path=Path("x.fit"), sub_count=38, stack_total=27,
     )
     assert contributor.key == "T24_bin1"
+
+
+# --- Slice 4.3: stop_after + force validation -------------------------------
+
+
+def test_run_lrgb_rejects_unknown_stop_after(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="stop_after"):
+        run_lrgb(tmp_path, "T24", "M51", 13.0, 47.0, stop_after="not_a_real_stage")
+
+
+def test_run_lrgb_rejects_unknown_force_stage(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="force"):
+        run_lrgb(tmp_path, "T24", "M51", 13.0, 47.0, force={"not_a_real_stage"})
+
+
+# --- Slice 4.3: stop_after against real M51 data ----------------------------
+# These calls hit zero Siril/GraXpert/SPCC work (everything is already
+# usable() on this fixture, built by Slices 1-3) -- the only real cost is
+# checkpoint statistics/star-detection, which run regardless of stop_after
+# (see pipeline.run_lrgb's inline checkpoint emission, Slice 4.2). They are
+# the actual claim Slice 4.3 exists to satisfy: a staged run resumes rather
+# than re-doing earlier work, and stopping early leaves no partial/broken
+# state.
+
+M51_RA_HOURS = 13.4980
+M51_DEC_DEG = 47.1953
+
+
+def _run_m51(**kwargs):
+    return run_lrgb(REAL_SESSION_DIR, telescope="T24", target="M51", ra_hours=M51_RA_HOURS, dec_deg=M51_DEC_DEG, **kwargs)
+
+
+@requires(FINAL_DIR / "lrgb_final.fit")
+def test_run_lrgb_stop_after_masters_stops_before_reconciliation() -> None:
+    """The real Slice 4.3 claim: stop_after='masters' returns honestly,
+    with `result.masters` populated and NEITHER reconciliation nor
+    stretch/export attempted -- no exception, no partial/broken files."""
+    reconciled_before = (FINAL_DIR / "rgb_reconciled.fit").stat().st_mtime
+    final_before = (FINAL_DIR / "lrgb_final.fit").stat().st_mtime
+
+    result = _run_m51(stop_after="masters")
+
+    assert "Luminance" in result.masters
+    assert result.composite_path is None
+    assert result.export_result is None
+    # Untouched: stopping at "masters" must not regenerate anything past it.
+    assert (FINAL_DIR / "rgb_reconciled.fit").stat().st_mtime == reconciled_before
+    assert (FINAL_DIR / "lrgb_final.fit").stat().st_mtime == final_before
+
+
+@requires(FINAL_DIR / "lrgb_final.fit")
+def test_run_lrgb_stop_after_reconciled_resumes_without_rebuilding_masters() -> None:
+    """A second call with stop_after='reconciled' after a first call with
+    stop_after='masters' must actually RESUME -- not redo the masters
+    stage -- verified via mtimes on real per-contributor build products
+    that only the (expensive, Siril-driven) masters stage would touch."""
+    contributor_product = FINAL_DIR / "rgb_colour_calibrated.fit"
+    lum_bg_before_first_call = None
+    if (FINAL_DIR / "lum_bg.fits").exists():
+        lum_bg_before_first_call = (FINAL_DIR / "lum_bg.fits").stat().st_mtime
+
+    _run_m51(stop_after="masters")
+    contributor_mtime_after_masters = contributor_product.stat().st_mtime
+
+    result = _run_m51(stop_after="reconciled")
+
+    assert result.composite_path is None
+    assert result.export_result is None
+    # The masters-stage build product must be untouched by the second call.
+    assert contributor_product.stat().st_mtime == contributor_mtime_after_masters
+    # L background extraction and reconciliation must actually have run
+    # (or been resumed/skipped) by this point -- both files exist.
+    assert (FINAL_DIR / "lum_bg.fits").exists()
+    assert (FINAL_DIR / "rgb_reconciled.fit").exists()
+    if lum_bg_before_first_call is not None:
+        # Already existed and unaffected by anything upstream -- resumed,
+        # not regenerated.
+        assert (FINAL_DIR / "lum_bg.fits").stat().st_mtime == lum_bg_before_first_call
+
+
+@requires(FINAL_DIR / "lrgb_final.fit")
+def test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output() -> None:
+    """Slice 4 must not change what's rendered -- only Slice 3 was allowed
+    to do that. A full (stop_after=None) run after the staged calls above
+    must reproduce the exact same lrgb_final.fit/TIFF bytes, not a new
+    render."""
+    import hashlib
+
+    def sha(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    lrgb_final = FINAL_DIR / "lrgb_final.fit"
+    tiff = FINAL_DIR / "M51_lrgb.tif"
+    before_final, before_tiff = sha(lrgb_final), sha(tiff)
+
+    result = _run_m51()
+
+    assert result.composite_path is not None
+    assert sha(lrgb_final) == before_final
+    assert sha(tiff) == before_tiff
+
+
+@requires(FINAL_DIR / "lrgb_final.fit")
+def test_run_lrgb_force_final_only_touches_final_not_reconciled_or_masters() -> None:
+    """force={"final"} must invalidate exactly lrgb_final.fit -- NOT
+    rgb_reconciled.fit or lum_bg.fits, which sit at earlier stages in the
+    masters -> reconciled -> final dependency order (run_signature.py's
+    cascade_from) and must be left alone by a "final"-only force."""
+    reconciled_before = (FINAL_DIR / "rgb_reconciled.fit").stat().st_mtime
+    lum_bg_before = (FINAL_DIR / "lum_bg.fits").stat().st_mtime
+    final_before = (FINAL_DIR / "lrgb_final.fit").stat().st_mtime
+
+    result = _run_m51(force={"final"})
+
+    assert result.composite_path is not None
+    assert (FINAL_DIR / "lrgb_final.fit").stat().st_mtime != final_before
+    assert (FINAL_DIR / "rgb_reconciled.fit").stat().st_mtime == reconciled_before
+    assert (FINAL_DIR / "lum_bg.fits").stat().st_mtime == lum_bg_before

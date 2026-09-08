@@ -114,7 +114,7 @@ from .background_color import (
     run_graxpert_background_extraction,
     run_spcc,
 )
-from .calibration import select_dark, run_calibration
+from .calibration import DEFAULT_PEDESTAL, select_dark, run_calibration
 from .export_image import ExportResult, export
 from .ingest import scan_session
 from .checkpoints import Checkpoint, checkpoint, save_checkpoints, _pixel_scale_arcsec
@@ -125,6 +125,16 @@ from .reconciliation import (
     reproject_to_reference,
 )
 from .registration_stacking import register_and_stack
+from .run_signature import (
+    STAGE_ORDER,
+    ContributorSignature,
+    RunSignature,
+    cascade_from,
+    diff_invalidation,
+    frame_identity_hash,
+    load_run_signature,
+    save_run_signature,
+)
 from .siril_driver import run_script
 from .solving import solve
 from .stretch_compose import stretch_and_compose
@@ -189,6 +199,7 @@ def build_master(
     ra_hours: float,
     dec_deg: float,
     notes: list[str],
+    pedestal: float = DEFAULT_PEDESTAL,
 ) -> Path:
     """Calibrate -> register+stack -> plate solve one group of raw lights.
 
@@ -202,6 +213,16 @@ def build_master(
     single-exptime, so this changes nothing for them, but a mixed-exptime
     group (T21's real 600s/300s Luminance) now calibrates correctly
     instead of the caller having to guess a single exptime up front.
+
+    `pedestal` (Slice 4.1) is threaded here rather than left at
+    `run_calibration`'s own default: it is baked into every calibrated
+    light BEFORE registration/stacking (see calibration.py), so it
+    affects this master's actual pixels -- and `usable()`'s file-
+    existence-only gate above has no way to notice a caller passed a
+    different value on a resumed run. See run_signature.py's
+    `RunSignature.contributor_stale`, which is what actually deletes a
+    stale master when `pedestal` changes, forcing this function to
+    rebuild it rather than silently keep serving the old-pedestal file.
     """
     work_dir = pipeline_dir(project_dir) / group_name
     master_path = work_dir / "lights" / f"master_{filter_name.lower()}.fit"
@@ -225,7 +246,7 @@ def build_master(
     )
     run_calibration(
         lights, bias, dark_selection.frames, work_dir=work_dir, flat_frames=None,
-        dark_scaled=dark_selection.scaled, notes=notes,
+        dark_scaled=dark_selection.scaled, pedestal=pedestal, notes=notes,
     )
 
     n = len(lights)
@@ -625,6 +646,66 @@ def _build_colour_contributor(
     )
 
 
+# --- Slice 4.1: run-signature helpers ---------------------------------------
+# Factored out of run_lrgb as their own functions for the same reason
+# select_luminance_source/resolve_instrument_profile were: directly
+# testable without invoking the full calibrate/stack/solve/SPCC chain.
+
+
+def _delete_if_exists(path: Path, reason: str, notes: list[str]) -> None:
+    """Delete one stage-output file so usable()'s existing skip-if-present
+    gate naturally regenerates it -- the actual mechanism run-signature
+    invalidation uses (see run_signature.py's module docstring: no second,
+    parallel gating system)."""
+    path = Path(path)
+    if path.exists():
+        _log(f"[run ] {path.name}: {reason} -- deleting to force regeneration", notes)
+        path.unlink()
+
+
+def _colour_contributor_frame_hash(report, telescope: str, target: str, binning: int) -> str:
+    """One hash for a colour contributor's entire R+G+B light set -- a
+    change to ANY of its three filters' subs (not just one) must be
+    caught, since all three feed the one rgbcomp'd composite."""
+    names: list[str] = []
+    for filter_name in RGB_FILTERS:
+        lights, _ = resolve_lights(report, telescope, target, filter_name, binning)
+        names.extend(f.path.name for f in lights)
+    return frame_identity_hash(names)
+
+
+def _clear_colour_contributor_products(
+    contrib_dir: Path,
+    project_dir: Path,
+    report,
+    telescope: str,
+    target: str,
+    binning: int,
+) -> list[Path]:
+    """Delete one colour contributor's raw R/G/B masters AND its own
+    build products (rgb_native.fit onward), so _build_colour_contributor
+    rebuilds it cleanly from scratch rather than mixing freshly-rebuilt
+    masters with stale downstream products from the old ones. Returns the
+    paths actually deleted, for logging by the caller (which knows the
+    human-readable BIN{n} label this function doesn't)."""
+    deleted: list[Path] = []
+    for name in (
+        "rgb_native.fit", "red.fit", "green.fit", "blue.fit",
+        "rgb_native_bg.fits", "rgb_colour_calibrated.fit",
+    ):
+        candidate = contrib_dir / name
+        if candidate.exists():
+            candidate.unlink()
+            deleted.append(candidate)
+    for filter_name in RGB_FILTERS:
+        _, group_name = resolve_lights(report, telescope, target, filter_name, binning)
+        master_path = pipeline_dir(project_dir) / group_name / "lights" / f"master_{filter_name.lower()}.fit"
+        if master_path.exists():
+            master_path.unlink()
+            deleted.append(master_path)
+    return deleted
+
+
 def run_lrgb(
     project_dir: str | Path,
     telescope: str,
@@ -635,6 +716,9 @@ def run_lrgb(
     rgb_binning: int = 2,
     stretch_method: str = "autostretch",
     lum_source: tuple[str, int] | None = None,
+    pedestal: float = DEFAULT_PEDESTAL,
+    stop_after: str | None = None,
+    force: set[str] | None = None,
 ) -> PipelineResult:
     """`lum_source`, if given, names an explicit `(telescope, binning)`
     among the discovered Luminance contributors to drive the composite --
@@ -645,13 +729,70 @@ def run_lrgb(
     project's own checkpointed-not-black-box design principle keeps the
     final call available to a human (Slice 4's skill wraps this as a real
     menu choice; here it's just an argument). Raises ValueError if the
-    named combo wasn't actually discovered for this target."""
+    named combo wasn't actually discovered for this target.
+
+    `pedestal` (Slice 4.1) is the constant added to every calibrated
+    light before registration/stacking (see calibration.py's module
+    docstring for why this exists at all) -- promoted here from a
+    calibration.py-internal default to a real, resume-guarded `run_lrgb`
+    argument, per plan-rev4.md's Slice 4.1: it changes every master's
+    actual pixels, so a caller passing a different value on a resumed run
+    must not silently get back a master built under the OLD value just
+    because `usable()` sees an existing file.
+
+    `stop_after` (Slice 4.3) ends the call early, honestly, against this
+    function's REAL control flow -- not against the 5 checkpoint labels,
+    which are not phase boundaries (`02_primary_rgb_colour_calibrated`
+    completes only after every colour contributor is built, since RGB
+    binnings are processed in sorted() order and the primary is whichever
+    binning the caller named, not necessarily processed first). One of:
+
+        "masters"     -- Luminance selected + every colour contributor
+                          built. Returns with `result.masters` populated,
+                          no reconciliation/stretch/export attempted.
+        "reconciled"  -- the above, plus L background extraction and
+                          (when there is more than one colour contributor)
+                          reprojection/gain-match/combine. A no-op boundary
+                          for a single-contributor run -- no combine ever
+                          happens for it, so this stops in the same place
+                          "masters" would other than L's background
+                          extraction.
+        "final"       -- (the default, via `stop_after=None`) everything,
+                          i.e. today's full run.
+
+    Returns without raising, with no partial/broken files -- whatever
+    stages were actually reached get their checkpoints emitted (Slice
+    4.2 moved checkpoint emission inline, per-stage, specifically so a
+    `stop_after`-terminated call still leaves an inspectable
+    `checkpoints.json` behind).
+
+    `force` (Slice 4.3) names stages -- from the same
+    `{"masters", "reconciled", "final"}` vocabulary -- whose outputs
+    should be deleted/invalidated before running, even if `usable()`
+    would otherwise skip them, matching 4.1's dependency order:
+    `force={"masters"}` also invalidates "reconciled" and "final" (they
+    are derived from masters), not just "masters" itself -- see
+    run_signature.cascade_from, which both `force` and the automatic
+    run-signature-mismatch check below go through.
+    """
+    if stop_after is not None and stop_after not in STAGE_ORDER:
+        raise ValueError(f"stop_after={stop_after!r} is not one of {STAGE_ORDER}")
+    force = set(force) if force else set()
+    unknown_force = force - set(STAGE_ORDER)
+    if unknown_force:
+        raise ValueError(f"force={sorted(unknown_force)} names unknown stage(s); valid: {STAGE_ORDER}")
+
     project_dir = Path(project_dir)
     out = pipeline_dir(project_dir)
     final = out / "final"
     final.mkdir(parents=True, exist_ok=True)
     result = PipelineResult()
     notes = result.notes
+
+    checkpoint_dir = out / "checkpoints"
+    checkpoints_path = checkpoint_dir / "checkpoints.json"
+    run_signature_path = out / "run_signature.json"
+    old_signature = load_run_signature(run_signature_path)
 
     _log(f"=== scanning {project_dir.name} ===", notes)
     report = scan_session(project_dir)
@@ -675,22 +816,45 @@ def run_lrgb(
     # the winner can only be known after every candidate has been measured.
     cal_index = report.calibration_index()
     lum_contributors = discover_luminance_contributors(report, target, telescope, lum_binning)
+    force_masters = "masters" in force
 
     lum_candidates: list[LumCandidate] = []
+    lum_frame_hashes: dict[str, str] = {}
+    lum_stackcnt: dict[str, int] = {}
     for lum_telescope, contrib_lum_binning in lum_contributors:
         lum_key = (lum_telescope, contrib_lum_binning)
         lum_label = f"Luminance-{lum_telescope}-bin{contrib_lum_binning}"
+        contributor_key = f"{lum_telescope}_bin{contrib_lum_binning}"
         lum_lights, lum_group_name = resolve_lights(
             report, lum_telescope, target, LUMINANCE_FILTER, contrib_lum_binning
         )
+        frame_hash = frame_identity_hash([f.path.name for f in lum_lights])
+        lum_frame_hashes[contributor_key] = frame_hash
+
+        # Slice 4.1: usable() only knows whether master_luminance.fit
+        # exists and reads clean -- it has zero notion of which lights
+        # produced it, so a sub silently added/removed/replaced (the
+        # orphaned pre-merge T24-kaveh096-M51-Luminance-bin1 group is real,
+        # on-disk proof this gap is not hypothetical) would otherwise never
+        # trigger a rebuild. Delete the stale master here so usable()'s own
+        # skip-if-present gate inside build_master naturally regenerates it.
+        stale = force_masters or (
+            old_signature is not None
+            and old_signature.contributor_stale("luminance", contributor_key, frame_hash, pedestal)
+        )
+        if stale:
+            master_path = pipeline_dir(project_dir) / lum_group_name / "lights" / f"master_{LUMINANCE_FILTER.lower()}.fit"
+            _delete_if_exists(master_path, f"{lum_label}: run signature changed", notes)
+
         lum_users = sorted({f.user for f in lum_lights})
         if len(lum_users) > 1:
             _log(f"[run ] combining Luminance across users: {', '.join(lum_users)}", notes)
         lum_master_path = build_master(
             project_dir, lum_lights, cal_index, lum_group_name, LUMINANCE_FILTER,
-            lum_telescope, contrib_lum_binning, ra_hours, dec_deg, notes,
+            lum_telescope, contrib_lum_binning, ra_hours, dec_deg, notes, pedestal=pedestal,
         )
         result.masters[lum_label] = lum_master_path
+        lum_stackcnt[contributor_key] = int(fits.getheader(lum_master_path).get("STACKCNT", len(lum_lights)))
         fwhm_arcsec = contributor_fwhm_arcsec(lum_master_path, notes, label=lum_label)
         if fwhm_arcsec is not None:
             _log(f"       {lum_label}: median FWHM {fwhm_arcsec:.2f}\"", notes)
@@ -715,9 +879,56 @@ def run_lrgb(
     if rgb_binning not in rgb_binnings:
         rgb_binnings = [rgb_binning, *rgb_binnings]
 
+    try:
+        profile = resolve_instrument_profile(telescope)
+    except UnknownInstrumentError:
+        # Let _build_colour_contributor raise this at the right point
+        # (inside SPCC, once there is actually a contributor to fail on)
+        # rather than aborting discovery over a telescope with no colour
+        # data at all; recorded as no profile for signature purposes.
+        profile = None
+    profile_tuple = (
+        (profile.mono_sensor, profile.red_filter, profile.green_filter, profile.blue_filter)
+        if profile is not None else None
+    )
+
     contributors: list[ColourContributor] = []
+    colour_frame_hashes: dict[str, str] = {}
     for binning in rgb_binnings:
+        contributor_key = f"{telescope}_bin{binning}"
         contrib_dir = contributor_dir(final, telescope, binning, rgb_binning)
+        frame_hash = _colour_contributor_frame_hash(report, telescope, target, binning)
+        colour_frame_hashes[contributor_key] = frame_hash
+
+        # Slice 4.1: same gap as the Luminance loop above, plus SPCC
+        # profile identity -- neither is visible to usable()'s file-only
+        # gate. A frame/pedestal change forces a full rebuild (raw R/G/B
+        # masters and every downstream product); an SPCC-profile-only
+        # change only needs the colour-calibrated output redone, since the
+        # profile has no effect on calibration/stacking.
+        needs_full_rebuild = force_masters or (
+            old_signature is not None
+            and old_signature.contributor_stale("colour", contributor_key, frame_hash, pedestal)
+        )
+        if needs_full_rebuild:
+            deleted = _clear_colour_contributor_products(
+                contrib_dir, project_dir, report, telescope, target, binning
+            )
+            if deleted:
+                _log(
+                    f"[run ] BIN{binning}: run signature changed -- deleted "
+                    f"{len(deleted)} stale contributor file(s) to force rebuild",
+                    notes,
+                )
+        elif old_signature is not None:
+            existing = old_signature.colour.get(contributor_key)
+            if existing is not None and existing.spcc_profile != profile_tuple:
+                _delete_if_exists(
+                    contrib_dir / "rgb_colour_calibrated.fit",
+                    f"BIN{binning}: SPCC profile changed",
+                    notes,
+                )
+
         contributor = _build_colour_contributor(
             project_dir, contrib_dir, report, telescope, target, binning,
             ra_hours, dec_deg, notes,
@@ -740,6 +951,110 @@ def run_lrgb(
             f"binning ({rgb_binnings}) was missing at least one of Red/Green/Blue."
         )
 
+    # Slice 3.4/3.5's designated reference -- the contributor with the
+    # most STACKCNT -- computed here (not only inside the >1-contributor
+    # branch below) so Slice 4.1's signature can record it even for a
+    # single-contributor run; max() over one element just returns it.
+    reference_pos = max(range(len(contributors)), key=lambda i: contributors[i].stack_total)
+    reference = contributors[reference_pos]
+    if len(contributors) > 1:
+        _log(
+            f"[run ] gain/offset reference: {reference.key} "
+            f"(STACKCNT {reference.stack_total}, highest)",
+            notes,
+        )
+
+    # --- Slice 4.1: build this run's signature, diff against whatever was
+    # persisted last time, and delete exactly the downstream files that
+    # diff says are now stale -- BEFORE touching lum_bg.fits/
+    # rgb_reconciled.fit/lrgb_final.fit below, so their own usable() gates
+    # see the deletion and regenerate naturally (see run_signature.py's
+    # module docstring: no second, parallel gating mechanism). This is
+    # the ONLY place STACKCNT and the reference-contributor identity are
+    # known, which is why the reference-flip nuance (STACKCNT changing
+    # enough to pick a different reference with no light frame changing
+    # at all) can only be caught here, post-build -- not in the pre-build
+    # per-contributor checks above.
+    new_signature = RunSignature(
+        stretch_method=stretch_method,
+        pedestal=pedestal,
+        luminance_selected=f"{selected_key[0]}_bin{selected_key[1]}",
+        luminance={
+            key: ContributorSignature(key=key, stackcnt=lum_stackcnt[key], frame_hash=lum_frame_hashes[key])
+            for key in lum_frame_hashes
+        },
+        colour_reference=reference.key,
+        colour={
+            c.key: ContributorSignature(
+                key=c.key, stackcnt=c.stack_total, frame_hash=colour_frame_hashes[c.key],
+                spcc_profile=profile_tuple,
+            )
+            for c in contributors
+        },
+    )
+    signature_stages = diff_invalidation(old_signature, new_signature)
+    stages_to_invalidate = set(signature_stages)
+    for stage in force:
+        stages_to_invalidate |= cascade_from(stage)
+
+    def _reason(stage: str) -> str:
+        # Distinguish an automatic signature-mismatch invalidation from an
+        # explicit force -- both end up in `stages_to_invalidate`, but the
+        # log should say which actually applied here, not always blame the
+        # signature (a force={"final"} call has nothing to do with
+        # stretch_method, for example).
+        via_signature = stage in signature_stages
+        via_force = any(stage in cascade_from(f) for f in force)
+        if via_signature and via_force:
+            return "run signature changed, and explicitly forced"
+        if via_signature:
+            return "run signature changed"
+        return "explicitly forced"
+
+    if "masters" in stages_to_invalidate:
+        reason = f"{_reason('masters')} (Luminance-affecting)"
+        _delete_if_exists(final / "lum_bg.fits", reason, notes)
+        _delete_if_exists(final / "rgb_reconciled.fit", reason, notes)
+        _delete_if_exists(final / "lrgb_final.fit", reason, notes)
+    if "reconciled" in stages_to_invalidate:
+        reason = f"{_reason('reconciled')} (colour-affecting)"
+        _delete_if_exists(final / "rgb_reconciled.fit", reason, notes)
+        _delete_if_exists(final / "lrgb_final.fit", reason, notes)
+    if "final" in stages_to_invalidate:
+        _delete_if_exists(final / "lrgb_final.fit", _reason("final"), notes)
+    save_run_signature(new_signature, run_signature_path)
+
+    # --- checkpoints for the "masters" stop_after boundary ----------------
+    previous = None
+    previous_linear: bool | None = None
+    cp = checkpoint(
+        selected_path, f"01_master_{LUMINANCE_FILTER.lower()}", output_dir=checkpoint_dir,
+        linear=True, previous=previous, previous_linear=previous_linear,
+    )
+    result.checkpoints.append(cp)
+    previous, previous_linear = cp.stats, True
+    _log(cp.summary(), notes)
+    save_checkpoints(result.checkpoints, checkpoints_path)
+
+    primary_calibrated = final / "rgb_colour_calibrated.fit"
+    if primary_calibrated.exists():
+        cp = checkpoint(
+            primary_calibrated, "02_primary_rgb_colour_calibrated", output_dir=checkpoint_dir,
+            linear=True, previous=previous, previous_linear=previous_linear,
+        )
+        result.checkpoints.append(cp)
+        previous, previous_linear = cp.stats, True
+        _log(cp.summary(), notes)
+        save_checkpoints(result.checkpoints, checkpoints_path)
+
+    if stop_after == "masters":
+        _log(
+            "[stop] stop_after='masters' -- Luminance selected and every colour contributor "
+            "built; stopping before reconciliation",
+            notes,
+        )
+        return result
+
     # --- luminance: background extraction --------------------------------
     lum_bg = final / "lum_bg.fits"
     if not usable(lum_bg, notes):
@@ -748,6 +1063,15 @@ def run_lrgb(
         lum_bg = run_graxpert_background_extraction(final / "lum.fit", output_stem="lum_bg")
     else:
         _log("[skip] L background extraction already done", notes)
+
+    cp = checkpoint(
+        lum_bg, "03_lum_background_extracted", output_dir=checkpoint_dir,
+        linear=True, previous=previous, previous_linear=previous_linear,
+    )
+    result.checkpoints.append(cp)
+    previous, previous_linear = cp.stats, True
+    _log(cp.summary(), notes)
+    save_checkpoints(result.checkpoints, checkpoints_path)
 
     # --- reproject every colour contributor onto L's grid, then combine --
     # `lum_for_compose_path` is computed unconditionally (not inside the
@@ -815,15 +1139,11 @@ def run_lrgb(
             # with the most STACKCNT -- both the gain/offset fit (3.4) and
             # the weighting (3.5) are measured against/by it, and it also
             # supplies the combined output's FITS header (3.6), replacing
-            # the old paths[0] positional pick.
-            reference_pos = max(range(len(contributors)), key=lambda i: contributors[i].stack_total)
-            reference = contributors[reference_pos]
-            _log(
-                f"[run ] gain/offset reference: {reference.key} "
-                f"(STACKCNT {reference.stack_total}, highest)",
-                notes,
-            )
-
+            # the old paths[0] positional pick. `reference`/`reference_pos`
+            # are computed once, above, right after the colour-contributor
+            # loop (Slice 4.1 needs the reference's identity for the run
+            # signature even on a single-contributor run) -- reused here
+            # rather than recomputed.
             gain_matched: list[Path] = []
             for i, (contributor, path) in enumerate(zip(contributors, cropped_rgb)):
                 if i == reference_pos:
@@ -858,6 +1178,23 @@ def run_lrgb(
     else:
         _log("[skip] reprojection already done", notes)
 
+    cp = checkpoint(
+        rgb_reconciled, "04_rgb_reconciled", output_dir=checkpoint_dir,
+        linear=True, previous=previous, previous_linear=previous_linear,
+    )
+    result.checkpoints.append(cp)
+    previous, previous_linear = cp.stats, True
+    _log(cp.summary(), notes)
+    save_checkpoints(result.checkpoints, checkpoints_path)
+
+    if stop_after == "reconciled":
+        _log(
+            "[stop] stop_after='reconciled' -- L background extracted and colour reconciled; "
+            "stopping before stretch/export",
+            notes,
+        )
+        return result
+
     # --- stretch + LRGB composition --------------------------------------
     composite = final / "lrgb_final.fit"
     if not usable(composite, notes):
@@ -874,7 +1211,19 @@ def run_lrgb(
         _log("[skip] LRGB composite already present", notes)
     result.composite_path = composite
 
+    cp = checkpoint(
+        composite, "05_lrgb_final", output_dir=checkpoint_dir,
+        linear=False, previous=previous, previous_linear=previous_linear,  # post-stretch: render faithfully
+    )
+    result.checkpoints.append(cp)
+    previous, previous_linear = cp.stats, False
+    _log(cp.summary(), notes)
+    save_checkpoints(result.checkpoints, checkpoints_path)
+
     # --- export -----------------------------------------------------------
+    # Always re-run, unconditionally -- export() has no usable() gate of its
+    # own (cheap: format conversion, not a Siril/GraXpert/SPCC call), so it
+    # simply reflects whatever `composite` currently is, resumed or fresh.
     _log("[run ] export TIFF + preview", notes)
     result.export_result = export(composite, output_dir=final, stem="M51_lrgb")
     _log(
@@ -884,35 +1233,4 @@ def run_lrgb(
         notes,
     )
 
-    # --- checkpoints -------------------------------------------------------
-    # Always produced, even on a fully-resumed run: they describe the state
-    # of the outputs, not the work done to get there, so a run that skipped
-    # everything should still be inspectable.
-    _log("[run ] checkpoints", notes)
-    checkpoint_dir = out / "checkpoints"
-    stages: list[tuple[str, Path, bool]] = [
-        (f"01_master_{LUMINANCE_FILTER.lower()}", result.masters[LUMINANCE_FILTER], True),
-        (
-            "02_primary_rgb_colour_calibrated",
-            final / "rgb_colour_calibrated.fit",
-            True,
-        ),
-        ("03_lum_background_extracted", Path(lum_bg), True),
-        ("04_rgb_reconciled", rgb_reconciled, True),
-        ("05_lrgb_final", Path(composite), False),  # post-stretch: render faithfully
-    ]
-    previous = None
-    previous_linear: bool | None = None
-    for label, path, linear in stages:
-        if not Path(path).exists():
-            continue
-        cp = checkpoint(
-            path, label, output_dir=checkpoint_dir, linear=linear,
-            previous=previous, previous_linear=previous_linear,
-        )
-        result.checkpoints.append(cp)
-        previous, previous_linear = cp.stats, linear
-        _log(cp.summary(), notes)
-
-    save_checkpoints(result.checkpoints, checkpoint_dir / "checkpoints.json")
     return result
