@@ -166,6 +166,135 @@ def test_save_checkpoints_round_trips(tmp_path: Path) -> None:
     assert "stats" in loaded[0]
 
 
+# --- Slice 4.2: merge-by-label, not truncate-or-append ----------------------
+
+
+def test_save_checkpoints_merges_new_stage_without_losing_earlier_ones(tmp_path: Path) -> None:
+    """Checkpoint emission moved inline (Slice 4.2) means save_checkpoints
+    gets called once per stage, potentially across separate run_lrgb
+    calls. A second call for a DIFFERENT label must not truncate the
+    first label's entry -- the actual defect a plain
+    `path.write_text(json.dumps(...))` truncating write has."""
+    import json
+
+    path_a = write_fits(tmp_path / "a.fit", star_field())
+    path_b = write_fits(tmp_path / "b.fit", star_field(background=0.2))
+    out = tmp_path / "checkpoints.json"
+
+    save_checkpoints([checkpoint(path_a, "01_a", output_dir=tmp_path, detect_stars=False)], out)
+    save_checkpoints([checkpoint(path_b, "02_b", output_dir=tmp_path, detect_stars=False)], out)
+
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+    assert {d["label"] for d in loaded} == {"01_a", "02_b"}
+
+
+def test_save_checkpoints_replaces_same_label_not_appends_duplicate(tmp_path: Path) -> None:
+    """A stage re-checkpointed after a force-recompute (Slice 4.3) must
+    REPLACE its own prior entry, not accumulate a second one under the
+    same label."""
+    import json
+
+    path = write_fits(tmp_path / "a.fit", star_field())
+    out = tmp_path / "checkpoints.json"
+
+    save_checkpoints([checkpoint(path, "01_a", output_dir=tmp_path, detect_stars=False)], out)
+    save_checkpoints([checkpoint(path, "01_a", output_dir=tmp_path, detect_stars=False)], out)
+
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+    assert len(loaded) == 1
+    assert loaded[0]["label"] == "01_a"
+
+
+def test_save_checkpoints_orders_by_label_not_append_order(tmp_path: Path) -> None:
+    """Ordering must read coherently even after an out-of-order re-run
+    (e.g. only stage 01 got force-recomputed after stage 02 already
+    existed) -- so the merged file is sorted by label, not by call order."""
+    import json
+
+    path = write_fits(tmp_path / "a.fit", star_field())
+    out = tmp_path / "checkpoints.json"
+
+    save_checkpoints([checkpoint(path, "02_b", output_dir=tmp_path, detect_stars=False)], out)
+    save_checkpoints([checkpoint(path, "01_a", output_dir=tmp_path, detect_stars=False)], out)
+
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+    assert [d["label"] for d in loaded] == ["01_a", "02_b"]
+
+
+def test_save_checkpoints_prunes_orphaned_preview_png(tmp_path: Path) -> None:
+    """The actual, already-real defect on disk: a preview PNG whose label
+    no longer appears in checkpoints.json (from an earlier, now-changed
+    label scheme) must be deleted the next time save_checkpoints runs --
+    not left behind forever."""
+    path = write_fits(tmp_path / "a.fit", star_field())
+    out = tmp_path / "checkpoints.json"
+
+    cp = checkpoint(path, "01_a", output_dir=tmp_path, detect_stars=False)
+    save_checkpoints([cp], out)
+    current_preview = Path(cp.preview_path)
+    assert current_preview.exists()
+
+    # Simulate an orphan: a preview PNG from a label scheme that no longer
+    # exists in the current checkpoint list (mirrors the 7 real orphans
+    # found under the M51 project's _pipeline/checkpoints/).
+    orphan = tmp_path / "checkpoint_00_old_scheme_preview.png"
+    orphan.write_bytes(current_preview.read_bytes())
+    assert orphan.exists()
+
+    # Re-saving the SAME (still-current) checkpoint list must prune the
+    # orphan but keep the still-referenced preview.
+    save_checkpoints([cp], out)
+    assert not orphan.exists()
+    assert current_preview.exists()
+
+
+def test_save_checkpoints_prunes_preview_of_a_label_that_no_longer_appears(tmp_path: Path) -> None:
+    """When a label is dropped from the merged set entirely (not just
+    replaced), its own preview must be pruned too."""
+    path = write_fits(tmp_path / "a.fit", star_field())
+    out = tmp_path / "checkpoints.json"
+
+    cp_old = checkpoint(path, "05_old_final", output_dir=tmp_path, detect_stars=False)
+    save_checkpoints([cp_old], out)
+    old_preview = Path(cp_old.preview_path)
+    assert old_preview.exists()
+
+    # A fresh save that no longer includes "05_old_final" at all -- but
+    # save_checkpoints merges against what's on disk, so simulate a
+    # rewritten checkpoints.json (as if a prior label scheme changed) by
+    # writing a merged set directly, then let save_checkpoints prune.
+    import json
+
+    out.write_text(
+        json.dumps([{**cp_old.to_dict(), "label": "05_new_final"}], indent=2),
+        encoding="utf-8",
+    )
+    cp_new = checkpoint(path, "05_new_final", output_dir=tmp_path, detect_stars=False)
+    save_checkpoints([cp_new], out)
+
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+    assert {d["label"] for d in loaded} == {"05_new_final"}
+    assert not old_preview.exists()
+
+
+def test_save_checkpoints_handles_corrupt_existing_file(tmp_path: Path) -> None:
+    """A corrupt checkpoints.json degrades to 'nothing persisted yet'
+    rather than raising -- this project's existing usable()/checkpoint()
+    convention of degrading rather than failing on a bad-but-optional
+    input."""
+    path = write_fits(tmp_path / "a.fit", star_field())
+    out = tmp_path / "checkpoints.json"
+    out.write_text("{not valid json", encoding="utf-8")
+
+    cp = checkpoint(path, "01_a", output_dir=tmp_path, detect_stars=False)
+    save_checkpoints([cp], out)  # must not raise
+
+    import json
+
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+    assert loaded[0]["label"] == "01_a"
+
+
 # --- against the real pipeline output --------------------------------------
 
 

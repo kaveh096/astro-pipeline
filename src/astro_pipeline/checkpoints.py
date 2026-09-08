@@ -351,6 +351,53 @@ def checkpoint(
 
 
 def save_checkpoints(checkpoints: list[Checkpoint], path: str | Path) -> None:
+    """Merge `checkpoints` into whatever is already persisted at `path`,
+    BY LABEL, replacing any existing entry with the same label -- then
+    prune any preview PNG on disk whose label no longer appears in the
+    merged result.
+
+    Slice 4.2: checkpoint emission moved from "gathered once at the very
+    end of run_lrgb" to inline, immediately after each stage's own
+    usable() block (see pipeline.run_lrgb) -- which means this function
+    now gets called multiple times per run, and potentially across
+    multiple `run_lrgb` invocations on the same project as staged
+    execution (`stop_after`) progresses. A plain truncating write (what
+    this function used to do) would lose every earlier stage's entry each
+    time; a plain append would accumulate a stale duplicate every time a
+    stage gets re-checkpointed (e.g. only the L stage got force-recomputed
+    and re-checkpointed after a run that had already gotten further).
+    Both failure modes are already proven on real disk, not hypothetical:
+    7 preview PNGs sit under this project's real `_pipeline/checkpoints/`
+    with no matching entry in `checkpoints.json` at all, left behind by
+    earlier truncate/append-inconsistent label schemes -- pruning below
+    cleans those up as a side effect of any future save, without needing
+    a separate one-off cleanup step.
+
+    Ordering is BY LABEL (not append order), so `checkpoints.json` reads
+    coherently even after an out-of-order re-run -- labels are
+    "01_...".."05_..." (see run_lrgb), so a plain sort keeps them in
+    stage order.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps([c.to_dict() for c in checkpoints], indent=2), encoding="utf-8")
+
+    existing: list[dict] = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            existing = []  # corrupt/unreadable -- degrade to "nothing persisted yet"
+
+    merged: dict[str, dict] = {d["label"]: d for d in existing if "label" in d}
+    for c in checkpoints:
+        merged[c.label] = c.to_dict()
+    ordered = [merged[label] for label in sorted(merged)]
+
+    path.write_text(json.dumps(ordered, indent=2), encoding="utf-8")
+
+    kept_preview_names = {
+        Path(d["preview_path"]).name for d in ordered if d.get("preview_path")
+    }
+    for png in path.parent.glob("checkpoint_*_preview.png"):
+        if png.name not in kept_preview_names:
+            png.unlink(missing_ok=True)
