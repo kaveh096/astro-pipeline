@@ -1225,7 +1225,15 @@ def run_lrgb(
     # own (cheap: format conversion, not a Siril/GraXpert/SPCC call), so it
     # simply reflects whatever `composite` currently is, resumed or fresh.
     _log("[run ] export TIFF + preview", notes)
-    result.export_result = export(composite, output_dir=final, stem="M51_lrgb")
+    # Slice 4.4: `target` threaded through as the stem instead of a
+    # hardcoded "M51_lrgb" -- verified safe against the real M51 fixture
+    # (target="M51" here reproduces the exact same "M51_lrgb" stem, so
+    # tests/test_pipeline.py's byte-identical-output assertions against
+    # M51_lrgb.tif are unaffected), and required for the skill (4.4) to
+    # generalize the handoff path to whatever target Kaveh throws at it
+    # next instead of silently mislabeling every future target's TIFF as
+    # M51's.
+    result.export_result = export(composite, output_dir=final, stem=f"{target}_lrgb")
     _log(
         f"       row order {result.export_result.row_order}, "
         f"clipped low {result.export_result.clipped_low_fraction:.4f} / "
