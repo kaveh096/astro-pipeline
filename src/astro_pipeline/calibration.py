@@ -30,6 +30,38 @@ stacking, so the averaged background never goes negative and never gets
 clipped. Verified: with the pedestal, the resulting master had zero exact-
 zero pixels (min 0.031, real continuous background) and GraXpert produced
 valid (0% NaN) output.
+
+Slice 3 of plan-flats-v3.md (2026-09) asked, and answered by measurement,
+whether flat correction changes this picture -- built TWO real, registered,
+stacked, plate-solved T21 Luminance masters (build_master()'s real output,
+not a single calibrated sub) with pedestal=0.0 (i.e. the exact state this
+mechanism exists to guard against), one flat-corrected (Slice 2's real
+30-frame Luminance flat) and one not, plus reconstructed the pre-pedestal
+state of a real, much-larger-N T24 Luminance master (17 stacked subs, no
+flat ever built for T24) by subtracting the already-baked-in
+DEFAULT_PEDESTAL=0.1 -- valid because that master has 0% exact-zero pixels,
+i.e. no clipping had already occurred there to lose information:
+
+    T21, NO flat, pedestal=0.0 (2 subs):   min=0.000 (clipped), 0.00053%
+                                            exact-zero, p5=0.041
+    T21, WITH flat, pedestal=0.0 (2 subs): min=0.000 (clipped), 0.00062%
+                                            exact-zero, p5=0.052
+    T24, no flat, pedestal=0.1 (17 subs),
+    pre-pedestal reconstructed:            min=-0.0005, p5=0.0021
+
+All three real cases still clip (or come within a hair of clipping) at
+pedestal=0.0 -- flat correction does not remove the underlying need for a
+pedestal, and does not meaningfully worsen it either: the flat-corrected
+T21 master's margin was slightly *safer* (higher p5) than the non-flat one,
+the opposite of what a single-sub probe (see build_master_flat's docstring,
+fact 9) had flagged as a possible concern -- consistent with sigma-rejection
+during stacking smoothing out the single-outlier-pixel effect that probe
+saw. T24's much larger N did not put it further from zero either; its
+reconstructed margin (p5=0.0021) was in fact the tightest of the three,
+a reminder that "more subs" doesn't uniformly mean "safer" for this metric.
+DEFAULT_PEDESTAL=0.1 comfortably covers every measured case (no case came
+close to needing more, none showed 0.1 to be excessive) and is left
+unchanged by this slice.
 """
 
 from __future__ import annotations
