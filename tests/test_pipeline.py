@@ -5,6 +5,7 @@ import pytest
 from astropy.io import fits
 
 from astro_pipeline.background_color import UnknownInstrumentError
+from astro_pipeline.calibration import FlatPolicy
 from astro_pipeline.ingest import scan_session
 from astro_pipeline.pipeline import (
     ColourContributor,
@@ -12,6 +13,7 @@ from astro_pipeline.pipeline import (
     contributor_dir,
     contributor_fwhm_arcsec,
     discover_luminance_contributors,
+    infer_flat_policy,
     resolve_instrument_profile,
     resolve_lights,
     run_lrgb,
@@ -307,6 +309,56 @@ def test_resolve_instrument_profile_unknown_telescope_raises() -> None:
     as T24's sensor/filters. Must raise instead of guessing."""
     with pytest.raises(UnknownInstrumentError):
         resolve_instrument_profile("T99")
+
+
+# --- Slice 2.2: per-telescope FlatPolicy, inferred from data presence, not
+# hardcoded by telescope name (mirrors resolve_instrument_profile's own
+# preference above, but a distinct mechanism -- inferred from presence in
+# flat_index(), not a lookup into a curated registry). ----------------------
+
+
+class _FakeFlatReport:
+    """Just enough of IngestReport's shape for infer_flat_policy -- a
+    fixed flat_index() return value, no real ingest/FITS needed."""
+
+    def __init__(self, flat_index: dict) -> None:
+        self._flat_index = flat_index
+
+    def flat_index(self):
+        return self._flat_index
+
+
+def test_infer_flat_policy_requires_for_telescope_with_any_flat_entry() -> None:
+    """T21's real shape: flats for every filter at BIN1 -- REQUIRE, so a
+    light group missing one it actually needs is a real, surfaced gap
+    (raises), not a silent skip."""
+    report = _FakeFlatReport({("T21", 1, "Luminance"): ["flat"], ("T21", 1, "Red"): ["flat"]})
+    assert infer_flat_policy(report, "T21") == FlatPolicy.REQUIRE
+
+
+def test_infer_flat_policy_skip_if_missing_for_telescope_with_no_flats() -> None:
+    """T24's permanent real situation for this delivery: zero flats of any
+    kind -- SKIP_IF_MISSING, so existing T24 groups keep calibrating
+    without a flat exactly as before this slice."""
+    report = _FakeFlatReport({("T21", 1, "Luminance"): ["flat"]})
+    assert infer_flat_policy(report, "T24") == FlatPolicy.SKIP_IF_MISSING
+
+
+def test_infer_flat_policy_empty_flat_index_is_skip_if_missing_for_any_telescope() -> None:
+    report = _FakeFlatReport({})
+    assert infer_flat_policy(report, "T21") == FlatPolicy.SKIP_IF_MISSING
+    assert infer_flat_policy(report, "T24") == FlatPolicy.SKIP_IF_MISSING
+
+
+@requires_real_session
+def test_infer_flat_policy_real_data_t21_requires_t24_skips() -> None:
+    """The actual real-data claim Slice 2.2 exists to satisfy: T21 ships
+    330 real flats (11 filters x 30 at BIN1) -> REQUIRE; T24 ships zero
+    flats of any kind in this delivery, structurally, not temporarily ->
+    SKIP_IF_MISSING."""
+    report = scan_session(REAL_SESSION_DIR)
+    assert infer_flat_policy(report, "T21") == FlatPolicy.REQUIRE
+    assert infer_flat_policy(report, "T24") == FlatPolicy.SKIP_IF_MISSING
 
 
 # --- Slice 3.2: a partial R/G/B set logs and skips, does not abort the run -

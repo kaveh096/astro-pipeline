@@ -207,6 +207,223 @@ def test_contributor_stale_true_for_a_brand_new_key() -> None:
     assert old.contributor_stale("luminance", "T21_bin1", "hNew", pedestal=0.1) is True
 
 
+# --- Slice 2.3: flat_frame_hash -- both the dataclass-comparison mechanism
+# AND (the actually critical part, per round 2's finding) the exact way
+# pipeline.run_lrgb's own two real call sites invoke contributor_stale. ----
+
+
+def test_contributor_stale_true_on_flat_frame_hash_change_direct_call() -> None:
+    """Direct check of the mechanism itself: same light frame_hash, same
+    pedestal, only flat_frame_hash differs -- must be caught."""
+    old = RunSignature(
+        stretch_method="autostretch",
+        pedestal=0.1,
+        luminance_selected="T21_bin1",
+        luminance={
+            "T21_bin1": ContributorSignature(
+                key="T21_bin1", stackcnt=2, frame_hash="hL", flat_frame_hash="flat-v1",
+            )
+        },
+    )
+    assert old.contributor_stale("luminance", "T21_bin1", "hL", pedestal=0.1, flat_frame_hash="flat-v1") is False
+    assert old.contributor_stale("luminance", "T21_bin1", "hL", pedestal=0.1, flat_frame_hash="flat-v2") is True
+
+
+def test_contributor_stale_defaults_flat_frame_hash_to_empty_string() -> None:
+    """A caller that doesn't pass flat_frame_hash at all (e.g. an old test,
+    or code that hasn't been updated) must not raise -- the parameter has
+    a default, for backward compatibility -- but that default is exactly
+    the trap: see the call-site-exercising test below for why a default
+    alone is NOT sufficient for pipeline.run_lrgb's real call sites."""
+    old = RunSignature(
+        stretch_method="autostretch",
+        pedestal=0.1,
+        luminance_selected="T21_bin1",
+        luminance={
+            "T21_bin1": ContributorSignature(key="T21_bin1", stackcnt=2, frame_hash="hL"),
+        },
+    )
+    assert old.contributor_stale("luminance", "T21_bin1", "hL", pedestal=0.1) is False
+
+
+def test_old_format_run_signature_json_without_flat_frame_hash_still_loads(tmp_path) -> None:
+    """The real, currently-persisted _pipeline/run_signature.json on the
+    M51 project predates this field entirely. Write out exactly that
+    shape (no "flat_frame_hash" key anywhere) and confirm from_dict() both
+    loads it AND that the resulting ContributorSignature reads back
+    flat_frame_hash="" -- which then correctly mismatches any real,
+    freshly-computed hash on the next run, forcing exactly one rebuild (a
+    one-time, correct-not-silent transition per the field's own
+    docstring), not a load failure."""
+    import json
+
+    old_format = {
+        "stretch_method": "autostretch",
+        "pedestal": 0.1,
+        "luminance_selected": "T21_bin1",
+        "luminance": {
+            "T21_bin1": {
+                "key": "T21_bin1",
+                "stackcnt": 2,
+                "frame_hash": "c2b76b333110b4a6",
+                "spcc_profile": None,
+                # deliberately no "flat_frame_hash" key -- matches the real,
+                # currently-persisted file on disk before this slice.
+            }
+        },
+        "colour_reference": "T24_bin2",
+        "colour": {},
+        "quality_filter_policy": "filter_fwhm_pct=filter_round_pct=90.0 if n>=10 else None",
+    }
+    path = tmp_path / "run_signature.json"
+    path.write_text(json.dumps(old_format), encoding="utf-8")
+
+    loaded = load_run_signature(path)
+    assert loaded is not None
+    assert loaded.luminance["T21_bin1"].flat_frame_hash == ""
+    # And staleness correctly fires the first time a real flat hash exists,
+    # even though the light frame_hash itself is unchanged.
+    assert loaded.contributor_stale(
+        "luminance", "T21_bin1", "c2b76b333110b4a6", pedestal=0.1, flat_frame_hash="real-flat-hash-abc123"
+    ) is True
+
+
+# --- THE call-site-exercising test: round 2's actual finding was that
+# giving contributor_stale a defaulted flat_frame_hash parameter WITHOUT
+# updating pipeline.run_lrgb's two real (pure-positional) call sites would
+# leave the whole feature silently dead -- compiling, running, and passing
+# `pytest tests/ -q` cleanly, with the comparison simply never firing. This
+# test exercises the REAL call sites (via a minimal run_lrgb invocation
+# against synthetic fixtures), not just the dataclass comparison in
+# isolation above, which would pass even with that exact bug present. -----
+
+
+def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
+    tmp_path, monkeypatch
+) -> None:
+    """Exercises pipeline.run_lrgb's real Luminance-loop call site the same
+    way it is actually invoked in production: monkeypatches
+    RunSignature.contributor_stale itself to record every call's
+    arguments, then drives just enough of run_lrgb (via light monkeypatching
+    of the Siril/GraXpert/SPCC-touching internals, none of which this test
+    needs) to reach that call site with a persisted OLD signature already
+    on disk (predating flat_frame_hash, exactly like the real file), and a
+    contributor whose ONLY change is its matched flat set. If pipeline.py's
+    call site were reverted to the pre-Slice-2.3 positional call (no
+    flat_frame_hash argument), this test goes red -- proving it actually
+    catches the regression, not just the dataclass field in isolation.
+    """
+    import astro_pipeline.run_signature as run_signature_module
+
+    calls: list[tuple] = []
+    real_contributor_stale = run_signature_module.RunSignature.contributor_stale
+
+    def spy(self, section, key, frame_hash, pedestal, *args, **kwargs):
+        calls.append((section, key, frame_hash, pedestal, args, kwargs))
+        return real_contributor_stale(self, section, key, frame_hash, pedestal, *args, **kwargs)
+
+    monkeypatch.setattr(run_signature_module.RunSignature, "contributor_stale", spy)
+
+    # A minimal persisted signature: matches the real T21_bin1 Luminance
+    # entry's shape (frame_hash present, no flat_frame_hash recorded --
+    # i.e. it defaults to "" on load), so contributor_stale's comparison
+    # would find frame_hash UNCHANGED but flat_frame_hash mismatched (new
+    # flats matched where there were none/different before) if and only if
+    # the real call site actually passes the freshly-computed flat hash.
+    import json
+    from astro_pipeline.workspace import pipeline_dir
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    out = pipeline_dir(project_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    import astro_pipeline.pipeline as pipeline_module
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "kaveh096") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    lum_light = _FakeLightFrame("SAME-LIGHTS-UNCHANGED.fit")
+    # The persisted frame_hash must be the REAL computed hash for this
+    # light set, not an arbitrary string -- otherwise the light-set
+    # comparison alone would already report stale, and this test would no
+    # longer isolate "only the flat set changed" as the actual cause.
+    real_light_frame_hash = frame_identity_hash([lum_light.path.name])
+    persisted = {
+        "stretch_method": "autostretch",
+        "pedestal": 0.1,
+        "luminance_selected": "T99_bin1",
+        "luminance": {
+            "T99_bin1": {
+                "key": "T99_bin1",
+                "stackcnt": 1,
+                "frame_hash": real_light_frame_hash,
+                "spcc_profile": None,
+                # no flat_frame_hash key -- old format.
+            }
+        },
+        "colour_reference": "",
+        "colour": {},
+        "quality_filter_policy": "x",
+    }
+    (out / "run_signature.json").write_text(json.dumps(persisted), encoding="utf-8")
+
+    class _FakeFlatFrame:
+        def __init__(self, path_name: str) -> None:
+            self.path = tmp_path / path_name
+
+    new_flats = [_FakeFlatFrame("new_flat_1.fit"), _FakeFlatFrame("new_flat_2.fit")]
+
+    class _FakeReport:
+        def calibration_index(self):
+            return {}
+
+        def instrument_groups(self):
+            return {("T99", "M51", "Luminance", 1): [lum_light]}
+
+        def flat_index(self):
+            return {("T99", 1, "Luminance"): new_flats}
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+
+    def fake_build_master(*args, **kwargs):
+        # Stop run_lrgb right after the Luminance-loop call site we care
+        # about has run -- no Siril/register/solve needed for this test.
+        raise RuntimeError("stop-after-build-master-call-site")
+
+    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+
+    try:
+        pipeline_module.run_lrgb(
+            project_dir, telescope="T99", target="M51", ra_hours=1.0, dec_deg=1.0,
+        )
+    except RuntimeError as exc:
+        assert "stop-after-build-master-call-site" in str(exc)
+
+    lum_calls = [c for c in calls if c[0] == "luminance" and c[1] == "T99_bin1"]
+    assert lum_calls, "contributor_stale was never called for the Luminance contributor at all"
+    # The real call site's 5th positional/keyword argument must be the
+    # freshly-computed flat_frame_hash, not omitted (which would leave
+    # args/kwargs empty and the comparison always see flat_frame_hash="").
+    section, key, frame_hash, pedestal, extra_args, extra_kwargs = lum_calls[0]
+    passed_flat_hash = extra_args[0] if extra_args else extra_kwargs.get("flat_frame_hash")
+    assert passed_flat_hash not in (None, ""), (
+        "contributor_stale's real Luminance-loop call site did not pass a real "
+        "flat_frame_hash -- this is exactly the round-2 regression: the parameter "
+        "compiles and runs but the freshly-computed hash never reaches the comparison."
+    )
+    # And, since frame_hash is unchanged but flat_frame_hash is new, the
+    # comparison itself must actually have returned True (stale).
+    assert frame_hash == real_light_frame_hash  # sanity: light set really is unchanged
+    assert real_contributor_stale(
+        load_run_signature(out / "run_signature.json"),
+        "luminance", "T99_bin1", real_light_frame_hash, 0.1, passed_flat_hash,
+    ) is True
+
+
 # --- luminance_selected: masters-tier ---------------------------------------
 
 
@@ -281,3 +498,139 @@ def test_load_corrupt_file_returns_none_not_raises(tmp_path) -> None:
     path = tmp_path / "run_signature.json"
     path.write_text("not valid json{{{", encoding="utf-8")
     assert load_run_signature(path) is None
+
+
+# --- the SECOND real call site (pipeline.py's colour loop) -- round 2's
+# finding named BOTH pipeline.py:843 (Luminance) and pipeline.py:911
+# (colour) as pure-positional call sites that each needed the fix; the test
+# above exercises the Luminance one, this exercises the colour one. -------
+
+
+def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributor_stale(
+    tmp_path, monkeypatch
+) -> None:
+    """Same shape as the Luminance-loop test above, aimed at the colour
+    loop's own `old_signature.contributor_stale("colour", ...)` call site.
+    A minimal Luminance contributor is allowed to build successfully
+    (via a stubbed build_master returning a real, tiny, readable FITS
+    file, so pipeline.py's own `fits.getheader(...).get("STACKCNT", ...)`
+    call right after it doesn't blow up), so control actually reaches the
+    colour loop; `_build_colour_contributor` is then stubbed to stop
+    execution right after the colour call site we care about has run.
+    """
+    import json
+
+    import numpy as np
+    from astropy.io import fits as fits_module
+
+    import astro_pipeline.run_signature as run_signature_module
+    import astro_pipeline.pipeline as pipeline_module
+    from astro_pipeline.workspace import pipeline_dir
+
+    calls: list[tuple] = []
+    real_contributor_stale = run_signature_module.RunSignature.contributor_stale
+
+    def spy(self, section, key, frame_hash, pedestal, *args, **kwargs):
+        calls.append((section, key, frame_hash, pedestal, args, kwargs))
+        return real_contributor_stale(self, section, key, frame_hash, pedestal, *args, **kwargs)
+
+    monkeypatch.setattr(run_signature_module.RunSignature, "contributor_stale", spy)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    out = pipeline_dir(project_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "kaveh096") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    lum_light = _FakeLightFrame("lum_unchanged.fit")
+
+    # No RGB lights at all in this fake report -> both the persisted and
+    # freshly-computed colour LIGHT frame_hash are the hash of an empty
+    # name list -- identical, isolating the flat set as the only change.
+    real_colour_frame_hash = frame_identity_hash([])
+
+    class _FakeFlatFrame:
+        def __init__(self, path_name: str) -> None:
+            self.path = tmp_path / path_name
+
+    colour_flats = {
+        ("T99", 2, "Red"): [_FakeFlatFrame("new_red_flat.fit")],
+        ("T99", 2, "Green"): [_FakeFlatFrame("new_green_flat.fit")],
+        ("T99", 2, "Blue"): [_FakeFlatFrame("new_blue_flat.fit")],
+    }
+
+    class _FakeReport:
+        def calibration_index(self):
+            return {}
+
+        def instrument_groups(self):
+            return {("T99", "M51", "Luminance", 1): [lum_light]}
+
+        def flat_index(self):
+            return colour_flats
+
+    persisted = {
+        "stretch_method": "autostretch",
+        "pedestal": 0.1,
+        "luminance_selected": "T99_bin1",
+        "luminance": {
+            "T99_bin1": {
+                "key": "T99_bin1", "stackcnt": 1,
+                "frame_hash": frame_identity_hash([lum_light.path.name]),
+                "spcc_profile": None,
+            }
+        },
+        "colour_reference": "T99_bin2",
+        "colour": {
+            "T99_bin2": {
+                "key": "T99_bin2", "stackcnt": 0,
+                "frame_hash": real_colour_frame_hash,
+                "spcc_profile": None,
+                # no flat_frame_hash key -- old format, defaults to "" on load.
+            }
+        },
+        "quality_filter_policy": "x",
+    }
+    (out / "run_signature.json").write_text(json.dumps(persisted), encoding="utf-8")
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+
+    # A real, tiny, readable FITS file so the Luminance loop's own
+    # `fits.getheader(lum_master_path).get("STACKCNT", ...)` call (right
+    # after build_master returns) doesn't fail -- this test's target is
+    # the COLOUR call site, so the Luminance path just needs to complete.
+    stub_master = tmp_path / "stub_master.fit"
+    fits_module.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
+    monkeypatch.setattr(pipeline_module, "build_master", lambda *a, **k: stub_master)
+
+    def fake_build_colour_contributor(*args, **kwargs):
+        raise RuntimeError("stop-after-colour-call-site")
+
+    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+
+    try:
+        pipeline_module.run_lrgb(
+            project_dir, telescope="T99", target="M51", ra_hours=1.0, dec_deg=1.0,
+        )
+    except RuntimeError as exc:
+        assert "stop-after-colour-call-site" in str(exc)
+
+    colour_calls = [c for c in calls if c[0] == "colour" and c[1] == "T99_bin2"]
+    assert colour_calls, "contributor_stale was never called for the colour contributor at all"
+    section, key, frame_hash, pedestal, extra_args, extra_kwargs = colour_calls[0]
+    passed_flat_hash = extra_args[0] if extra_args else extra_kwargs.get("flat_frame_hash")
+    assert passed_flat_hash not in (None, ""), (
+        "contributor_stale's real colour-loop call site did not pass a real "
+        "flat_frame_hash -- this is exactly the round-2 regression, on the SECOND "
+        "of the two named call sites (pipeline.py's colour loop)."
+    )
+    assert frame_hash == real_colour_frame_hash  # sanity: light set really is unchanged
+    assert real_contributor_stale(
+        load_run_signature(out / "run_signature.json"),
+        "colour", "T99_bin2", real_colour_frame_hash, 0.1, passed_flat_hash,
+    ) is True

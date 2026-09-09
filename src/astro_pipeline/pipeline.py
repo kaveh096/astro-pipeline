@@ -114,9 +114,9 @@ from .background_color import (
     run_graxpert_background_extraction,
     run_spcc,
 )
-from .calibration import DEFAULT_PEDESTAL, select_dark, run_calibration
+from .calibration import DEFAULT_PEDESTAL, FlatPolicy, select_dark, run_calibration
 from .export_image import ExportResult, export
-from .ingest import scan_session
+from .ingest import CalibrationFrame, scan_session
 from .checkpoints import Checkpoint, checkpoint, save_checkpoints, _pixel_scale_arcsec
 from .reconciliation import (
     combine_same_grid,
@@ -199,6 +199,8 @@ def build_master(
     ra_hours: float,
     dec_deg: float,
     notes: list[str],
+    flat_frames: list[CalibrationFrame],
+    flat_policy: FlatPolicy,
     pedestal: float = DEFAULT_PEDESTAL,
 ) -> Path:
     """Calibrate -> register+stack -> plate solve one group of raw lights.
@@ -214,6 +216,28 @@ def build_master(
     group (T21's real 600s/300s Luminance) now calibrates correctly
     instead of the caller having to guess a single exptime up front.
 
+    `flat_frames`/`flat_policy` (Slice 2 of plan-flats-v3.md): unlike
+    bias/dark (looked up here from `cal_index`, which has no filter
+    dimension), the matched flat set genuinely depends on `filter_name`, so
+    it is resolved by the CALLER via `report.flat_index().get((telescope,
+    binning, filter_name), [])` -- this function has no `report` in scope
+    on its own, only `cal_index` -- mirroring how bias/dark_selection.
+    frames are already resolved by the caller before this function is
+    invoked, not inside it. Threaded straight through to
+    `run_calibration()`, unchanged from its own existing behaviour: an
+    empty `flat_frames` under `FlatPolicy.REQUIRE` raises
+    `CalibrationFramesMissingError`; under `FlatPolicy.SKIP_IF_MISSING` it
+    proceeds without flat correction, same as before flats were wired in
+    at all.
+
+    Cost accepted, not silently ignored (Slice 2.2's own documented
+    decision): this rebuilds the matched master flat fresh inside every
+    group's own `run_calibration()` call below, exactly mirroring the
+    existing, already-accepted redundancy where bias/dark masters are
+    independently rebuilt per light group even when several groups share
+    the same (telescope, binning). No shared-master caching is added for
+    flats either here -- out of scope for this pass.
+
     `pedestal` (Slice 4.1) is threaded here rather than left at
     `run_calibration`'s own default: it is baked into every calibrated
     light BEFORE registration/stacking (see calibration.py), so it
@@ -221,8 +245,9 @@ def build_master(
     existence-only gate above has no way to notice a caller passed a
     different value on a resumed run. See run_signature.py's
     `RunSignature.contributor_stale`, which is what actually deletes a
-    stale master when `pedestal` changes, forcing this function to
-    rebuild it rather than silently keep serving the old-pedestal file.
+    stale master when `pedestal` (or the matched flat set) changes,
+    forcing this function to rebuild it rather than silently keep serving
+    the old file.
     """
     work_dir = pipeline_dir(project_dir) / group_name
     master_path = work_dir / "lights" / f"master_{filter_name.lower()}.fit"
@@ -239,15 +264,23 @@ def build_master(
     scaling_note = (
         f", scaled from {dark_selection.exptime:.0f}s via -opt=exp" if dark_selection.scaled else ""
     )
+    flat_note = f", {len(flat_frames)} {filter_name} flat" if flat_frames else ""
     _log(
         f"[run ] {group_name}: calibrating {len(lights)} lights at {exptimes_str} "
-        f"({len(bias)} bias, {len(dark_selection.frames)} dark{scaling_note})",
+        f"({len(bias)} bias, {len(dark_selection.frames)} dark{scaling_note}{flat_note})",
         notes,
     )
-    run_calibration(
-        lights, bias, dark_selection.frames, work_dir=work_dir, flat_frames=None,
+    calibration_result = run_calibration(
+        lights, bias, dark_selection.frames, work_dir=work_dir,
+        flat_frames=flat_frames, flat_policy=flat_policy,
         dark_scaled=dark_selection.scaled, pedestal=pedestal, notes=notes,
     )
+    if flat_frames:
+        _log(
+            f"       {group_name}: flat_corrected={calibration_result.flat_corrected} "
+            f"(matched {len(flat_frames)} {filter_name} flat frame(s))",
+            notes,
+        )
 
     n = len(lights)
     filter_fwhm_pct = 90.0 if n >= 10 else None
@@ -507,6 +540,36 @@ def resolve_instrument_profile(telescope: str):
     return profile
 
 
+def infer_flat_policy(report, telescope: str) -> FlatPolicy:
+    """Slice 2.2's default `FlatPolicy` for `telescope`, inferred from
+    whether it ships ANY flat at all -- not hardcoded by telescope name.
+
+    Deliberately mirrors this project's existing preference
+    (resolve_instrument_profile, above) for refusing to special-case a
+    telescope by literal name where the data itself already says what's
+    needed -- though this is a distinct mechanism (inferred from presence
+    in `report.flat_index()`, not a lookup into a curated registry like
+    `INSTRUMENT_PROFILES`; stated plainly so the two aren't conflated).
+
+    `FlatPolicy.REQUIRE` if `flat_index()` has any entry at all for this
+    telescope (at any binning/filter): a telescope that ships flats for
+    SOME filters but is then missing one a light group actually needs is a
+    real, surfaceable gap (raises `CalibrationFramesMissingError` via
+    `run_calibration`), not something to silently skip.
+    `FlatPolicy.SKIP_IF_MISSING` if this telescope has zero flats of any
+    kind -- T24's permanent, real situation for this delivery (see
+    plan-flats-v3.md's "Context" section: T24 structurally never ships
+    flats here).
+
+    Overridable uniformly across every telescope in a run via
+    `run_lrgb`'s own `flat_policy` parameter -- see there; this function
+    only computes the per-telescope DEFAULT, before any override is
+    applied.
+    """
+    has_any_flat = any(key[0] == telescope for key in report.flat_index())
+    return FlatPolicy.REQUIRE if has_any_flat else FlatPolicy.SKIP_IF_MISSING
+
+
 def contributor_dir(final: Path, telescope: str, binning: int, rgb_binning: int) -> Path:
     """Where one RGB contributor's per-binning files live (Slice 3.3).
 
@@ -538,6 +601,7 @@ def _build_colour_contributor(
     ra_hours: float,
     dec_deg: float,
     notes: list[str],
+    flat_policy: FlatPolicy = FlatPolicy.SKIP_IF_MISSING,
 ) -> ColourContributor | None:
     """Build one binning's R/G/B masters, align + crop + composite them,
     then background-extract and colour-calibrate -- everything the
@@ -553,6 +617,15 @@ def _build_colour_contributor(
     this raised RuntimeError and aborted the entire run over one missing
     filter on one binning; that's disproportionate once a partial
     contributor is an expected, not exceptional, outcome.
+
+    `flat_policy` (Slice 2.2 of plan-flats-v3.md): threaded in from
+    run_lrgb's own per-telescope inference/override (see
+    infer_flat_policy) -- this function itself has no telescope-discovery
+    context of its own, it just applies whatever policy the caller
+    decided. Defaults to SKIP_IF_MISSING (the safe, pre-Slice-2 behaviour)
+    so a caller that doesn't pass one explicitly still proceeds without a
+    hard flat requirement, matching every real colour-contributor
+    telescope's situation before this slice.
     """
     contrib_dir.mkdir(parents=True, exist_ok=True)
     cal_index = report.calibration_index()
@@ -571,9 +644,11 @@ def _build_colour_contributor(
             )
             return None
         sub_count += len(lights)
+        flat_frames = report.flat_index().get((telescope, binning, filter_name), [])
         master_path = build_master(
             project_dir, lights, cal_index, group_name, filter_name,
             telescope, binning, ra_hours, dec_deg, notes,
+            flat_frames=flat_frames, flat_policy=flat_policy,
         )
         channel_masters[filter_name] = master_path
         stack_total += int(fits.getheader(master_path).get("STACKCNT", len(lights)))
@@ -674,6 +749,52 @@ def _colour_contributor_frame_hash(report, telescope: str, target: str, binning:
     return frame_identity_hash(names)
 
 
+def _flat_frame_hash(flat_frames: list) -> str:
+    """Slice 2.3's flat-set hashing rule: "" for an EMPTY matched flat set,
+    not `frame_identity_hash([])`'s own real (non-empty) hash-of-an-empty-
+    string constant.
+
+    This matters concretely, not just cosmetically: T24 has zero flats of
+    any kind in this delivery, structurally, permanently (see plan-flats-
+    v3.md's Context section) -- a persisted `run_signature.json` predating
+    `flat_frame_hash` reads it back as "" (the field's own default, see
+    ContributorSignature). If a freshly-computed "no flats matched" value
+    were instead `frame_identity_hash([])` (a real, fixed hash string, NOT
+    ""), it would mismatch that persisted "" and mark T24's entire colour
+    contributor stale -- forcing a full rebuild of its raw R/G/B masters,
+    GraXpert, and SPCC -- on literally every run's FIRST comparison after
+    this field was added, even though T24's actual flat situation never
+    changed at all. That is a materially bigger, unintended one-time cost
+    than the plan's own Slice 2.3 section describes (which names only the
+    real T21_bin1 Luminance entry as the expected one-time rebuild).
+    Keeping "no flats" as a stable "" on both sides avoids it, while a
+    genuinely non-empty matched flat set still goes through the real
+    `frame_identity_hash` mechanism -- an actual flat-set CHANGE (a
+    re-shot flat, added/removed frames) is still caught exactly as before.
+    """
+    if not flat_frames:
+        return ""
+    return frame_identity_hash([f.path.name for f in flat_frames])
+
+
+def _colour_contributor_flat_frame_hash(report, telescope: str, binning: int) -> str:
+    """Slice 2.3's flat-aware sibling of _colour_contributor_frame_hash
+    above: one hash for a colour contributor's entire matched flat set
+    across R+G+B -- a change to ANY of the three filters' matched flats
+    (a flat re-shot, a new filter's flats added) must be caught, since all
+    three feed the one rgbcomp'd composite exactly like the light set
+    does. See _flat_frame_hash for why an entirely empty matched flat set
+    (T24's real, permanent situation) hashes to "" rather than
+    frame_identity_hash([])'s own non-empty constant."""
+    names: list[str] = []
+    for filter_name in RGB_FILTERS:
+        flats = report.flat_index().get((telescope, binning, filter_name), [])
+        names.extend(f.path.name for f in flats)
+    if not names:
+        return ""
+    return frame_identity_hash(names)
+
+
 def _clear_colour_contributor_products(
     contrib_dir: Path,
     project_dir: Path,
@@ -719,6 +840,7 @@ def run_lrgb(
     pedestal: float = DEFAULT_PEDESTAL,
     stop_after: str | None = None,
     force: set[str] | None = None,
+    flat_policy: FlatPolicy | None = None,
 ) -> PipelineResult:
     """`lum_source`, if given, names an explicit `(telescope, binning)`
     among the discovered Luminance contributors to drive the composite --
@@ -774,6 +896,18 @@ def run_lrgb(
     are derived from masters), not just "masters" itself -- see
     run_signature.cascade_from, which both `force` and the automatic
     run-signature-mismatch check below go through.
+
+    `flat_policy` (Slice 2.2 of plan-flats-v3.md), when given, overrides
+    the per-telescope default computed by `infer_flat_policy` (REQUIRE if
+    a telescope ships ANY flat at all, else SKIP_IF_MISSING) UNIFORMLY for
+    every telescope discovered in this run -- a narrower override than
+    per-telescope, but the common case ("force skip everywhere for a
+    quick test run") doesn't need per-telescope granularity, and
+    `lum_source`-style per-contributor overrides already exist as the
+    escape hatch pattern for anything finer. Left as None (the default),
+    each telescope gets its own inferred policy: T21 (ships flats for all
+    11 filters at BIN1 in this delivery) defaults to REQUIRE, T24 (ships
+    none) defaults to SKIP_IF_MISSING.
     """
     if stop_after is not None and stop_after not in STAGE_ORDER:
         raise ValueError(f"stop_after={stop_after!r} is not one of {STAGE_ORDER}")
@@ -820,6 +954,7 @@ def run_lrgb(
 
     lum_candidates: list[LumCandidate] = []
     lum_frame_hashes: dict[str, str] = {}
+    lum_flat_frame_hashes: dict[str, str] = {}
     lum_stackcnt: dict[str, int] = {}
     for lum_telescope, contrib_lum_binning in lum_contributors:
         lum_key = (lum_telescope, contrib_lum_binning)
@@ -831,6 +966,20 @@ def run_lrgb(
         frame_hash = frame_identity_hash([f.path.name for f in lum_lights])
         lum_frame_hashes[contributor_key] = frame_hash
 
+        # Slice 2.2: the matched flat set for this Luminance contributor,
+        # looked up here (not inside build_master -- see its own docstring)
+        # since only the caller has `report` in scope to call flat_index()
+        # on. Slice 2.2's per-telescope FlatPolicy: REQUIRE if this
+        # telescope ships ANY flat at all (T21's real case), else
+        # SKIP_IF_MISSING (T24's), unless `flat_policy` was explicitly
+        # passed to override uniformly for the whole run.
+        lum_flat_frames = report.flat_index().get(
+            (lum_telescope, contrib_lum_binning, LUMINANCE_FILTER), []
+        )
+        lum_flat_policy = flat_policy if flat_policy is not None else infer_flat_policy(report, lum_telescope)
+        lum_flat_frame_hash = _flat_frame_hash(lum_flat_frames)
+        lum_flat_frame_hashes[contributor_key] = lum_flat_frame_hash
+
         # Slice 4.1: usable() only knows whether master_luminance.fit
         # exists and reads clean -- it has zero notion of which lights
         # produced it, so a sub silently added/removed/replaced (the
@@ -838,9 +987,15 @@ def run_lrgb(
         # on-disk proof this gap is not hypothetical) would otherwise never
         # trigger a rebuild. Delete the stale master here so usable()'s own
         # skip-if-present gate inside build_master naturally regenerates it.
+        # Slice 2.3: `flat_frame_hash` is now also passed here -- omitting
+        # it (or leaving contributor_stale's own parameter at its default)
+        # would silently defeat the whole point of tracking it at all, see
+        # ContributorSignature/contributor_stale in run_signature.py.
         stale = force_masters or (
             old_signature is not None
-            and old_signature.contributor_stale("luminance", contributor_key, frame_hash, pedestal)
+            and old_signature.contributor_stale(
+                "luminance", contributor_key, frame_hash, pedestal, lum_flat_frame_hash
+            )
         )
         if stale:
             master_path = pipeline_dir(project_dir) / lum_group_name / "lights" / f"master_{LUMINANCE_FILTER.lower()}.fit"
@@ -851,7 +1006,8 @@ def run_lrgb(
             _log(f"[run ] combining Luminance across users: {', '.join(lum_users)}", notes)
         lum_master_path = build_master(
             project_dir, lum_lights, cal_index, lum_group_name, LUMINANCE_FILTER,
-            lum_telescope, contrib_lum_binning, ra_hours, dec_deg, notes, pedestal=pedestal,
+            lum_telescope, contrib_lum_binning, ra_hours, dec_deg, notes,
+            flat_frames=lum_flat_frames, flat_policy=lum_flat_policy, pedestal=pedestal,
         )
         result.masters[lum_label] = lum_master_path
         lum_stackcnt[contributor_key] = int(fits.getheader(lum_master_path).get("STACKCNT", len(lum_lights)))
@@ -892,23 +1048,39 @@ def run_lrgb(
         if profile is not None else None
     )
 
+    # Slice 2.2: colour discovery is hard-scoped to the caller's own
+    # `telescope` (see module docstring / plan-flats-v3.md fact 11), so
+    # there is exactly one telescope's worth of flat policy to infer here,
+    # computed once rather than per-binning.
+    colour_flat_policy = flat_policy if flat_policy is not None else infer_flat_policy(report, telescope)
+
     contributors: list[ColourContributor] = []
     colour_frame_hashes: dict[str, str] = {}
+    colour_flat_frame_hashes: dict[str, str] = {}
     for binning in rgb_binnings:
         contributor_key = f"{telescope}_bin{binning}"
         contrib_dir = contributor_dir(final, telescope, binning, rgb_binning)
         frame_hash = _colour_contributor_frame_hash(report, telescope, target, binning)
         colour_frame_hashes[contributor_key] = frame_hash
+        colour_flat_frame_hash = _colour_contributor_flat_frame_hash(report, telescope, binning)
+        colour_flat_frame_hashes[contributor_key] = colour_flat_frame_hash
 
         # Slice 4.1: same gap as the Luminance loop above, plus SPCC
         # profile identity -- neither is visible to usable()'s file-only
         # gate. A frame/pedestal change forces a full rebuild (raw R/G/B
         # masters and every downstream product); an SPCC-profile-only
         # change only needs the colour-calibrated output redone, since the
-        # profile has no effect on calibration/stacking.
+        # profile has no effect on calibration/stacking. Slice 2.3: the
+        # matched flat set is now also part of what "full rebuild" means --
+        # contributor_stale's own `flat_frame_hash` parameter is passed
+        # explicitly here, not left at its default (see run_signature.py's
+        # ContributorSignature/contributor_stale docstrings for exactly why
+        # a default alone would silently defeat this).
         needs_full_rebuild = force_masters or (
             old_signature is not None
-            and old_signature.contributor_stale("colour", contributor_key, frame_hash, pedestal)
+            and old_signature.contributor_stale(
+                "colour", contributor_key, frame_hash, pedestal, colour_flat_frame_hash
+            )
         )
         if needs_full_rebuild:
             deleted = _clear_colour_contributor_products(
@@ -931,7 +1103,7 @@ def run_lrgb(
 
         contributor = _build_colour_contributor(
             project_dir, contrib_dir, report, telescope, target, binning,
-            ra_hours, dec_deg, notes,
+            ra_hours, dec_deg, notes, flat_policy=colour_flat_policy,
         )
         if contributor is None:
             # Logged inside _build_colour_contributor already (Slice 3.2:
@@ -980,13 +1152,17 @@ def run_lrgb(
         pedestal=pedestal,
         luminance_selected=f"{selected_key[0]}_bin{selected_key[1]}",
         luminance={
-            key: ContributorSignature(key=key, stackcnt=lum_stackcnt[key], frame_hash=lum_frame_hashes[key])
+            key: ContributorSignature(
+                key=key, stackcnt=lum_stackcnt[key], frame_hash=lum_frame_hashes[key],
+                flat_frame_hash=lum_flat_frame_hashes[key],
+            )
             for key in lum_frame_hashes
         },
         colour_reference=reference.key,
         colour={
             c.key: ContributorSignature(
                 key=c.key, stackcnt=c.stack_total, frame_hash=colour_frame_hashes[c.key],
+                flat_frame_hash=colour_flat_frame_hashes[c.key],
                 spcc_profile=profile_tuple,
             )
             for c in contributors

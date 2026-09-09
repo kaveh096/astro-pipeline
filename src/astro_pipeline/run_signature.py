@@ -98,12 +98,28 @@ class ContributorSignature:
     3.1's `resolve_instrument_profile` result, recorded here so a change
     to `INSTRUMENT_PROFILES` (a new/corrected sensor entry) is caught
     even though it touches no light frame and no sub count.
+
+    `flat_frame_hash` (Slice 2.3 of plan-flats-v3.md, default "") mirrors
+    `frame_hash`'s exact mechanism (`frame_identity_hash()` over matched
+    filenames) but for this contributor's matched FLAT set, not its light
+    set -- added once `pipeline.build_master()` actually started looking
+    flats up (Slice 2.2), since a resumed run whose matched flat set
+    changed (a flat re-shot, a new filter's flats added, a telescope's
+    FlatPolicy flipping from SKIP_IF_MISSING to REQUIRE) would otherwise
+    silently keep serving a master built under the OLD flat state --
+    exactly the class of bug this module exists to prevent for lights/
+    pedestal. Additive with a default so an already-persisted
+    `run_signature.json` predating this field still loads (via
+    `from_dict`) and reads back "" here, which correctly mismatches the
+    newly-computed real hash on the very next run and forces exactly one
+    rebuild -- a one-time, correct-not-silent transition, not a bug.
     """
 
     key: str
     stackcnt: int
     frame_hash: str
     spcc_profile: tuple[str, str, str, str] | None = None
+    flat_frame_hash: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +127,7 @@ class ContributorSignature:
             "stackcnt": self.stackcnt,
             "frame_hash": self.frame_hash,
             "spcc_profile": list(self.spcc_profile) if self.spcc_profile else None,
+            "flat_frame_hash": self.flat_frame_hash,
         }
 
     @classmethod
@@ -121,6 +138,7 @@ class ContributorSignature:
             stackcnt=int(d["stackcnt"]),
             frame_hash=d["frame_hash"],
             spcc_profile=tuple(profile) if profile else None,
+            flat_frame_hash=d.get("flat_frame_hash", ""),
         )
 
 
@@ -176,23 +194,45 @@ class RunSignature:
             quality_filter_policy=d.get("quality_filter_policy", ""),
         )
 
-    def contributor_stale(self, section: str, key: str, frame_hash: str, pedestal: float) -> bool:
+    def contributor_stale(
+        self,
+        section: str,
+        key: str,
+        frame_hash: str,
+        pedestal: float,
+        flat_frame_hash: str = "",
+    ) -> bool:
         """Does contributor `key` in `section` ("luminance" or "colour")
         need its raw master(s) rebuilt via Siril, given a freshly computed
-        `frame_hash` and the current call's `pedestal`?
+        `frame_hash`/`flat_frame_hash` and the current call's `pedestal`?
 
         True if the light set changed (added/removed/replaced -- a
-        different `frame_hash`), if the contributor is new (not present
-        in this persisted signature at all), or if `pedestal` itself
-        changed (it is baked into every calibrated light BEFORE
+        different `frame_hash`), if the MATCHED FLAT set changed (Slice
+        2.3 -- a different `flat_frame_hash`, e.g. a flat re-shot, a new
+        filter's flats added, or a telescope's FlatPolicy flipping from
+        SKIP_IF_MISSING to REQUIRE), if the contributor is new (not
+        present in this persisted signature at all), or if `pedestal`
+        itself changed (it is baked into every calibrated light BEFORE
         registration/stacking -- see calibration.py -- so it affects
         every master, Luminance and colour alike, regardless of whether
-        any light set changed).
+        any light or flat set changed).
+
+        `flat_frame_hash` defaults to "" for backward compatibility with
+        any caller/test constructing a call without it -- but see
+        pipeline.run_lrgb's own two real call sites (the Luminance loop
+        and the colour loop): BOTH must pass the freshly-computed value
+        explicitly, or this parameter's default silently means the
+        comparison below can never actually fire on a genuine flat-set
+        change, defeating the entire point of tracking it (this exact
+        failure mode is why plan-flats-v3.md's round-2 review flagged this
+        as the one place a keyword-default is NOT enough on its own).
         """
         if self.pedestal != pedestal:
             return True
         existing = getattr(self, section).get(key)
-        return existing is None or existing.frame_hash != frame_hash
+        if existing is None:
+            return True
+        return existing.frame_hash != frame_hash or existing.flat_frame_hash != flat_frame_hash
 
 
 def load_run_signature(path: str | Path) -> RunSignature | None:
