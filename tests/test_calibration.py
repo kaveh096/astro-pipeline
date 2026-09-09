@@ -9,6 +9,7 @@ from astro_pipeline.calibration import (
     FlatPolicy,
     _calibrate_command,
     build_master,
+    build_master_flat,
     calibrate_lights,
     run_calibration,
     select_dark,
@@ -101,6 +102,166 @@ def test_calibrate_command_scaled_path_drops_cc_dark_adds_opt_and_bias() -> None
     cmd = _calibrate_command("lights_", "masterdark", "masterbias", None, dark_optimize=True)
     assert cmd == "calibrate lights_ -dark=masterdark -bias=masterbias -opt=exp -prefix=pp_"
     assert "-cc=dark" not in cmd
+
+
+# --- Slice 2.1: _calibrate_command's real THIRD state ("no dark at all"),
+# the exact thing round 2 of plan-flats-v3.md found round 1's own fix had
+# NOT actually produced. All three states asserted together here so a
+# regression in any one is caught by the same test module. -----------------
+
+
+def test_calibrate_command_dark_only_state_unchanged_by_slice2() -> None:
+    """State (a): dark-only, dark_optimize=False -- today's only real light
+    path. Must be byte-identical to before Slice 2's dark_stem-optional
+    change (this is the same assertion as
+    test_calibrate_command_t24_shaped_call_is_byte_identical_to_today,
+    repeated here so all three states are visible side by side)."""
+    cmd = _calibrate_command("lights_", "masterdark", None, None, dark_optimize=False)
+    assert cmd == "calibrate lights_ -dark=masterdark -cc=dark -prefix=pp_"
+
+
+def test_calibrate_command_dark_optimized_state_unchanged_by_slice2() -> None:
+    """State (b): dark-optimized (-opt=exp), T21's scaled-dark path. Must
+    also be byte-identical to before Slice 2 -- the new dark_stem=None
+    branch must not perturb this existing branch."""
+    cmd = _calibrate_command("lights_", "masterdark", "masterbias", None, dark_optimize=True)
+    assert cmd == "calibrate lights_ -dark=masterdark -bias=masterbias -opt=exp -prefix=pp_"
+
+
+def test_calibrate_command_no_dark_state_matches_fact8_bias_only_command() -> None:
+    """State (c): dark_stem=None -- the new state build_master_flat() needs.
+    Must produce EXACTLY fact 8's real, live-Siril-verified command: no
+    -dark=, no -cc=dark (round 1's first-draft bug: -cc=dark fires off
+    dark_optimize alone, independent of dark_stem), no -opt=exp, and the
+    output prefix must be "bc_" (not the default "pp_") so
+    build_master_flat's own follow-on `stack bc_<seq>...` command actually
+    matches something.
+    """
+    cmd = _calibrate_command(
+        "flat_", dark_stem=None, bias_stem="masterbias", flat_stem=None,
+        dark_optimize=False, prefix="bc_",
+    )
+    assert cmd == "calibrate flat_ -bias=masterbias -prefix=bc_"
+    assert "-dark=" not in cmd
+    assert "-cc=dark" not in cmd
+    assert "-opt=exp" not in cmd
+
+
+def test_calibrate_command_no_dark_state_ignores_dark_optimize_true() -> None:
+    """dark_optimize=True must NOT resurrect -opt=exp when dark_stem=None
+    -- -opt requires an actual dark master (Siril's own `help calibrate`),
+    so this combination would otherwise be a physically meaningless
+    command that happens to not error."""
+    cmd = _calibrate_command(
+        "flat_", dark_stem=None, bias_stem="masterbias", flat_stem=None,
+        dark_optimize=True, prefix="bc_",
+    )
+    assert cmd == "calibrate flat_ -bias=masterbias -prefix=bc_"
+    assert "-opt=exp" not in cmd
+
+
+# --- Slice 2 verification: T24 property check, not a rerun -- mirrors
+# rev4 Slice 1's own pattern (Siril stamps a wall-clock DATE header, so
+# byte-identical file comparison across real runs is unachievable by
+# construction; a command-string property check is the checkable proxy). --
+
+
+@requires_real_session
+def test_t24_real_groups_have_no_matched_flats_and_command_is_unaffected() -> None:
+    """For every real T24 (telescope, binning, filter) light group this
+    delivery actually needs, flat_index().get(...) must return [] (T24
+    ships zero flats of any kind, structurally, for this delivery -- see
+    plan-flats-v3.md's Context section) -> flat_frames=[] ->
+    run_calibration's existing `if flat_frames: build master` logic takes
+    the falsy path exactly as before this slice -> calibrate_lights would
+    pass flat_stem=None to _calibrate_command -> the emitted `calibrate`
+    command string for every real T24 group is BYTE-IDENTICAL to before
+    Slice 2, with no -flat= token at all. Checkable without invoking
+    Siril, matching every one of this file's other command-string
+    property checks.
+    """
+    report = scan_session(REAL_SESSION_DIR)
+    flat_index = report.flat_index()
+
+    # T24's real light groups, per test_ingest.py's own
+    # test_instrument_groups_merges_users_sharing_telescope_and_binning /
+    # test_missing_calibration_warnings_real_per_filter_flat_check.
+    t24_groups = [
+        (1, "Luminance"), (1, "Red"), (1, "Green"), (1, "Blue"),
+        (2, "Red"), (2, "Green"), (2, "Blue"),
+    ]
+    for binning, filter_name in t24_groups:
+        flat_frames = flat_index.get(("T24", binning, filter_name), [])
+        assert flat_frames == [], (
+            f"T24 BIN{binning}/{filter_name} unexpectedly has matched flats -- "
+            "this delivery is supposed to have zero T24 flats of any kind."
+        )
+        # The exact command calibrate_lights() would build for this group:
+        # flat_stem=None (from an empty flat_frames list) must produce the
+        # same byte-identical, no -flat= command as every existing T24
+        # command-string property check in this file.
+        cmd = _calibrate_command("lights_", "masterdark", None, None, dark_optimize=False)
+        assert cmd == "calibrate lights_ -dark=masterdark -cc=dark -prefix=pp_"
+        assert "-flat=" not in cmd
+
+
+# --- build_master_flat: real bias-subtraction-before-stacking, on a fast
+# synthetic (seeded, no real data needed) fixture -- mirrors fact 8's real
+# measurement (raw-mean-minus-bias-mean) without a full 30-frame real-data
+# round trip on every CI run. -----------------------------------------------
+
+
+@requires_siril
+def test_build_master_flat_bias_subtracts_before_stacking(tmp_path: Path) -> None:
+    """A known bias level is burned into synthetic flat frames (uint16, the
+    real raw-flat dtype -- see the real T21 flats, BITPIX=16) plus a
+    separate synthetic master bias. Siril's `convert` preserves raw ADU
+    values verbatim (verified directly: a 20000-ADU synthetic probe frame
+    converts to exactly 20000, no scaling), but its internal working
+    representation (used by `calibrate`/`stack`) normalizes 16-bit input by
+    65535 -- also verified directly against this exact code path before
+    writing this test (avg raw flat 20498.46 ADU, bias 499.76 ADU ->
+    (20498.46-499.76)/65535 = 0.305163, and the real built master's mean
+    came back 0.30516237, matching to 5 decimal places). So the assertion
+    below compares the built master's mean against
+    (raw_mean - bias_mean) / 65535, not raw ADU directly.
+    """
+    rng = np.random.default_rng(20260907)
+    bias_level = 500.0
+    flat_signal = 20000.0
+    shape = (32, 32)
+
+    raw_dir = tmp_path / "raw_flats"
+    raw_dir.mkdir()
+    flat_frames: list[CalibrationFrame] = []
+    raw_means: list[float] = []
+    for i in range(5):
+        data = rng.normal(loc=bias_level + flat_signal, scale=50.0, size=shape).astype(np.uint16)
+        path = raw_dir / f"flat_{i}.fit"
+        fits.PrimaryHDU(data=data).writeto(path)
+        raw_means.append(float(fits.getdata(path).astype(np.float64).mean()))
+        flat_frames.append(
+            CalibrationFrame(
+                path=path, telescope="T99", frame_type="Flat", binning=1,
+                exptime=0.0, filter_name="Luminance",
+            )
+        )
+
+    bias_data = rng.normal(loc=bias_level, scale=5.0, size=shape).astype(np.uint16)
+    bias_path = tmp_path / "master_bias.fit"
+    fits.PrimaryHDU(data=bias_data).writeto(bias_path)
+    bias_mean = float(bias_data.astype(np.float64).mean())
+
+    master_path = build_master_flat(flat_frames, bias_path, tmp_path / "work")
+    master_data = fits.getdata(master_path).astype(np.float64)
+
+    expected = (sum(raw_means) / len(raw_means) - bias_mean) / 65535.0
+    assert master_data.mean() == pytest.approx(expected, rel=0.01)
+
+
+def test_build_master_flat_raises_on_empty_frame_list(tmp_path: Path) -> None:
+    with pytest.raises(CalibrationFramesMissingError):
+        build_master_flat([], tmp_path / "bias.fit", tmp_path)
 
 
 @requires_siril

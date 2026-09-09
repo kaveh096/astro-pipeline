@@ -242,30 +242,62 @@ def sequence_name(basename: str) -> str:
 
 def _calibrate_command(
     seq: str,
-    dark_stem: str,
+    dark_stem: str | None,
     bias_stem: str | None,
     flat_stem: str | None,
     dark_optimize: bool,
+    prefix: str = "pp_",
 ) -> str:
     """Pure command-string builder, split out from calibrate_lights so the
     "nothing changes for existing T24 data" claim is checkable without
-    invoking Siril: with bias_stem=None, flat_stem=None, dark_optimize=
-    False (today's only real path), this must produce byte-identical
-    output to before this function existed.
+    invoking Siril: with dark_stem=<stem>, bias_stem=None, flat_stem=None,
+    dark_optimize=False (today's only real path for lights), this must
+    produce byte-identical output to before this function existed.
+
+    Three real, distinct states of `dark_stem`/`dark_optimize` -- NOT two,
+    with a bolted-on "dark_stem is optional" -- because a naive optional-
+    dark_stem change alone still appends `-cc=dark` (it fires whenever
+    `dark_optimize=False`, independent of whether a dark is even present)
+    and would produce `calibrate <seq> -cc=dark -bias=<bias> -prefix=pp_`
+    for a bias-only flat-calibration call, which is wrong (fact 8 of
+    plan-flats-v3.md verified the real, working command has neither
+    `-cc=dark` nor `-dark=`) and untested/undefined Siril behaviour besides:
+
+    1. dark_stem set, dark_optimize=False (today's only real light-
+       calibration path): `-dark=<stem> -cc=dark`.
+    2. dark_stem set, dark_optimize=True (T21's scaled-dark path):
+       `-dark=<stem> -opt=exp` (no `-cc=dark` -- its hot/cold-pixel
+       thresholds are fit to the dark's own exposure time, meaningless on
+       the scaled path).
+    3. dark_stem=None ("no dark at all" -- build_master_flat's bias-only
+       flat calibration): omits `-dark=` AND `-cc=dark` AND `-opt=exp`
+       entirely, regardless of `dark_optimize` -- this state cannot be
+       reached by varying `dark_optimize` alone, it is a genuine third
+       branch. Verified real against Siril 1.4.4 (fact 8): `calibrate
+       <seq> -bias=<bias_stem> -prefix=bc_` is exactly the command this
+       state produces when bias_stem is given and prefix="bc_".
+
+    `prefix` defaults to "pp_" (every existing caller's behaviour is
+    unchanged unless it passes something else) -- build_master_flat passes
+    prefix="bc_" so its own follow-on `stack bc_<seq>...` command actually
+    finds the files this step just produced.
     """
-    command = f"calibrate {seq} -dark={dark_stem}"
-    if not dark_optimize:
-        # -cc=dark's hot/cold-pixel thresholds are fit to the dark's own
-        # exposure time -- meaningless (and not requested) on the scaled
-        # path.
-        command += " -cc=dark"
+    if dark_stem is not None:
+        command = f"calibrate {seq} -dark={dark_stem}"
+        if not dark_optimize:
+            # -cc=dark's hot/cold-pixel thresholds are fit to the dark's own
+            # exposure time -- meaningless (and not requested) on the scaled
+            # path.
+            command += " -cc=dark"
+    else:
+        command = f"calibrate {seq}"
     if bias_stem is not None:
         command += f" -bias={bias_stem}"
-    if dark_optimize:
+    if dark_stem is not None and dark_optimize:
         command += " -opt=exp"
     if flat_stem is not None:
         command += f" -flat={flat_stem}"
-    command += " -prefix=pp_"
+    command += f" -prefix={prefix}"
     return command
 
 
@@ -307,11 +339,75 @@ def build_master_dark(dark_frames: list[CalibrationFrame], work_dir: str | Path)
     return build_master([f.path for f in dark_frames], "dark", work_dir)
 
 
-def build_master_flat(flat_frames: list[CalibrationFrame], work_dir: str | Path) -> Path:
-    """UNTESTED against real data -- no flat sample has been available yet.
-    Follows the same convert/stack pattern as bias/dark; revisit the
-    rejection parameters once a real flat set is on hand."""
-    return build_master([f.path for f in flat_frames], "flat", work_dir)
+def build_master_flat(
+    flat_frames: list[CalibrationFrame], master_bias: Path, work_dir: str | Path
+) -> Path:
+    """Bias-subtract each flat, then stack with rejection -- grounded in
+    real measurements against T21's real 30-frame-per-filter sky flats
+    (plan-flats-v3.md facts 7-9), not the plain build_master()-reuse path
+    (which stacks raw flats with no calibration at all and structurally
+    cannot bias-subtract).
+
+    Bias subtraction is real and worth doing, even though T21's real bias
+    level (~8.7% of the raw flat's own signal) is a small fraction here:
+    measured on 10 real T21 Luminance BIN1 flats, bias-subtracting before
+    stacking shifted the master's own corner/center vignetting ratio from
+    0.7737 (not bias-subtracted, matches the un-bias-subtracted 30-frame
+    number almost exactly) to 0.7565 -- ~1.7 percentage points (~7.5%
+    relative), real, free (one extra `calibrate -bias=` call, no new
+    machinery), and the correction will matter more for a shorter flat
+    exposure or a noisier sensor, so it is not deferred.
+
+    `calibrate <seq> -bias=<bias_stem> -prefix=bc_` (no `-dark=`, no
+    `-cc=`) was verified real against the installed Siril 1.4.4: succeeded,
+    "Sequence processing succeeded", and did a plain per-pixel subtraction
+    -- a 10-frame bias-cal'd master's mean (0.3191) matched raw-mean-minus-
+    bias-mean (0.3496 raw - 0.0305 bias = 0.3191) almost exactly, no
+    surprise scaling. Stacked with `rej 3.0 3.0`, the same sigma-rejection
+    parameters bias/dark masters already use -- this does not introduce a
+    new, unreviewed stacking policy.
+
+    CRITICAL ordering (the exact trap calibrate_lights() already hit once
+    and documents in its own body -- see there): `convert` ingests every
+    image present in the working directory, so `master_bias` must NOT be
+    staged into the flat sequence's directory until AFTER `convert` has
+    already ingested the flats -- staging it first would sweep it into the
+    flat sequence itself as an extra "flat" frame (previously broke a
+    LIGHT sequence exactly this way, with "Found 0 stars in reference").
+    Hence three separate steps here, in this order: convert the flats,
+    THEN stage the bias copy, THEN calibrate+stack.
+    """
+    if not flat_frames:
+        raise CalibrationFramesMissingError("No frames provided to build master 'flat'.")
+
+    basename = "flat"
+    stage_dir = Path(work_dir) / basename
+    stage_frames([f.path for f in flat_frames], stage_dir)
+
+    seq = sequence_name(basename)
+    run_script([f"convert {basename}"], workdir=stage_dir, script_name="convert.ssf")
+
+    staged_bias = stage_dir / "masterbias.fit"
+    shutil.copy2(master_bias, staged_bias)
+
+    command = _calibrate_command(
+        seq,
+        dark_stem=None,
+        bias_stem=staged_bias.stem,
+        flat_stem=None,
+        dark_optimize=False,
+        prefix="bc_",
+    )
+    bias_calibrated_seq = f"bc_{seq}"
+    run_script(
+        [command, f"stack {bias_calibrated_seq} rej 3.0 3.0 -out=master"],
+        workdir=stage_dir,
+        script_name="calibrate.ssf",
+    )
+    master_path = stage_dir / "master.fit"
+    if not master_path.exists():
+        raise RuntimeError(f"Siril reported success but {master_path} was not created.")
+    return master_path
 
 
 def _apply_pedestal(paths: list[Path], pedestal: float) -> None:
@@ -500,7 +596,7 @@ def run_calibration(
 
     master_flat: Path | None = None
     if flat_frames:
-        master_flat = build_master_flat(flat_frames, work_dir)
+        master_flat = build_master_flat(flat_frames, master_bias, work_dir)
 
     calibrated, _result = calibrate_lights(
         light_frames,
