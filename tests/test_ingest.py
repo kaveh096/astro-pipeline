@@ -89,6 +89,65 @@ def test_classify_t21_skyflat(tmp_path: Path) -> None:
     assert frame.telescope == "T21"
     assert frame.frame_type == "Flat"
     assert frame.binning == 1
+    # The filter is parsed from _FLAT_RE_SKYFLAT's existing named group and
+    # must actually reach CalibrationFrame -- this was the real bug fixed
+    # in flats Slice 1 (the group was parsed then discarded before ever
+    # reaching the dataclass).
+    assert frame.filter_name == "Luminance"
+
+
+def test_classify_t24_style_flat_has_no_filter_token(tmp_path: Path) -> None:
+    """_CAL_RE_T24's Flat branch (<telescope>-<user>-Flat-<exptime>-LD...-
+    LT...-BIN<n>) syntactically matches frame_type="Flat" but the filename
+    has no filter token at all -- T24 ships zero flats of any kind in real
+    data, so this is a hypothetical/constructed filename, not something
+    seen for real. classify_frame must still produce a CalibrationFrame
+    with filter_name=None (not crash, not guess) -- flat_index() is what
+    actually drops it (see test_flat_index_drops_flat_with_no_filter_name).
+    """
+    name = "T24-kaveh096-Flat-000-LD20250203-LT171434-BIN1.fit"
+    frame = classify_frame(touch(tmp_path, name))
+    assert isinstance(frame, CalibrationFrame)
+    assert frame.frame_type == "Flat"
+    assert frame.telescope == "T24"
+    assert frame.filter_name is None
+
+
+def test_flat_index_groups_by_telescope_binning_filter(tmp_path: Path) -> None:
+    flat_dir = tmp_path / "Calibrations" / "T21" / "Flats" / "2024 06" / "raw flats"
+    flat_dir.mkdir(parents=True)
+    (flat_dir / "scope_Luminance_1x1_skyflat0.fit").write_bytes(b"")
+    (flat_dir / "scope_Luminance_1x1_skyflat1.fit").write_bytes(b"")
+    (flat_dir / "scope_Red_1x1_skyflat0.fit").write_bytes(b"")
+
+    report = scan_session(tmp_path)
+    index = report.flat_index()
+
+    assert set(index.keys()) == {("T21", 1, "Luminance"), ("T21", 1, "Red")}
+    assert len(index[("T21", 1, "Luminance")]) == 2
+    assert len(index[("T21", 1, "Red")]) == 1
+
+
+def test_flat_index_drops_flat_with_no_filter_name(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A flat classified under a filename convention with no filter token
+    (see test_classify_t24_style_flat_has_no_filter_token) must be dropped
+    by flat_index(), not silently mis-bucketed under a guessed filter --
+    "refuse rather than guess", matching this project's established
+    preference (e.g. resolve_instrument_profile's UnknownInstrumentError).
+    A logged reason is required so the drop is discoverable, not silent.
+    """
+    touch(tmp_path, "T24-kaveh096-Flat-000-LD20250203-LT171434-BIN1.fit")
+
+    report = scan_session(tmp_path)
+    assert len(report.calibration) == 1
+    assert report.calibration[0].frame_type == "Flat"
+    assert report.calibration[0].filter_name is None
+
+    with caplog.at_level("WARNING"):
+        index = report.flat_index()
+
+    assert index == {}
+    assert any("filter" in record.message.lower() for record in caplog.records)
 
 
 def test_classify_telescope_less_calibration_without_telescope_dir_is_unrecognized(tmp_path: Path) -> None:
@@ -280,6 +339,61 @@ def test_scan_real_multi_telescope_session() -> None:
     # -- correctly refused rather than guessed at.
     assert len(report.unrecognized) == 11
     assert all("master_flat" in f.path.name.lower() for f in report.unrecognized)
+
+
+@pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
+def test_flat_index_real_t21_has_all_eleven_filters_t24_has_none() -> None:
+    """Real-scan verification (flats Slice 1): T21 shipped 330 real raw
+    flat frames, 30 each across 11 filters, all BIN1 -- before this fix
+    they all collapsed into one filter-blind calibration_index() bucket
+    (fact 2 of plan-flats-v3.md); flat_index() must recover the real
+    per-filter structure. T24 has zero flats of any kind anywhere in this
+    delivery -- flat_index() must have zero entries for it.
+    """
+    report = scan_session(REAL_SESSION_DIR)
+    index = report.flat_index()
+
+    t21_bin1_filters = {filt for (telescope, binning, filt) in index if telescope == "T21" and binning == 1}
+    assert t21_bin1_filters == {
+        "B", "Blue", "Green", "Ha", "I", "Luminance", "OIII", "R", "Red", "SII", "V",
+    }
+    for filt in t21_bin1_filters:
+        assert len(index[("T21", 1, filt)]) == 30
+
+    assert not any(telescope == "T24" for (telescope, _binning, _filt) in index)
+
+
+@pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
+def test_missing_calibration_warnings_real_per_filter_flat_check() -> None:
+    """Real-scan property check (fact 3 / Slice 1.3): before this fix, T21
+    having a flat for ANY filter silenced the "no flat" warning for every
+    filter -- since T21 genuinely has all 11 filters, that bug was
+    invisible on this data. After the fix, flat presence is checked per
+    (telescope, binning, filter) actually needed by a real light group;
+    T21 should show zero flat warnings (it genuinely has everything it
+    needs) and T24 should keep warning for every filter/binning it needs,
+    unchanged, since it has zero flats of any kind.
+    """
+    report = scan_session(REAL_SESSION_DIR)
+    warnings = report.missing_calibration_warnings()
+
+    assert not any("no flat" in w.lower() and "t21" in w.lower() for w in warnings)
+
+    # NOT deduplicated into a set: T24's Luminance BIN1 group is shared by
+    # two users (kaveh096 + jmwill, see light_groups()'s user-keyed
+    # grouping), so its identical-text warning legitimately appears twice.
+    t24_flat_warnings = [w for w in warnings if "no flat" in w.lower() and "t24" in w.lower()]
+    # T24's real light groups need: Luminance BIN1 (two user groups,
+    # kaveh096 + jmwill, each independently missing a flat), Red/Green/Blue
+    # BIN1 (jmwill) and BIN2 (kaveh096) -- matches this file's own real
+    # T24 group assertions in test_scan_real_multi_telescope_session /
+    # test_instrument_groups_merges_users_sharing_telescope_and_binning.
+    assert len(t24_flat_warnings) == 8
+    for binning, filt in [
+        (1, "Luminance"), (1, "Red"), (1, "Green"), (1, "Blue"),
+        (2, "Red"), (2, "Green"), (2, "Blue"),
+    ]:
+        assert any(f"BIN{binning}" in w and f"/{filt})" in w for w in t24_flat_warnings)
 
 
 @pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")

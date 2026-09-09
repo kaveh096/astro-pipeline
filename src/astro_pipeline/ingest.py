@@ -44,12 +44,15 @@ telescope+binning(+exptime for darks)), not to a single capture night.
 
 from __future__ import annotations
 
+import logging
 import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from astropy.io import fits
+
+logger = logging.getLogger(__name__)
 
 FIT_GLOB_PATTERNS = ("*.fit", "*.fits", "*.fts")
 ARCHIVE_GLOB_PATTERNS = ("*.zip",)
@@ -124,6 +127,14 @@ class CalibrationFrame:
     exptime: float  # 0.0 for flats (not a matching criterion for them)
     local_date: str | None = None
     local_time: str | None = None
+    # Only ever populated for frame_type == "Flat" (bias/dark frames don't
+    # vary by filter and never set this). Keyword-default so every existing
+    # construction site (always keyword-based) stays valid unchanged.
+    # _CAL_RE_T24's Flat branch has no filter token in its filename at all
+    # (see classify_filename), so a Flat classified via that convention
+    # leaves this None -- flat_index() drops those defensively rather than
+    # guessing a filter (see flat_index()'s docstring).
+    filter_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,20 +208,77 @@ class IngestReport:
             index.setdefault(key, []).append(frame)
         return index
 
+    def flat_index(self) -> dict[tuple[str, int, str], list[CalibrationFrame]]:
+        """Index Flat frames by (telescope, binning, filter_name).
+
+        A DELIBERATELY SEPARATE index from calibration_index(), not a widened
+        key on it. Bias/Dark genuinely don't vary by filter, and every real
+        bias/dark lookup in the codebase (pipeline.py's
+        `cal_index[(telescope, "Bias", binning, 0.0)]`, calibration.py's
+        `select_dark()` iterating `cal_index.items()` filtering by
+        `t, ftype, b`) keys on the existing 4-tuple. Folding filter_name in
+        would force every one of those call sites to pass a spurious
+        `filter_name=None` sentinel just to keep the tuple shape uniform --
+        buys nothing, and adds a footgun (a bias frame accidentally tagged
+        with a real filter string by some future code path would silently
+        vanish from every existing bias/dark lookup). A separate, filter-real,
+        flat-only index is the narrower, lower-risk change.
+
+        exptime is deliberately excluded from the key -- flats aren't
+        exptime-matched against lights (see CalibrationFrame.exptime's own
+        comment: "0.0 for flats (not a matching criterion for them)").
+
+        Any CalibrationFrame with frame_type == "Flat" and filter_name is
+        None is dropped here (logged, not silently mis-bucketed under a
+        guessed filter) -- this is real for `_CAL_RE_T24`'s Flat branch
+        (`<telescope>-<user>-Flat-<exptime>-LD...-LT...-BIN<n>`), which has
+        no filter token anywhere in its filename. T24 ships zero flats of
+        any kind in the real data this codebase has seen so far, so this
+        path is currently unreached in practice, but the defensive drop
+        exists so a future flat shipped under that convention doesn't get
+        silently attributed to a fake/guessed filter instead of refusing.
+        """
+        index: dict[tuple[str, int, str], list[CalibrationFrame]] = {}
+        for frame in self.calibration:
+            if frame.frame_type != "Flat":
+                continue
+            if frame.filter_name is None:
+                logger.warning(
+                    "Dropping Flat frame with no filter identity: %s "
+                    "(telescope=%s, binning=%s) -- matched a calibration-frame "
+                    "naming convention with no filter token in the filename; "
+                    "refusing to guess rather than mis-bucket it.",
+                    frame.path,
+                    frame.telescope,
+                    frame.binning,
+                )
+                continue
+            key = (frame.telescope, frame.binning, frame.filter_name)
+            index.setdefault(key, []).append(frame)
+        return index
+
     def missing_calibration_warnings(self) -> list[str]:
         """Human-readable gaps: for every (telescope, binning) a light group
         needs, is there a Bias and a matching-exptime Dark? Flats are
-        checked per (telescope, binning) regardless of exptime (flats don't
-        share the exptime-matching requirement bias/dark do). Does not
-        decide what to do about gaps -- Stage 2 halts and asks; this just
-        reports what's actually there.
+        checked per (telescope, binning, filter_name) -- exptime is not a
+        matching criterion for flats, but filter identity IS, and flat
+        presence must be checked per-filter, not merely "does this
+        telescope+binning have a flat for ANY filter" (that was a real,
+        live bug: a telescope shipping only a Luminance flat would silently
+        suppress the "no flat" warning for Red/Green/Blue/etc too, since the
+        old check was derived from the filter-blind calibration_index()).
+        Does not decide what to do about gaps -- Stage 2 halts and asks;
+        this just reports what's actually there.
         """
         warnings: list[str] = []
         cal_index = self.calibration_index()
         cal_by_type_scope: dict[tuple[str, str, int], list[float]] = {}
         for (telescope, frame_type, binning, exptime), frames in cal_index.items():
+            if frame_type == "Flat":
+                continue  # flat presence is checked per-filter via flat_index() below
             if frames:
                 cal_by_type_scope.setdefault((telescope, frame_type, binning), []).append(exptime)
+        flat_index = self.flat_index()
 
         for (telescope, user, target, filter_name, binning), lights in self.light_groups().items():
             if (telescope, "Bias", binning) not in cal_by_type_scope:
@@ -225,7 +293,20 @@ class IngestReport:
                     f"No Dark frames at {exptime:.0f}s found for {telescope} BIN{binning} "
                     f"(needed for {target}/{filter_name})."
                 )
-            if (telescope, "Flat", binning) not in cal_by_type_scope:
+            if (telescope, binning, filter_name) not in flat_index:
+                # Message template deliberately kept byte-identical in shape
+                # to the Bias/Dark lines above ("... (needed for
+                # {target}/{filter_name})."), NOT reworded to mention
+                # "filter" explicitly -- skill/interview.py's
+                # dedupe_calibration_warnings() parses this exact template
+                # via a regex (_FLAT_RE) to collapse per-user/per-filter
+                # repeats into one summary line per (telescope, binning).
+                # Only the PRESENCE CHECK above changed (now per-filter via
+                # flat_index(), fixing the real bug in fact 3 of
+                # plan-flats-v3.md); the wording did not need to and must
+                # not change, or the downstream parser silently degrades to
+                # verbatim passthrough (see
+                # test_dedupe_passes_through_unrecognized_lines).
                 warnings.append(
                     f"No Flat frames found for {telescope} BIN{binning} "
                     f"(needed for {target}/{filter_name})."
@@ -306,6 +387,7 @@ def classify_filename(
             "frame_type": "Flat",
             "binning": int(match.group("binx")),
             "exptime": 0.0,
+            "filter_name": match.group("filter"),
         }
 
     return None
