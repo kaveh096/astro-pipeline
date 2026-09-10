@@ -23,6 +23,7 @@ from astro_pipeline.reconciliation import (
 # test_solving.py).
 from conftest import LUM_MASTER as REAL_LUM_MASTER
 from conftest import RED_MASTER as REAL_RED_MASTER
+from conftest import RGB_RECONCILED_CONTRIB_BIN1, RGB_RECONCILED_CONTRIB_BIN2
 from conftest import requires
 
 requires_real_masters = requires(REAL_LUM_MASTER, REAL_RED_MASTER)
@@ -225,6 +226,51 @@ def test_crop_to_common_coverage_updates_wcs_reference_pixel(tmp_path: Path) -> 
     trimmed_rows = original["NAXIS2"] - fits.getdata(outputs[0], memmap=False).shape[0]
     assert trimmed_rows > 0
     assert cropped["CRPIX2"] == pytest.approx(original["CRPIX2"] - trimmed_rows)
+
+
+requires_real_crop_contribs = requires(RGB_RECONCILED_CONTRIB_BIN1, RGB_RECONCILED_CONTRIB_BIN2)
+
+# Golden sha256 of crop_to_common_coverage()'s single-pass implementation's
+# output (the version that loaded every contributor array simultaneously,
+# peak 873MB working set on this real fixture, verified via a Get-Process
+# WorkingSet64 poller), captured before it was replaced with a two-pass,
+# one-contributor-at-a-time version. Locks in that the memory restructure
+# is a pure refactor: byte-identical crop output and crop box, not a
+# behavior change. Cropping has no floating-point accumulation whose
+# operation order could change the result (unlike e.g. combine_same_grid's
+# weighted sum), so exact equality (via hash, to avoid committing ~190MB
+# .npy arrays to the repo -- real-data binaries stay external per this
+# project's convention, see conftest.py) is the right check here. Shape
+# and hash captured directly from the pre-refactor run's real output; not
+# reproducible from source, so if this ever needs regenerating, do so from
+# git history of reconciliation.py before this change.
+_CROP_GOLDEN_SHA256 = {
+    "rgb_reconciled_contrib_T24_bin1": (
+        (3, 4037, 3919),
+        "71b8f9576d8345d3f979b7ce773ed85c1c9bf59e507050d1f3c1083dc28b5a6e",
+    ),
+    "rgb_reconciled_contrib_T24_bin2": (
+        (3, 4037, 3919),
+        "598bd8ef2faca39f04650136a56d749de2bec503622eccae35c33ea60e006faf",
+    ),
+}
+
+
+@requires_real_crop_contribs
+def test_crop_to_common_coverage_matches_golden_single_pass_output(tmp_path: Path) -> None:
+    import hashlib
+
+    from astro_pipeline.reconciliation import crop_to_common_coverage
+
+    outputs = crop_to_common_coverage(
+        [RGB_RECONCILED_CONTRIB_BIN1, RGB_RECONCILED_CONTRIB_BIN2], tmp_path / "cropped"
+    )
+    for out in outputs:
+        expected_shape, expected_hash = _CROP_GOLDEN_SHA256[Path(out).stem]
+        data = fits.getdata(out, memmap=False)
+        assert data.shape == expected_shape, f"{out.name} shape diverged from golden crop output"
+        actual_hash = hashlib.sha256(np.asarray(data, dtype=np.float32).tobytes()).hexdigest()
+        assert actual_hash == expected_hash, f"{out.name} diverged from golden crop output"
 
 
 def test_combine_same_grid_averages_with_weights(tmp_path: Path) -> None:

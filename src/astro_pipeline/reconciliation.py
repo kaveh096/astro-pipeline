@@ -193,15 +193,31 @@ def crop_to_common_coverage(paths: list[Path], output_dir: str | Path) -> list[P
     data in every channel. The cost is a few pixels at the frame edge,
     which registration dithering has already made the least reliable part
     of the image.
+
+    MEMORY: two passes over `paths`, never holding more than one
+    contributor's array at a time -- the same "load, fold in, free" shape
+    `combine_same_grid` already uses (see its own docstring). Verified on
+    real data (two 4096x4096x3 float32 M51 contributors, ~201MB each):
+    the earlier single-pass version, which loaded every contributor
+    simultaneously into `arrays` and kept them all resident through both
+    the mask computation and the output loop, peaked at 873MB working set
+    -- O(N) in contributor count. This version's peak is dominated by one
+    contributor's array plus the boolean mask, independent of N. Cost:
+    each file's pixel data is read from disk twice (once per pass)
+    instead of once; header reads are unchanged.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    arrays = [fits.getdata(Path(p), memmap=False) for p in paths]
-    valid = np.ones(arrays[0].shape[-2:], dtype=bool)
-    for data in arrays:
+    valid: np.ndarray | None = None
+    for p in paths:
+        data = fits.getdata(Path(p), memmap=False)
         plane = np.all(np.isfinite(data), axis=0) if data.ndim == 3 else np.isfinite(data)
-        valid &= plane
+        valid = plane if valid is None else (valid & plane)
+        del data
+        gc.collect()
+    if valid is None:
+        raise ValueError("Need at least one path to crop.")
 
     # Trim greedily from whichever edge currently carries the most invalid
     # pixels, until the box is clean. A simpler "keep fully-valid rows and
@@ -238,8 +254,14 @@ def crop_to_common_coverage(paths: list[Path], output_dir: str | Path) -> list[P
             x1 -= 1
 
     outputs: list[Path] = []
-    for path, data in zip(paths, arrays):
-        path = Path(path)
+    for p in paths:
+        path = Path(p)
+        data = fits.getdata(path, memmap=False)
+        if data.shape[-2:] != valid.shape:
+            raise ReprojectionError(
+                f"{path.name} changed shape between passes ({data.shape[-2:]} vs "
+                f"{valid.shape} seen earlier) -- re-run crop_to_common_coverage."
+            )
         header = fits.getheader(path).copy()
         cropped = data[..., y0:y1, x0:x1]
         # A crop moves the reference pixel; without this the WCS would
@@ -252,6 +274,8 @@ def crop_to_common_coverage(paths: list[Path], output_dir: str | Path) -> list[P
         out_path = output_dir / path.name
         fits.writeto(out_path, np.asarray(cropped, dtype=np.float32), header=header, overwrite=True)
         outputs.append(out_path)
+        del data, cropped
+        gc.collect()
     return outputs
 
 
@@ -526,12 +550,11 @@ def combine_same_grid(
     accumulated one contributor at a time (loaded, folded in, freed,
     before moving to the next) -- peak is now ~3x a single array's memory
     (the two running accumulators plus whichever one contributor is
-    currently loaded), independent of N. This REDUCES but does not REMOVE
-    the memory ceiling on this machine (~8GB RAM, as little as ~2.5GB free
-    in practice): crop_to_common_coverage(), which every caller runs
-    first, still loads every contributor array simultaneously -- a known,
-    separate, NOT-fixed-here limit (see its own docstring / plan-rev4.md's
-    "Deferred" list).
+    currently loaded), independent of N. crop_to_common_coverage(), which
+    every caller runs first, was fixed the same way (two-pass, one
+    contributor resident at a time) -- see its own docstring; the ~8GB-RAM
+    machine's memory ceiling on this whole reconciliation path is no
+    longer O(N) in contributor count at either stage.
 
     `reference_index` (default 0, i.e. paths[0] -- preserves the old
     behaviour for callers that don't care) picks which input's FITS header

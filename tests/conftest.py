@@ -53,6 +53,14 @@ LUM_BG = FINAL_DIR / "lum_bg.fits"
 RGB_RECONCILED = FINAL_DIR / "rgb_reconciled.fit"
 LRGB_FINAL = FINAL_DIR / "lrgb_final.fit"
 
+# Reconciled-but-not-yet-cropped RGB contributors (post reproject_to_reference,
+# pre crop_to_common_coverage) -- the real input crop_to_common_coverage()
+# actually sees in production. Two same-telescope binnings today (T24
+# BIN1/BIN2); used as the real-data fixture for its memory-streaming
+# regression test.
+RGB_RECONCILED_CONTRIB_BIN1 = FINAL_DIR / "rgb_reconciled_contrib_T24_bin1.fit"
+RGB_RECONCILED_CONTRIB_BIN2 = FINAL_DIR / "rgb_reconciled_contrib_T24_bin2.fit"
+
 
 def requires(*paths: Path):
     """Skip marker naming exactly which fixture is missing, so a skip is
