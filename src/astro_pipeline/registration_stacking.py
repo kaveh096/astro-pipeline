@@ -19,6 +19,20 @@ from pathlib import Path
 
 from .siril_driver import SirilResult, run_script
 
+# Measured, not assumed (real T72 NGC 3628 single-frame Luminance group,
+# precalibrated-path plan's first real end-to-end run): Siril's `convert`
+# succeeds on a single frame, but refuses to create a .seq file for it --
+# "Cannot create sequence pp_lights_.seq. Need at least 2 frames to be
+# usable in Siril." register() then fails opaquely ("No sequence
+# `pp_lights_' found.") rather than something callers can distinguish from
+# any other registration failure. Callers must check length BEFORE staging
+# (see pipeline.py's Luminance loop and _build_colour_contributor) and
+# skip-and-log a too-small group, the same pattern already used for a
+# missing R/G/B filter -- this is a Siril constraint, not specific to
+# CalibrationMode.PRECALIBRATED; any RAW_LOCAL group with a single real
+# light would hit the identical failure.
+MIN_SEQUENCE_FRAMES = 2
+
 
 @dataclass
 class StackResult:

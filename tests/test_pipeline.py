@@ -530,6 +530,34 @@ class _FakeReportGreenBlueOnly:
         return {}
 
 
+class _FakeReportOneLightPerFilter:
+    """All three RGB filters present, but only 1 light each -- too few for
+    Siril to form a sequence (MIN_SEQUENCE_FRAMES=2), a real failure mode
+    found on T72's single-frame NGC 3628 Luminance group (first real
+    precalibrated-path run). Must be caught and skipped-and-logged BEFORE
+    build_master()/register_and_stack() would crash on it."""
+
+    def instrument_groups(self):
+        return {
+            ("T24", "M51", "Red", 2): [_FakeLightFrame()],
+            ("T24", "M51", "Green", 2): [_FakeLightFrame()],
+            ("T24", "M51", "Blue", 2): [_FakeLightFrame()],
+        }
+
+    def calibration_index(self):
+        return {}
+
+
+def test_build_colour_contributor_skips_on_too_few_frames_for_a_sequence(tmp_path: Path) -> None:
+    notes: list[str] = []
+    result = _build_colour_contributor(
+        tmp_path, tmp_path / "contrib", _FakeReportOneLightPerFilter(), "T24", "M51", 2,
+        13.4980, 47.1953, notes,
+    )
+    assert result is None
+    assert any("skip" in n.lower() and "at least 2" in n for n in notes)
+
+
 def test_build_colour_contributor_skips_on_missing_green_not_just_red(tmp_path: Path) -> None:
     """resolve_lights() for Red returns a non-empty list here, so the
     function would proceed to build_master() for Red -- which needs real

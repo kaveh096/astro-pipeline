@@ -131,7 +131,7 @@ from .reconciliation import (
     match_gain_offset,
     reproject_to_reference,
 )
-from .registration_stacking import register_and_stack
+from .registration_stacking import MIN_SEQUENCE_FRAMES, register_and_stack
 from .run_signature import (
     STAGE_ORDER,
     ContributorSignature,
@@ -738,6 +738,17 @@ def _build_colour_contributor(
                 notes,
             )
             return None
+        if len(lights) < MIN_SEQUENCE_FRAMES:
+            # Same real Siril constraint as the Luminance loop (see
+            # registration_stacking.MIN_SEQUENCE_FRAMES) -- register_and_
+            # stack() cannot form a sequence from too few frames.
+            _log(
+                f"[skip] BIN{binning}: only {len(lights)} {filter_name} light(s) for "
+                f"{telescope}/{target}, need at least {MIN_SEQUENCE_FRAMES} to form a Siril "
+                "sequence -- skipping this contributor rather than crashing the whole run",
+                notes,
+            )
+            return None
         sub_count += len(lights)
         if calibration_mode == CalibrationMode.PRECALIBRATED:
             master_path = build_master(
@@ -1093,6 +1104,23 @@ def run_lrgb(
             report, lum_telescope, target, LUMINANCE_FILTER, contrib_lum_binning,
             calibration_mode=lum_calibration_mode,
         )
+        if len(lum_lights) < MIN_SEQUENCE_FRAMES:
+            # Real finding (T72's single NGC 3628 Luminance test sub, first
+            # real precalibrated-path run): Siril refuses to create a
+            # sequence from fewer than MIN_SEQUENCE_FRAMES frames, which
+            # register_and_stack() cannot recover from (an opaque "No
+            # sequence found" crash). A Siril constraint, not specific to
+            # this contributor's calibration mode -- skip-and-log here,
+            # mirroring the established pattern for a colour contributor
+            # missing a filter, rather than crashing the whole run over one
+            # under-populated contributor.
+            _log(
+                f"[skip] {lum_label}: only {len(lum_lights)} light(s), need at least "
+                f"{MIN_SEQUENCE_FRAMES} to form a Siril sequence -- skipping this "
+                "Luminance contributor rather than crashing the whole run",
+                notes,
+            )
+            continue
         frame_hash = frame_identity_hash([f.path.name for f in lum_lights])
         lum_frame_hashes[contributor_key] = frame_hash
 
