@@ -119,6 +119,45 @@ _FLAT_RE_SKYFLAT = re.compile(
     re.IGNORECASE,
 )
 
+# The three fixed templates IngestReport.missing_calibration_warnings()
+# emits (below) -- module-level (not skill/interview.py-private, where an
+# earlier version of these lived) as the shared source of truth, since
+# skill/ has no __init__.py and is not an importable package: pipeline.py
+# importing these OUT of skill/ would be architecturally backwards.
+# skill/interview.py's dedupe_calibration_warnings() imports these rather
+# than redefining them; pipeline.py's precalibrated-path filtering
+# (run_lrgb, 2026-09) uses warning_telescope() below for the same reason
+# -- an anchored regex extracting a real, whitespace-delimited telescope
+# token is not equivalent to a naive substring test, which could (in
+# principle, not observed with today's real telescope names) collide with
+# a target/filter name inside the message.
+CALIBRATION_WARNING_RES = {
+    "bias": re.compile(
+        r"^No Bias frames found for (?P<telescope>\S+) BIN(?P<binning>\d+) "
+        r"\(needed for (?P<target>[^/]+)/(?P<filter>[^)]+)\)\.$"
+    ),
+    "dark": re.compile(
+        r"^No Dark frames at (?P<exptime>[\d.]+)s found for (?P<telescope>\S+) BIN(?P<binning>\d+) "
+        r"\(needed for (?P<target>[^/]+)/(?P<filter>[^)]+)\)\.$"
+    ),
+    "flat": re.compile(
+        r"^No Flat frames found for (?P<telescope>\S+) BIN(?P<binning>\d+) "
+        r"\(needed for (?P<target>[^/]+)/(?P<filter>[^)]+)\)\.$"
+    ),
+}
+
+
+def warning_telescope(line: str) -> str | None:
+    """The telescope named in one missing_calibration_warnings() line, via
+    an anchored regex match against CALIBRATION_WARNING_RES -- None if the
+    line doesn't match any of the three known templates (e.g. the wording
+    changed, or it's not one of these warnings at all)."""
+    for pattern in CALIBRATION_WARNING_RES.values():
+        m = pattern.match(line)
+        if m:
+            return m["telescope"]
+    return None
+
 
 @dataclass(frozen=True)
 class LightFrame:

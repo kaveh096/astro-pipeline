@@ -35,31 +35,25 @@ logic -- it never calls Siril/GraXpert/SPCC and never writes to
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from astro_pipeline.calibration import CalibrationFramesMissingError, select_dark  # noqa: E402
-from astro_pipeline.ingest import IngestReport, scan_session  # noqa: E402
+from astro_pipeline.calibration import CalibrationFramesMissingError, CalibrationMode, select_dark  # noqa: E402
+from astro_pipeline.ingest import CALIBRATION_WARNING_RES, IngestReport, scan_session, warning_telescope  # noqa: E402
+from astro_pipeline.pipeline import infer_calibration_mode  # noqa: E402
 
 # The three fixed templates IngestReport.missing_calibration_warnings()
-# emits today (ingest.py ~line 200-233). If that function's wording ever
+# emits today (ingest.py, CALIBRATION_WARNING_RES -- moved there from this
+# file, 2026-09, as the shared source of truth pipeline.py's precalibrated-
+# path filtering also needs; skill/ has no __init__.py so it isn't
+# importable the other direction). If that function's wording ever
 # changes, dedupe_calibration_warnings() below degrades to passing the
 # line through unrecognized rather than crashing or dropping it.
-_BIAS_RE = re.compile(
-    r"^No Bias frames found for (?P<telescope>\S+) BIN(?P<binning>\d+) "
-    r"\(needed for (?P<target>[^/]+)/(?P<filter>[^)]+)\)\.$"
-)
-_DARK_RE = re.compile(
-    r"^No Dark frames at (?P<exptime>[\d.]+)s found for (?P<telescope>\S+) BIN(?P<binning>\d+) "
-    r"\(needed for (?P<target>[^/]+)/(?P<filter>[^)]+)\)\.$"
-)
-_FLAT_RE = re.compile(
-    r"^No Flat frames found for (?P<telescope>\S+) BIN(?P<binning>\d+) "
-    r"\(needed for (?P<target>[^/]+)/(?P<filter>[^)]+)\)\.$"
-)
+_BIAS_RE = CALIBRATION_WARNING_RES["bias"]
+_DARK_RE = CALIBRATION_WARNING_RES["dark"]
+_FLAT_RE = CALIBRATION_WARNING_RES["flat"]
 
 
 def dedupe_calibration_warnings(raw_warnings: list[str]) -> list[str]:
@@ -140,6 +134,19 @@ def dark_scaling_notes(report: IngestReport) -> list[str]:
     return notes
 
 
+def precalibrated_telescopes(report: IngestReport) -> set[str]:
+    """Every telescope found in this session whose lights the pipeline
+    will use directly (CalibrationMode.PRECALIBRATED), computed with the
+    exact same `infer_calibration_mode` run_lrgb itself uses for its
+    default -- a preview, not a second implementation of the policy.
+    Real case: NGC 3628/T73 (Feb 2025), zero recognized Bias/Dark, real
+    calibrated-provenance lights present."""
+    telescopes = {k[0] for k in report.instrument_groups()} | {
+        k[0] for k in report.calibrated_instrument_groups()
+    }
+    return {t for t in telescopes if infer_calibration_mode(report, t) == CalibrationMode.PRECALIBRATED}
+
+
 def session_summary(report: IngestReport) -> dict:
     """Real counts for the interview's "what was found" line -- no
     hardcoded target/telescope/binning assumed, so this generalizes to
@@ -167,14 +174,32 @@ def render(project_dir: Path, report: IngestReport) -> str:
         lines.append(f"  {key} -> {n}")
     lines.append("")
 
+    precalibrated = precalibrated_telescopes(report)
+    if precalibrated:
+        lines.append(
+            f"Precalibrated (no local bias/dark/flat needed): {', '.join(sorted(precalibrated))} "
+            "-- calibrated-provenance lights will be used directly (CalibrationMode.PRECALIBRATED)."
+        )
+        lines.append("")
+
     raw = report.missing_calibration_warnings()
+    # A PRECALIBRATED telescope's "no Bias/Dark/Flat" warnings are expected
+    # (that's WHY it resolved precalibrated, see infer_calibration_mode) and
+    # not worth surfacing as if they were a problem for this run -- filtered
+    # here via the same anchored regexes missing_calibration_warnings()'s
+    # own wording is built from (warning_telescope()), not a guess at which
+    # lines mention which telescope.
+    raw = [line for line in raw if warning_telescope(line) not in precalibrated]
     deduped = dedupe_calibration_warnings(raw)
     lines.append(f"Calibration gaps: {len(raw)} raw warning(s) -> {len(deduped)} deduplicated:")
     for line in deduped:
         lines.append(f"  - {line}")
     lines.append("")
 
-    scaling = dark_scaling_notes(report)
+    scaling = [
+        line for line in dark_scaling_notes(report)
+        if not any(line.startswith(f"{t}/") or line.startswith(f"[BLOCKED] {t}/") for t in precalibrated)
+    ]
     if scaling:
         lines.append("Dark-scaling resolution (calibration.select_dark preview):")
         for line in scaling:
