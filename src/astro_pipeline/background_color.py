@@ -179,7 +179,31 @@ T24_PROFILE = InstrumentProfile(
     blue_filter="Astrodon Blue (E / I series)",
 )
 
-INSTRUMENT_PROFILES: dict[str, InstrumentProfile] = {"T24": T24_PROFILE}
+# iTelescope T73 (Chile): sensor and filters verified against real sources,
+# not guessed -- real T73 FITS header (`INSTRUME='T73 ZWO ASI2600MM'`) plus
+# iTelescope's own published T73 support page (2026-09 fetch:
+# https://support.itelescope.net/support/solutions/articles/261371-telescope-t73),
+# which states the camera is a "ZWO ASI2600MM Pro Mono (16-bit CMOS, IMX571
+# sensor, 26 MP)" and the filters are "Chroma LRGB, Chroma 3nm Ha, OIII,
+# SII" (narrowband irrelevant here -- SPCC only calibrates RGB, no
+# `-lfilter=` parameter exists). Cross-checked against the real installed
+# Siril 1.4.4 spcc-database on this machine
+# (%LOCALAPPDATA%\siril\siril-spcc-database): mono_sensors/Sony_IMX.json's
+# one entry has `"name": "Sony IMX411/455/461/533/571"` with its own
+# comment explicitly listing "ZWO ASI2600MM Pro" as an example camera using
+# that sensor -- the `name` field is what this codebase's own convention
+# uses (see InstrumentProfile's docstring), verified against T24_PROFILE's
+# working values, which match KAF_16803.json's `name` field, not `model`.
+# mono_filters/Chroma_RGB.json has exactly "Chroma Red"/"Chroma Green"/
+# "Chroma Blue" (no separate Luminance filter needed, same reason).
+T73_PROFILE = InstrumentProfile(
+    mono_sensor="Sony IMX411/455/461/533/571",
+    red_filter="Chroma Red",
+    green_filter="Chroma Green",
+    blue_filter="Chroma Blue",
+)
+
+INSTRUMENT_PROFILES: dict[str, InstrumentProfile] = {"T24": T24_PROFILE, "T73": T73_PROFILE}
 
 
 def run_spcc(

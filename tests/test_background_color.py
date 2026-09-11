@@ -307,3 +307,43 @@ def test_t24_profile_names_exist_in_the_spcc_database() -> None:
         ("blue filter", T24_PROFILE.blue_filter),
     ):
         assert value in names, f"T24 {label} {value!r} not found in the SPCC database"
+
+
+def test_t73_profile_names_exist_in_the_spcc_database() -> None:
+    """Same check as test_t24_profile_names_exist_in_the_spcc_database, for
+    T73's profile (NGC 3628, precalibrated-path plan). Verified against
+    real sources, not guessed: T73's FITS header
+    (INSTRUME='T73 ZWO ASI2600MM') plus iTelescope's own published T73
+    support page (fetched 2026-09), which states the camera is a
+    "ZWO ASI2600MM Pro Mono (16-bit CMOS, IMX571 sensor, 26 MP)" and the
+    filters are "Chroma LRGB, Chroma 3nm Ha, OIII, SII" -- Sony_IMX.json's
+    one mono-sensor entry has a comment explicitly listing "ZWO ASI2600MM
+    Pro" as an example camera using that sensor, and Chroma_RGB.json has
+    exactly the three RGB names used here (no Luminance filter needed --
+    SPCC only calibrates RGB)."""
+    import json
+    from pathlib import Path as _Path
+
+    from astro_pipeline.background_color import T73_PROFILE
+
+    db = _Path.home() / "AppData/Local/siril/siril-spcc-database"
+    if not db.is_dir():
+        pytest.skip("spcc-database not cloned; see docs/colour-calibration-catalogues.md")
+
+    names = set()
+    for jf in db.rglob("*.json"):
+        try:
+            data = json.loads(jf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for entry in (data if isinstance(data, list) else [data]):
+            if isinstance(entry, dict) and "name" in entry:
+                names.add(entry["name"])
+
+    for label, value in (
+        ("mono sensor", T73_PROFILE.mono_sensor),
+        ("red filter", T73_PROFILE.red_filter),
+        ("green filter", T73_PROFILE.green_filter),
+        ("blue filter", T73_PROFILE.blue_filter),
+    ):
+        assert value in names, f"T73 {label} {value!r} not found in the SPCC database"
