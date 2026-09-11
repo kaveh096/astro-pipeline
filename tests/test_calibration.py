@@ -6,6 +6,7 @@ from astropy.io import fits
 
 from astro_pipeline.calibration import (
     CalibrationFramesMissingError,
+    CalibrationMode,
     FlatPolicy,
     _calibrate_command,
     build_master,
@@ -14,6 +15,7 @@ from astro_pipeline.calibration import (
     run_calibration,
     select_dark,
     sequence_name,
+    stage_precalibrated_lights,
 )
 from astro_pipeline.ingest import CalibrationFrame, scan_session
 from astro_pipeline.siril_driver import find_siril_cli
@@ -26,6 +28,7 @@ except FileNotFoundError:
 
 requires_siril = pytest.mark.skipif(not SIRIL_AVAILABLE, reason="Siril not installed on this machine")
 
+from conftest import NGC3628_PROJECT_DIR, requires_ngc3628_project
 from conftest import PROJECT_DIR as REAL_SESSION_DIR
 requires_real_session = pytest.mark.skipif(
     not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine"
@@ -45,6 +48,40 @@ def test_build_master_raises_on_empty_frame_list(tmp_path: Path) -> None:
 def test_calibrate_lights_raises_on_empty_light_list(tmp_path: Path) -> None:
     with pytest.raises(CalibrationFramesMissingError):
         calibrate_lights([], master_bias=tmp_path / "b.fit", master_dark=tmp_path / "d.fit", work_dir=tmp_path)
+
+
+def test_stage_precalibrated_lights_raises_on_empty_light_list(tmp_path: Path) -> None:
+    with pytest.raises(CalibrationFramesMissingError):
+        stage_precalibrated_lights([], tmp_path)
+
+
+def test_calibration_mode_values() -> None:
+    assert CalibrationMode.RAW_LOCAL == "raw_local"
+    assert CalibrationMode.PRECALIBRATED == "precalibrated"
+
+
+@requires_siril
+@requires_ngc3628_project
+def test_stage_precalibrated_lights_real_t73_produces_pp_lights_sequence(tmp_path: Path) -> None:
+    """Real T73 NGC 3628 calibrated-provenance Red BIN2 lights, staged
+    directly (no bias/dark/flat) -- confirms the seam claim from
+    plan-precalibrated-path.md: converting under basename "pp_lights"
+    produces a sequence literally named "pp_lights_", matching what
+    pipeline.build_master()'s hardcoded register_and_stack("pp_lights_",
+    ...) already expects, with zero change needed downstream."""
+    report = scan_session(NGC3628_PROJECT_DIR)
+    groups = report.calibrated_instrument_groups()
+    lights = groups[("T73", "NGC 3628", "Red", 2)]
+    assert len(lights) == 12
+
+    staged = stage_precalibrated_lights(lights, tmp_path, basename="lights")
+
+    assert len(staged) == 12
+    assert all(p.name.startswith("pp_lights_") for p in staged)
+    for path in staged:
+        data = fits.getdata(path)
+        assert data.dtype == np.dtype(">f4")
+        assert not np.any(data == 0.0), f"{path.name} has exact-zero pixels -- pedestal should prevent this"
 
 
 def test_run_calibration_raises_on_missing_bias(tmp_path: Path) -> None:

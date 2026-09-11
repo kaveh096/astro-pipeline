@@ -88,6 +88,22 @@ class FlatPolicy(str, Enum):
     SKIP_IF_MISSING = "skip_if_missing"  # proceed without flat correction
 
 
+class CalibrationMode(str, Enum):
+    """Per-telescope choice of how a light group reaches registration+
+    stacking. RAW_LOCAL (today's only behaviour, unconditionally the
+    default) locally bias/dark/flat-calibrates "raw"-provenance lights via
+    run_calibration()/calibrate_lights(). PRECALIBRATED skips local
+    calibration entirely and stages "calibrated"-provenance lights
+    directly via stage_precalibrated_lights() -- for a delivery where
+    iTelescope already did bias(+flat) server-side and no local Dark
+    frames exist at all (real case: NGC 3628/T73, Feb 2025, CALSTAT='BF'
+    confirmed on real headers -- see plan-precalibrated-path.md).
+    """
+
+    RAW_LOCAL = "raw_local"
+    PRECALIBRATED = "precalibrated"
+
+
 class CalibrationFramesMissingError(RuntimeError):
     """Bias/dark are missing, or flats are missing under FlatPolicy.REQUIRE.
 
@@ -270,6 +286,71 @@ def sequence_name(basename: str) -> str:
     (verified against the real CLI) -- callers referencing the sequence in
     later commands must use this, not the bare basename."""
     return f"{basename}_"
+
+
+def stage_precalibrated_lights(
+    light_frames: list[LightFrame],
+    work_dir: str | Path,
+    basename: str = "lights",
+    pedestal: float = DEFAULT_PEDESTAL,
+    notes: list[str] | None = None,
+) -> list[Path]:
+    """Stage already-calibrated (provenance="calibrated") lights directly
+    into a "pp_"-prefixed Siril sequence, bypassing bias/dark/flat
+    calibration entirely -- CalibrationMode.PRECALIBRATED's counterpart to
+    calibrate_lights(). iTelescope's own server-side calibration already
+    did bias+flat (never dark -- verified CALSTAT="BF" on real T73 NGC
+    3628 data, see plan-precalibrated-path.md); re-running local flat
+    correction here would double-correct, so this function has no
+    flat_frames parameter at all, not an optional/None one -- there is
+    structurally no path to flat logic to accidentally take.
+
+    Converts directly under the "pp_<basename>" name (not "<basename>"
+    then Siril-prefixed "pp_" the way calibrate_lights() does), so the
+    resulting sequence is sequence_name(f"pp_{basename}") ==
+    "pp_<basename>_" -- byte-identical to what pipeline.build_master()'s
+    hardcoded register_and_stack("pp_lights_", ...) already expects when
+    basename="lights". No change needed downstream of this function.
+
+    MEASURED, not assumed (real T73 calibrated- Red frame, real Siril
+    1.4.4, `convert` only -- no `calibrate` step): dtype survives as
+    float32 end to end ("Saving FITS: ... 32 bits" in Siril's own log,
+    independently confirmed via astropy as dtype('>f4')). Siril's
+    `convert` normalizes pixel values into its internal [0, 1] float
+    range regardless of input format ("Normalizing input data to our
+    float range [0, 1]") -- this is NOT a risk specific to this function:
+    calibrate_lights()'s own first step is the identical `convert
+    <basename>` call (this module, ~line 546) before its `calibrate` step
+    operates in that same normalized space, so both paths already share
+    this behaviour. Real converted-output stats: min 0.00187, mean
+    0.00278, max 1.011, exact-zero fraction 0.0 -- no clipping observed.
+
+    Applies the same `pedestal` as calibrate_lights() (default 0.1), for
+    the same reason: register_and_stack()'s underlying Siril `stack`
+    clips a negative-average background to exact 0.0, a risk that depends
+    on the STACK output, not on how the inputs were calibrated. Real T73
+    samples have comfortably positive per-frame minimums, so clipping is
+    unlikely, but stacked+averaged output was not verified before this
+    function was written -- verify against a real multi-frame group before
+    trusting a specific target's output. Kept as one pedestal mechanism
+    for both paths rather than two, deliberately: a reader auditing "does
+    pedestal apply here" should not have to check which calibration mode
+    was used.
+    """
+    if not light_frames:
+        raise CalibrationFramesMissingError("No light frames provided to stage.")
+    stage_dir = Path(work_dir) / basename
+    stage_frames([f.path for f in light_frames], stage_dir)
+    convert_basename = f"pp_{basename}"
+    seq = sequence_name(convert_basename)
+    run_script([f"convert {convert_basename}"], workdir=stage_dir, script_name="convert.ssf")
+    staged = sorted(stage_dir.glob(f"{seq}*.fit*"))
+    if not staged:
+        raise RuntimeError(f"Siril reported success but no '{seq}*' files were found in {stage_dir}.")
+    if pedestal:
+        _apply_pedestal(staged, pedestal)
+    _log(f"       staged {len(staged)} precalibrated lights directly (no bias/dark/flat)", notes)
+    return staged
 
 
 def _calibrate_command(

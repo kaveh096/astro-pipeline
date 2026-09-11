@@ -79,3 +79,16 @@ def requires(*paths: Path):
 requires_project = pytest.mark.skipif(
     not PROJECT_DIR.exists(), reason=f"raw project folder not present: {PROJECT_DIR}"
 )
+
+# NGC 3628/T73 (Feb 2025) real delivery -- iTelescope server-side-calibrated
+# only (no local Dark frames at all, CALSTAT="BF" on real headers), the real
+# fixture for CalibrationMode.PRECALIBRATED (see plan-precalibrated-path.md).
+# Raw data lives directly under D:\Raw Photo Backups\iTelescope\, not this
+# repo's usual Desktop project-folder convention -- this target has not yet
+# been run through the pipeline, so there is no `_pipeline/` output here yet.
+NGC3628_PROJECT_DIR = Path(
+    r"D:\Raw Photo Backups\iTelescope\NGC 3628 - Hamburger Galaxy - Chile - LRGB - Feb 2025"
+)
+requires_ngc3628_project = pytest.mark.skipif(
+    not NGC3628_PROJECT_DIR.exists(), reason=f"raw project folder not present: {NGC3628_PROJECT_DIR}"
+)
