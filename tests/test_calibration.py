@@ -28,6 +28,7 @@ except FileNotFoundError:
 
 requires_siril = pytest.mark.skipif(not SIRIL_AVAILABLE, reason="Siril not installed on this machine")
 
+from conftest import ABELL6_PROJECT_DIR, requires_abell6_project
 from conftest import NGC3628_PROJECT_DIR, requires_ngc3628_project
 from conftest import PROJECT_DIR as REAL_SESSION_DIR
 requires_real_session = pytest.mark.skipif(
@@ -82,6 +83,37 @@ def test_stage_precalibrated_lights_real_t73_produces_pp_lights_sequence(tmp_pat
         data = fits.getdata(path)
         assert data.dtype == np.dtype(">f4")
         assert not np.any(data == 0.0), f"{path.name} has exact-zero pixels -- pedestal should prevent this"
+
+
+@requires_siril
+@requires_abell6_project
+def test_stage_precalibrated_lights_debayer_real_t02_produces_3channel(tmp_path: Path) -> None:
+    """Real T02 Abell 6 and HFG1 calibrated-provenance Color BIN1 lights --
+    genuine undemosaiced Bayer-mosaic (RGGB) data, confirmed via a 2x2-phase
+    periodicity test and a leftover DeepSkyStacker config independently
+    agreeing on the same pattern (see plan-rgb-only-mode.md ??0). Confirms
+    the debayer=True path actually demosaics: MEASURED against real Siril
+    1.4.4 that plain `convert` alone leaves this 2D (BAYERPAT absent from
+    the header, so nothing marks it undemosaiced downstream unless this
+    function's debayer step runs); with debayer=True, every staged file
+    must come out genuinely 3-channel (3, ny, nx), not (ny, nx)."""
+    report = scan_session(ABELL6_PROJECT_DIR)
+    groups = report.calibrated_instrument_groups()
+    lights = groups[("T02", "Abell 6 and HFG1", "Color", 1)]
+    assert len(lights) == 7
+
+    staged = stage_precalibrated_lights(lights, tmp_path, basename="lights", debayer=True, bayer_pattern=0)
+
+    assert len(staged) == 7
+    for path in staged:
+        data = fits.getdata(path)
+        assert data.ndim == 3 and data.shape[0] == 3, f"{path.name}: expected (3, ny, nx), got {data.shape}"
+        assert data.dtype == np.dtype(">f4")
+        # Real per-channel means must differ meaningfully -- a degenerate
+        # "debayer" that just replicated one plane three times would pass
+        # a bare shape check but not this.
+        means = [float(data[c].mean()) for c in range(3)]
+        assert len(set(round(m, 6) for m in means)) == 3, f"{path.name}: channels look degenerate: {means}"
 
 
 def test_run_calibration_raises_on_missing_bias(tmp_path: Path) -> None:

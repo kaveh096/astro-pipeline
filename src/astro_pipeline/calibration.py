@@ -294,6 +294,8 @@ def stage_precalibrated_lights(
     basename: str = "lights",
     pedestal: float = DEFAULT_PEDESTAL,
     notes: list[str] | None = None,
+    debayer: bool = False,
+    bayer_pattern: int = 0,
 ) -> list[Path]:
     """Stage already-calibrated (provenance="calibrated") lights directly
     into a "pp_"-prefixed Siril sequence, bypassing bias/dark/flat
@@ -336,6 +338,24 @@ def stage_precalibrated_lights(
     for both paths rather than two, deliberately: a reader auditing "does
     pedestal apply here" should not have to check which calibration mode
     was used.
+
+    `debayer`/`bayer_pattern` (RGB-only/OSC plan, 2026-09): for a one-shot-
+    colour (OSC) delivery, each light is genuine undemosaiced Bayer-mosaic
+    sensor data, not a mono frame -- verified on real T02 Abell 6 and HFG1
+    data (2x2-phase periodicity test, corroborated by a leftover
+    DeepSkyStacker config confirming the same RGGB pattern). MEASURED
+    against the real installed Siril 1.4.4: `set debayer.use_bayer_header
+    =false` + `set debayer.pattern={bayer_pattern}` + `convert ...
+    -debayer` correctly demosaics a real frame into a genuine 3-plane
+    (3, ny, nx) float32 FITS with plausible, non-degenerate per-channel
+    stats. `use_bayer_header=false` is necessary because this data has no
+    BAYERPAT header key at all (checked directly) -- the header-read
+    default would find nothing to use. `bayer_pattern` is exposed as a
+    parameter, not hardcoded to RGGB (0), mirroring this project's
+    established never-guess-when-data-dependent convention (see
+    resolve_instrument_profile's docstring philosophy) -- a future OSC
+    telescope with a different real Bayer pattern only needs a different
+    value passed in.
     """
     if not light_frames:
         raise CalibrationFramesMissingError("No light frames provided to stage.")
@@ -343,7 +363,14 @@ def stage_precalibrated_lights(
     stage_frames([f.path for f in light_frames], stage_dir)
     convert_basename = f"pp_{basename}"
     seq = sequence_name(convert_basename)
-    run_script([f"convert {convert_basename}"], workdir=stage_dir, script_name="convert.ssf")
+    commands = []
+    if debayer:
+        commands += [
+            "set debayer.use_bayer_header=false",
+            f"set debayer.pattern={bayer_pattern}",
+        ]
+    commands.append(f"convert {convert_basename}" + (" -debayer" if debayer else ""))
+    run_script(commands, workdir=stage_dir, script_name="convert.ssf")
     staged = sorted(stage_dir.glob(f"{seq}*.fit*"))
     if not staged:
         raise RuntimeError(f"Siril reported success but no '{seq}*' files were found in {stage_dir}.")

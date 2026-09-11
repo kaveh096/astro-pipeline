@@ -210,6 +210,8 @@ def build_master(
     flat_policy: FlatPolicy,
     pedestal: float = DEFAULT_PEDESTAL,
     calibration_mode: CalibrationMode = CalibrationMode.RAW_LOCAL,
+    debayer: bool = False,
+    bayer_pattern: int = 0,
 ) -> Path:
     """Calibrate -> register+stack -> plate solve one group of raw lights.
 
@@ -279,13 +281,27 @@ def build_master(
 
     light_exptimes = {f.exptime for f in lights}
 
+    if debayer and calibration_mode != CalibrationMode.PRECALIBRATED:
+        # RGB-only/OSC plan (2026-09): no real delivery needs a debayer step
+        # on the RAW_LOCAL (local bias/dark/flat) path -- every OSC target
+        # handled so far arrives already server-side calibrated, hence
+        # PRECALIBRATED. Raise rather than silently mishandling an
+        # unverified combination.
+        raise NotImplementedError(
+            "debayer=True with calibration_mode=RAW_LOCAL is not supported -- no real "
+            "delivery needs it yet (every OSC target seen so far is PRECALIBRATED)."
+        )
+
     if calibration_mode == CalibrationMode.PRECALIBRATED:
         _log(
             f"[run ] {group_name}: staging {len(lights)} precalibrated lights "
-            "(skip bias/dark/flat)",
+            f"(skip bias/dark/flat{', debayer' if debayer else ''})",
             notes,
         )
-        stage_precalibrated_lights(lights, work_dir, basename="lights", pedestal=pedestal, notes=notes)
+        stage_precalibrated_lights(
+            lights, work_dir, basename="lights", pedestal=pedestal, notes=notes,
+            debayer=debayer, bayer_pattern=bayer_pattern,
+        )
     else:
         bias = cal_index[(telescope, "Bias", binning, 0.0)]
         dark_selection = select_dark(cal_index, telescope, binning, light_exptimes)

@@ -92,3 +92,15 @@ NGC3628_PROJECT_DIR = Path(
 requires_ngc3628_project = pytest.mark.skipif(
     not NGC3628_PROJECT_DIR.exists(), reason=f"raw project folder not present: {NGC3628_PROJECT_DIR}"
 )
+
+# Abell 6 and HFG1/T02 (Dec 2022) real delivery -- one-shot-colour (OSC),
+# genuine undemosaiced Bayer CFA data (RGGB), no Luminance filter at all --
+# the real fixture for RGB-only mode + debayer support (see
+# plan-rgb-only-mode.md). Work is done on D: per Kaveh's own instruction for
+# this target -- _pipeline/ output lives directly under this folder.
+ABELL6_PROJECT_DIR = Path(
+    r"D:\Raw Photo Backups\iTelescope\Abell 6 and HFG1 - RGB - Dec 2022"
+)
+requires_abell6_project = pytest.mark.skipif(
+    not ABELL6_PROJECT_DIR.exists(), reason=f"raw project folder not present: {ABELL6_PROJECT_DIR}"
+)
