@@ -5,7 +5,7 @@ import pytest
 from astropy.io import fits
 
 from astro_pipeline.background_color import UnknownInstrumentError
-from astro_pipeline.calibration import FlatPolicy
+from astro_pipeline.calibration import CalibrationMode, FlatPolicy
 from astro_pipeline.ingest import scan_session
 from astro_pipeline.pipeline import (
     ColourContributor,
@@ -13,6 +13,7 @@ from astro_pipeline.pipeline import (
     contributor_dir,
     contributor_fwhm_arcsec,
     discover_luminance_contributors,
+    infer_calibration_mode,
     infer_flat_policy,
     resolve_instrument_profile,
     resolve_lights,
@@ -20,7 +21,14 @@ from astro_pipeline.pipeline import (
     select_luminance_source,
 )
 
-from conftest import FINAL_DIR, PIPELINE_DIR, PROJECT_DIR as REAL_SESSION_DIR, requires
+from conftest import (
+    FINAL_DIR,
+    NGC3628_PROJECT_DIR,
+    PIPELINE_DIR,
+    PROJECT_DIR as REAL_SESSION_DIR,
+    requires,
+    requires_ngc3628_project,
+)
 
 requires_real_session = pytest.mark.skipif(
     not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine"
@@ -85,6 +93,45 @@ def test_discover_luminance_contributors_includes_caller_even_with_no_data() -> 
 
     contributors = discover_luminance_contributors(FakeReport(), "M51", "T24", 1)
     assert contributors == [("T24", 1)]
+
+
+# --- resolve_lights: calibration_mode-aware group lookup (precalibrated-
+# path plan, 2026-09) -----------------------------------------------------
+
+
+class _FakeLight:
+    def __init__(self, tag: str) -> None:
+        self.user = tag
+
+
+def test_resolve_lights_default_mode_uses_raw_instrument_groups() -> None:
+    raw_light, calibrated_light = _FakeLight("raw"), _FakeLight("calibrated")
+
+    class FakeReport:
+        def instrument_groups(self):
+            return {("T73", "NGC 3628", "Red", 2): [raw_light]}
+
+        def calibrated_instrument_groups(self):
+            return {("T73", "NGC 3628", "Red", 2): [calibrated_light]}
+
+    lights, _ = resolve_lights(FakeReport(), "T73", "NGC 3628", "Red", 2)
+    assert lights == [raw_light]
+
+
+def test_resolve_lights_precalibrated_mode_uses_calibrated_instrument_groups() -> None:
+    raw_light, calibrated_light = _FakeLight("raw"), _FakeLight("calibrated")
+
+    class FakeReport:
+        def instrument_groups(self):
+            return {("T73", "NGC 3628", "Red", 2): [raw_light]}
+
+        def calibrated_instrument_groups(self):
+            return {("T73", "NGC 3628", "Red", 2): [calibrated_light]}
+
+    lights, _ = resolve_lights(
+        FakeReport(), "T73", "NGC 3628", "Red", 2, calibration_mode=CalibrationMode.PRECALIBRATED
+    )
+    assert lights == [calibrated_light]
 
 
 @requires_real_session
@@ -359,6 +406,80 @@ def test_infer_flat_policy_real_data_t21_requires_t24_skips() -> None:
     report = scan_session(REAL_SESSION_DIR)
     assert infer_flat_policy(report, "T21") == FlatPolicy.REQUIRE
     assert infer_flat_policy(report, "T24") == FlatPolicy.SKIP_IF_MISSING
+
+
+# --- infer_calibration_mode (precalibrated-path plan, 2026-09) -------------
+
+
+class _FakeCalReport:
+    """Just enough of IngestReport's shape for infer_calibration_mode --
+    fixed calibration_index()/calibrated_instrument_groups() return
+    values, no real ingest/FITS needed."""
+
+    def __init__(self, cal_index: dict, calibrated_groups: dict) -> None:
+        self._cal_index = cal_index
+        self._calibrated_groups = calibrated_groups
+
+    def calibration_index(self):
+        return self._cal_index
+
+    def calibrated_instrument_groups(self):
+        return self._calibrated_groups
+
+
+def test_infer_calibration_mode_raw_local_when_bias_and_dark_present() -> None:
+    """T24/T21's real shape: real Bias+Dark -> RAW_LOCAL, unconditionally,
+    regardless of whether calibrated-provenance lights also happen to
+    exist (a real delivery bundles both)."""
+    report = _FakeCalReport(
+        cal_index={("T24", "Bias", 1, 0.0): ["b"], ("T24", "Dark", 1, 300.0): ["d"]},
+        calibrated_groups={("T24", "M51", "Luminance", 1): ["light"]},
+    )
+    assert infer_calibration_mode(report, "T24") == CalibrationMode.RAW_LOCAL
+
+
+def test_infer_calibration_mode_precalibrated_when_bias_missing_and_calibrated_lights_present() -> None:
+    """T73's real shape: zero Bias, zero Dark, real calibrated-provenance
+    lights present -> PRECALIBRATED."""
+    report = _FakeCalReport(
+        cal_index={},
+        calibrated_groups={("T73", "NGC 3628", "Luminance", 1): ["light"]},
+    )
+    assert infer_calibration_mode(report, "T73") == CalibrationMode.PRECALIBRATED
+
+
+def test_infer_calibration_mode_raw_local_when_neither_local_nor_calibrated_data_exists() -> None:
+    """No local bias/dark AND no calibrated-provenance lights either -- an
+    incomplete delivery with nothing safe to infer from, not the same as
+    T73's real situation. Stays RAW_LOCAL deliberately, so it fails loudly
+    (CalibrationFramesMissingError downstream) rather than silently
+    resolving to a mode with no real data behind it."""
+    report = _FakeCalReport(cal_index={}, calibrated_groups={})
+    assert infer_calibration_mode(report, "T99") == CalibrationMode.RAW_LOCAL
+
+
+def test_infer_calibration_mode_raw_local_when_only_dark_missing() -> None:
+    """Bias present but Dark missing, no calibrated-provenance fallback --
+    still RAW_LOCAL (fails loudly downstream via select_dark, not a silent
+    mode switch) since there's nothing precalibrated to fall back to."""
+    report = _FakeCalReport(
+        cal_index={("T99", "Bias", 1, 0.0): ["b"]},
+        calibrated_groups={},
+    )
+    assert infer_calibration_mode(report, "T99") == CalibrationMode.RAW_LOCAL
+
+
+@requires_ngc3628_project
+def test_infer_calibration_mode_real_data_t73_precalibrated_t24_raw_local() -> None:
+    """The actual real-data claim this plan exists to satisfy: T73 (NGC
+    3628, Feb 2025) ships zero recognized Bias/Dark and real calibrated-
+    provenance lights -> PRECALIBRATED. T24 (M51, real Bias+Dark, a
+    different project folder) -> RAW_LOCAL, unaffected."""
+    ngc3628_report = scan_session(NGC3628_PROJECT_DIR)
+    assert infer_calibration_mode(ngc3628_report, "T73") == CalibrationMode.PRECALIBRATED
+
+    m51_report = scan_session(REAL_SESSION_DIR)
+    assert infer_calibration_mode(m51_report, "T24") == CalibrationMode.RAW_LOCAL
 
 
 # --- Slice 3.2: a partial R/G/B set logs and skips, does not abort the run -

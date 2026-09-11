@@ -114,7 +114,14 @@ from .background_color import (
     run_graxpert_background_extraction,
     run_spcc,
 )
-from .calibration import DEFAULT_PEDESTAL, FlatPolicy, select_dark, run_calibration
+from .calibration import (
+    DEFAULT_PEDESTAL,
+    CalibrationMode,
+    FlatPolicy,
+    select_dark,
+    run_calibration,
+    stage_precalibrated_lights,
+)
 from .export_image import ExportResult, export
 from .ingest import CalibrationFrame, scan_session
 from .checkpoints import Checkpoint, checkpoint, save_checkpoints, _pixel_scale_arcsec
@@ -202,6 +209,7 @@ def build_master(
     flat_frames: list[CalibrationFrame],
     flat_policy: FlatPolicy,
     pedestal: float = DEFAULT_PEDESTAL,
+    calibration_mode: CalibrationMode = CalibrationMode.RAW_LOCAL,
 ) -> Path:
     """Calibrate -> register+stack -> plate solve one group of raw lights.
 
@@ -248,6 +256,19 @@ def build_master(
     stale master when `pedestal` (or the matched flat set) changes,
     forcing this function to rebuild it rather than silently keep serving
     the old file.
+
+    `calibration_mode` (precalibrated-path plan, 2026-09): RAW_LOCAL is
+    today's only behaviour, unconditionally the default, byte-unchanged.
+    PRECALIBRATED skips the bias/dark/flat block below entirely and stages
+    already-calibrated (provenance="calibrated") lights directly via
+    `stage_precalibrated_lights()` -- for a delivery with no local Dark
+    frames at all because iTelescope already calibrated server-side (real
+    case: NGC 3628/T73). `cal_index`/`flat_frames`/`flat_policy` are never
+    read in that branch; callers pass `{}`/`[]`/`FlatPolicy.SKIP_IF_MISSING`
+    as inert placeholders (see plan-precalibrated-path.md ??3.4). Everything
+    from `register_and_stack(...)` onward is calibration-mode-agnostic --
+    it only cares that a Siril sequence literally named "pp_lights_" exists
+    in `work_dir / "lights"`, which both branches produce.
     """
     work_dir = pipeline_dir(project_dir) / group_name
     master_path = work_dir / "lights" / f"master_{filter_name.lower()}.fit"
@@ -257,30 +278,39 @@ def build_master(
         return master_path
 
     light_exptimes = {f.exptime for f in lights}
-    bias = cal_index[(telescope, "Bias", binning, 0.0)]
-    dark_selection = select_dark(cal_index, telescope, binning, light_exptimes)
 
-    exptimes_str = ", ".join(f"{e:.0f}s" for e in sorted(light_exptimes))
-    scaling_note = (
-        f", scaled from {dark_selection.exptime:.0f}s via -opt=exp" if dark_selection.scaled else ""
-    )
-    flat_note = f", {len(flat_frames)} {filter_name} flat" if flat_frames else ""
-    _log(
-        f"[run ] {group_name}: calibrating {len(lights)} lights at {exptimes_str} "
-        f"({len(bias)} bias, {len(dark_selection.frames)} dark{scaling_note}{flat_note})",
-        notes,
-    )
-    calibration_result = run_calibration(
-        lights, bias, dark_selection.frames, work_dir=work_dir,
-        flat_frames=flat_frames, flat_policy=flat_policy,
-        dark_scaled=dark_selection.scaled, pedestal=pedestal, notes=notes,
-    )
-    if flat_frames:
+    if calibration_mode == CalibrationMode.PRECALIBRATED:
         _log(
-            f"       {group_name}: flat_corrected={calibration_result.flat_corrected} "
-            f"(matched {len(flat_frames)} {filter_name} flat frame(s))",
+            f"[run ] {group_name}: staging {len(lights)} precalibrated lights "
+            "(skip bias/dark/flat)",
             notes,
         )
+        stage_precalibrated_lights(lights, work_dir, basename="lights", pedestal=pedestal, notes=notes)
+    else:
+        bias = cal_index[(telescope, "Bias", binning, 0.0)]
+        dark_selection = select_dark(cal_index, telescope, binning, light_exptimes)
+
+        exptimes_str = ", ".join(f"{e:.0f}s" for e in sorted(light_exptimes))
+        scaling_note = (
+            f", scaled from {dark_selection.exptime:.0f}s via -opt=exp" if dark_selection.scaled else ""
+        )
+        flat_note = f", {len(flat_frames)} {filter_name} flat" if flat_frames else ""
+        _log(
+            f"[run ] {group_name}: calibrating {len(lights)} lights at {exptimes_str} "
+            f"({len(bias)} bias, {len(dark_selection.frames)} dark{scaling_note}{flat_note})",
+            notes,
+        )
+        calibration_result = run_calibration(
+            lights, bias, dark_selection.frames, work_dir=work_dir,
+            flat_frames=flat_frames, flat_policy=flat_policy,
+            dark_scaled=dark_selection.scaled, pedestal=pedestal, notes=notes,
+        )
+        if flat_frames:
+            _log(
+                f"       {group_name}: flat_corrected={calibration_result.flat_corrected} "
+                f"(matched {len(flat_frames)} {filter_name} flat frame(s))",
+                notes,
+            )
 
     n = len(lights)
     filter_fwhm_pct = 90.0 if n >= 10 else None
@@ -478,9 +508,14 @@ def discover_luminance_contributors(
 
 
 def resolve_lights(
-    report, telescope: str, target: str, filter_name: str, binning: int
+    report,
+    telescope: str,
+    target: str,
+    filter_name: str,
+    binning: int,
+    calibration_mode: CalibrationMode = CalibrationMode.RAW_LOCAL,
 ) -> tuple[list, str]:
-    """Look up the raw lights for one (telescope, target, filter, binning)
+    """Look up the lights for one (telescope, target, filter, binning)
     unit -- merged across every user who contributed to it (see
     IngestReport.instrument_groups()) -- and derive a stable, descriptive
     group name from whoever those users turn out to be.
@@ -489,8 +524,20 @@ def resolve_lights(
     collapses to exactly the old per-user group name, so existing
     fixtures/tests that assume e.g. "T24-kaveh096-M51-Red-bin2" keep
     working unchanged.
+
+    `calibration_mode` (precalibrated-path plan, 2026-09): RAW_LOCAL (the
+    default, byte-unchanged) looks up `report.instrument_groups()` (raw
+    provenance only). PRECALIBRATED looks up
+    `report.calibrated_instrument_groups()` instead -- the mirror view
+    over "calibrated" provenance -- for a telescope whose lights are used
+    directly, without local bias/dark/flat calibration.
     """
-    lights = report.instrument_groups().get((telescope, target, filter_name, binning), [])
+    groups = (
+        report.calibrated_instrument_groups()
+        if calibration_mode == CalibrationMode.PRECALIBRATED
+        else report.instrument_groups()
+    )
+    lights = groups.get((telescope, target, filter_name, binning), [])
     users = sorted({frame.user for frame in lights})
     group_name = group_name_for(telescope, "+".join(users), target, filter_name, binning)
     return lights, group_name
@@ -570,6 +617,40 @@ def infer_flat_policy(report, telescope: str) -> FlatPolicy:
     return FlatPolicy.REQUIRE if has_any_flat else FlatPolicy.SKIP_IF_MISSING
 
 
+def infer_calibration_mode(report, telescope: str) -> CalibrationMode:
+    """Precalibrated-path plan's default `CalibrationMode` for `telescope`,
+    mirroring `infer_flat_policy`'s own pattern: inferred from what the
+    data actually has, not hardcoded by telescope name, with an explicit
+    per-telescope override escape hatch in `run_lrgb`.
+
+    `CalibrationMode.PRECALIBRATED` if `telescope` has zero Bias-or-Dark
+    frames of any kind (raw+local calibration structurally cannot work --
+    `run_calibration` would raise `CalibrationFramesMissingError` before
+    ever reaching registration) AND has at least one "calibrated"-
+    provenance light group (there is something to fall back to). Real
+    case: NGC 3628/T73 (Feb 2025) -- zero recognized Bias/Dark, both
+    raw- and calibrated- provenance copies of every light delivered.
+
+    `CalibrationMode.RAW_LOCAL` otherwise -- unconditionally the default
+    for every telescope with real Bias+Dark (T24, T21), unchanged from
+    before this function existed. A delivery with neither local
+    bias/dark NOR any calibrated-provenance lights also resolves
+    RAW_LOCAL, deliberately: that combination has nothing this function
+    can safely infer its way out of, so it stays on the path that fails
+    loudly (`CalibrationFramesMissingError`) instead of silently
+    resolving to a mode with no real data behind it either.
+    """
+    cal_index = report.calibration_index()
+    has_bias = any(key[0] == telescope and key[1] == "Bias" for key in cal_index)
+    has_dark = any(key[0] == telescope and key[1] == "Dark" for key in cal_index)
+    has_calibrated_lights = any(
+        key[0] == telescope for key in report.calibrated_instrument_groups()
+    )
+    if (not has_bias or not has_dark) and has_calibrated_lights:
+        return CalibrationMode.PRECALIBRATED
+    return CalibrationMode.RAW_LOCAL
+
+
 def contributor_dir(final: Path, telescope: str, binning: int, rgb_binning: int) -> Path:
     """Where one RGB contributor's per-binning files live (Slice 3.3).
 
@@ -602,6 +683,7 @@ def _build_colour_contributor(
     dec_deg: float,
     notes: list[str],
     flat_policy: FlatPolicy = FlatPolicy.SKIP_IF_MISSING,
+    calibration_mode: CalibrationMode = CalibrationMode.RAW_LOCAL,
 ) -> ColourContributor | None:
     """Build one binning's R/G/B masters, align + crop + composite them,
     then background-extract and colour-calibrate -- everything the
@@ -626,6 +708,17 @@ def _build_colour_contributor(
     so a caller that doesn't pass one explicitly still proceeds without a
     hard flat requirement, matching every real colour-contributor
     telescope's situation before this slice.
+
+    `calibration_mode` (precalibrated-path plan, 2026-09): threaded in
+    from run_lrgb's own per-telescope inference/override (see
+    infer_calibration_mode), same pattern as `flat_policy`. Under
+    PRECALIBRATED, `resolve_lights()` looks up calibrated-provenance
+    groups instead of raw ones, flat lookup is skipped entirely (never
+    consulted for a precalibrated group -- the frames are already
+    flat-corrected upstream, see stage_precalibrated_lights()'s
+    docstring), and `build_master()` is called with placeholder
+    `cal_index={}`/`flat_frames=[]`/`flat_policy=FlatPolicy.SKIP_IF_MISSING`
+    (never read inside its PRECALIBRATED branch).
     """
     contrib_dir.mkdir(parents=True, exist_ok=True)
     cal_index = report.calibration_index()
@@ -634,7 +727,9 @@ def _build_colour_contributor(
     sub_count = 0
     stack_total = 0
     for filter_name in RGB_FILTERS:
-        lights, group_name = resolve_lights(report, telescope, target, filter_name, binning)
+        lights, group_name = resolve_lights(
+            report, telescope, target, filter_name, binning, calibration_mode=calibration_mode
+        )
         if not lights:
             _log(
                 f"[skip] BIN{binning}: no {filter_name} lights found for {telescope}/{target} "
@@ -644,12 +739,20 @@ def _build_colour_contributor(
             )
             return None
         sub_count += len(lights)
-        flat_frames = report.flat_index().get((telescope, binning, filter_name), [])
-        master_path = build_master(
-            project_dir, lights, cal_index, group_name, filter_name,
-            telescope, binning, ra_hours, dec_deg, notes,
-            flat_frames=flat_frames, flat_policy=flat_policy,
-        )
+        if calibration_mode == CalibrationMode.PRECALIBRATED:
+            master_path = build_master(
+                project_dir, lights, {}, group_name, filter_name,
+                telescope, binning, ra_hours, dec_deg, notes,
+                flat_frames=[], flat_policy=FlatPolicy.SKIP_IF_MISSING,
+                calibration_mode=calibration_mode,
+            )
+        else:
+            flat_frames = report.flat_index().get((telescope, binning, filter_name), [])
+            master_path = build_master(
+                project_dir, lights, cal_index, group_name, filter_name,
+                telescope, binning, ra_hours, dec_deg, notes,
+                flat_frames=flat_frames, flat_policy=flat_policy,
+            )
         channel_masters[filter_name] = master_path
         stack_total += int(fits.getheader(master_path).get("STACKCNT", len(lights)))
 
@@ -802,13 +905,19 @@ def _clear_colour_contributor_products(
     telescope: str,
     target: str,
     binning: int,
+    calibration_mode: CalibrationMode = CalibrationMode.RAW_LOCAL,
 ) -> list[Path]:
     """Delete one colour contributor's raw R/G/B masters AND its own
     build products (rgb_native.fit onward), so _build_colour_contributor
     rebuilds it cleanly from scratch rather than mixing freshly-rebuilt
     masters with stale downstream products from the old ones. Returns the
     paths actually deleted, for logging by the caller (which knows the
-    human-readable BIN{n} label this function doesn't)."""
+    human-readable BIN{n} label this function doesn't).
+
+    `calibration_mode` mirrors _build_colour_contributor's own parameter
+    (precalibrated-path plan) so the group_name/master_path computed here
+    matches whichever provenance _build_colour_contributor will actually
+    rebuild from."""
     deleted: list[Path] = []
     for name in (
         "rgb_native.fit", "red.fit", "green.fit", "blue.fit",
@@ -819,7 +928,9 @@ def _clear_colour_contributor_products(
             candidate.unlink()
             deleted.append(candidate)
     for filter_name in RGB_FILTERS:
-        _, group_name = resolve_lights(report, telescope, target, filter_name, binning)
+        _, group_name = resolve_lights(
+            report, telescope, target, filter_name, binning, calibration_mode=calibration_mode
+        )
         master_path = pipeline_dir(project_dir) / group_name / "lights" / f"master_{filter_name.lower()}.fit"
         if master_path.exists():
             master_path.unlink()
@@ -841,6 +952,7 @@ def run_lrgb(
     stop_after: str | None = None,
     force: set[str] | None = None,
     flat_policy: FlatPolicy | None = None,
+    calibration_mode: dict[str, CalibrationMode] | None = None,
 ) -> PipelineResult:
     """`lum_source`, if given, names an explicit `(telescope, binning)`
     among the discovered Luminance contributors to drive the composite --
@@ -908,6 +1020,18 @@ def run_lrgb(
     each telescope gets its own inferred policy: T21 (ships flats for all
     11 filters at BIN1 in this delivery) defaults to REQUIRE, T24 (ships
     none) defaults to SKIP_IF_MISSING.
+
+    `calibration_mode` (precalibrated-path plan, 2026-09), when given, is a
+    PER-TELESCOPE override dict (`{telescope: CalibrationMode}`) -- unlike
+    `flat_policy`'s single uniform override, precalibrated-vs-raw is
+    fundamentally a per-telescope data-availability fact, not a
+    quick-test-override convenience. A telescope not present in the dict
+    (or when `calibration_mode` is left `None`) gets its own inferred mode
+    from `infer_calibration_mode` -- PRECALIBRATED only if this telescope
+    has zero local Bias-or-Dark frames of any kind AND has calibrated-
+    provenance lights to fall back to (real case: NGC 3628/T73); every
+    telescope with real Bias+Dark (T24, T21) is unaffected, unconditionally
+    RAW_LOCAL.
     """
     if stop_after is not None and stop_after not in STAGE_ORDER:
         raise ValueError(f"stop_after={stop_after!r} is not one of {STAGE_ORDER}")
@@ -956,12 +1080,18 @@ def run_lrgb(
     lum_frame_hashes: dict[str, str] = {}
     lum_flat_frame_hashes: dict[str, str] = {}
     lum_stackcnt: dict[str, int] = {}
+    lum_calibration_modes: dict[str, str] = {}
     for lum_telescope, contrib_lum_binning in lum_contributors:
         lum_key = (lum_telescope, contrib_lum_binning)
         lum_label = f"Luminance-{lum_telescope}-bin{contrib_lum_binning}"
         contributor_key = f"{lum_telescope}_bin{contrib_lum_binning}"
+        lum_calibration_mode = (calibration_mode or {}).get(
+            lum_telescope, infer_calibration_mode(report, lum_telescope)
+        )
+        lum_calibration_modes[contributor_key] = lum_calibration_mode.value
         lum_lights, lum_group_name = resolve_lights(
-            report, lum_telescope, target, LUMINANCE_FILTER, contrib_lum_binning
+            report, lum_telescope, target, LUMINANCE_FILTER, contrib_lum_binning,
+            calibration_mode=lum_calibration_mode,
         )
         frame_hash = frame_identity_hash([f.path.name for f in lum_lights])
         lum_frame_hashes[contributor_key] = frame_hash
@@ -973,10 +1103,23 @@ def run_lrgb(
         # telescope ships ANY flat at all (T21's real case), else
         # SKIP_IF_MISSING (T24's), unless `flat_policy` was explicitly
         # passed to override uniformly for the whole run.
-        lum_flat_frames = report.flat_index().get(
-            (lum_telescope, contrib_lum_binning, LUMINANCE_FILTER), []
-        )
-        lum_flat_policy = flat_policy if flat_policy is not None else infer_flat_policy(report, lum_telescope)
+        #
+        # Precalibrated-path plan: a PRECALIBRATED telescope's flats are
+        # never consulted at all (already flat-corrected upstream, see
+        # stage_precalibrated_lights()'s docstring) -- calling
+        # infer_flat_policy on it would be misleading, since T73 DOES ship
+        # (BIN1-only) flats and would report REQUIRE despite this run path
+        # never using them.
+        if lum_calibration_mode == CalibrationMode.PRECALIBRATED:
+            lum_flat_frames: list = []
+            lum_flat_policy = FlatPolicy.SKIP_IF_MISSING
+        else:
+            lum_flat_frames = report.flat_index().get(
+                (lum_telescope, contrib_lum_binning, LUMINANCE_FILTER), []
+            )
+            lum_flat_policy = (
+                flat_policy if flat_policy is not None else infer_flat_policy(report, lum_telescope)
+            )
         lum_flat_frame_hash = _flat_frame_hash(lum_flat_frames)
         lum_flat_frame_hashes[contributor_key] = lum_flat_frame_hash
 
@@ -1008,6 +1151,7 @@ def run_lrgb(
             project_dir, lum_lights, cal_index, lum_group_name, LUMINANCE_FILTER,
             lum_telescope, contrib_lum_binning, ra_hours, dec_deg, notes,
             flat_frames=lum_flat_frames, flat_policy=lum_flat_policy, pedestal=pedestal,
+            calibration_mode=lum_calibration_mode,
         )
         result.masters[lum_label] = lum_master_path
         lum_stackcnt[contributor_key] = int(fits.getheader(lum_master_path).get("STACKCNT", len(lum_lights)))
@@ -1050,9 +1194,17 @@ def run_lrgb(
 
     # Slice 2.2: colour discovery is hard-scoped to the caller's own
     # `telescope` (see module docstring / plan-flats-v3.md fact 11), so
-    # there is exactly one telescope's worth of flat policy to infer here,
-    # computed once rather than per-binning.
-    colour_flat_policy = flat_policy if flat_policy is not None else infer_flat_policy(report, telescope)
+    # there is exactly one telescope's worth of flat policy (and,
+    # precalibrated-path plan, calibration mode) to infer here, computed
+    # once rather than per-binning.
+    colour_calibration_mode = (calibration_mode or {}).get(
+        telescope, infer_calibration_mode(report, telescope)
+    )
+    colour_flat_policy = (
+        FlatPolicy.SKIP_IF_MISSING
+        if colour_calibration_mode == CalibrationMode.PRECALIBRATED
+        else (flat_policy if flat_policy is not None else infer_flat_policy(report, telescope))
+    )
 
     contributors: list[ColourContributor] = []
     colour_frame_hashes: dict[str, str] = {}
@@ -1084,7 +1236,8 @@ def run_lrgb(
         )
         if needs_full_rebuild:
             deleted = _clear_colour_contributor_products(
-                contrib_dir, project_dir, report, telescope, target, binning
+                contrib_dir, project_dir, report, telescope, target, binning,
+                calibration_mode=colour_calibration_mode,
             )
             if deleted:
                 _log(
@@ -1104,6 +1257,7 @@ def run_lrgb(
         contributor = _build_colour_contributor(
             project_dir, contrib_dir, report, telescope, target, binning,
             ra_hours, dec_deg, notes, flat_policy=colour_flat_policy,
+            calibration_mode=colour_calibration_mode,
         )
         if contributor is None:
             # Logged inside _build_colour_contributor already (Slice 3.2:
@@ -1155,6 +1309,7 @@ def run_lrgb(
             key: ContributorSignature(
                 key=key, stackcnt=lum_stackcnt[key], frame_hash=lum_frame_hashes[key],
                 flat_frame_hash=lum_flat_frame_hashes[key],
+                calibration_mode=lum_calibration_modes[key],
             )
             for key in lum_frame_hashes
         },
@@ -1164,6 +1319,7 @@ def run_lrgb(
                 key=c.key, stackcnt=c.stack_total, frame_hash=colour_frame_hashes[c.key],
                 flat_frame_hash=colour_flat_frame_hashes[c.key],
                 spcc_profile=profile_tuple,
+                calibration_mode=colour_calibration_mode.value,
             )
             for c in contributors
         },
