@@ -137,6 +137,11 @@ with a full R/G/B set for the primary telescope.
   (`01_master_luminance`, and `02_primary_rgb_colour_calibrated` once
   every colour contributor for the primary telescope is done) -- each
   with background/noise/SNR/star-count/warnings.
+  **RGB-only mode**: if the scan found no Luminance data for this target
+  on any telescope (a one-shot-colour/OSC delivery, e.g. no filter but
+  "Color" -- `run_lrgb` detects this automatically, no parameter to set),
+  checkpoint `01_master_luminance` never appears -- only `02_primary_rgb_
+  colour_calibrated`. This is expected, not a partial/failed run.
 - The `=== PREVIEWS ===` section lists each checkpoint's preview PNG path.
   **Actually look at them** — use the Read tool on each preview path
   before presenting the checkpoint, the same way a human would look at a
@@ -154,6 +159,13 @@ Abort     -- stop here; nothing further runs, whatever's on disk stays
              exactly as-is (run_lrgb's own resumability covers this --
              no extra cleanup needed)
 ```
+For an RGB-only run (no Luminance data found for this target on any
+telescope -- `run_lrgb` detects this automatically, nothing to set), drop
+the "Luminance:" line and the "Adjust" option entirely (there is no
+Luminance source to override): `[Masters built. RGB-only: no Luminance data
+found for this target. Colour contributor: T02_bin1 (6 stacked subs).]` --
+"Proceed" reads "advance to the final stretch + export" (RGB-only has no
+reconciliation-against-Luminance step, see Step 3 below).
 
 **Adjust**, if chosen: ask which `(telescope, binning)` should drive the
 composite instead (must be one of the Luminance contributors actually
@@ -195,14 +207,22 @@ deliberately still overriding). This adds L background extraction and,
 when there's more than one colour contributor, the reprojection + gain/
 offset match + STACKCNT-weighted combine (Slice 3.4/3.5).
 
-Relay from `=== NOTES ===`:
+**RGB-only mode**: no L background extraction happens (there is no L),
+and with the single supported RGB-only shape (exactly one colour
+contributor, see Step 2's note) there is nothing to reconcile against
+either -- `rgb_reconciled.fit` is just the one contributor's output,
+copied through. Checkpoint `03_lum_background_extracted` never appears;
+only `04_rgb_reconciled` does. Skip straight to that checkpoint below.
+
+Relay from `=== NOTES ===` (Luminance-driven runs only -- RGB-only has
+no gain/offset fit to relay, since there is nothing to reconcile):
 - the designated gain/offset reference (`highest STACKCNT wins`);
 - each non-reference contributor's fitted gain and background numbers
   (`gain=... on N high-signal px`);
 - the combine weights actually used.
 
 Look at the `03_lum_background_extracted` and `04_rgb_reconciled`
-checkpoint previews.
+checkpoint previews (RGB-only: `04_rgb_reconciled` only).
 
 **Menu:**
 ```
@@ -236,10 +256,16 @@ On Proceed from Step 3, re-run with `--stop-after final` (or omit
 the reconciled RGB (per `stretch_method`), composes via `rgbcomp -lum=`,
 and exports the 16-bit TIFF + faithful preview PNG.
 
-Relay the `05_lrgb_final` checkpoint (this one renders FAITHFULLY, not
-autostretched for display -- if it looks too dark or too flat, that is
-real information about the chosen `stretch_method`, not a preview
-artifact) and look at its preview PNG.
+**RGB-only mode**: no L to compose with -- the reconciled RGB alone gets
+stretched and exported directly, no `rgbcomp -lum=` call. The checkpoint
+label is `05_rgb_final` (not `05_lrgb_final`), and the output file is
+named `<target>_rgb.fit`/`.tif` (not `<target>_lrgb...`) -- an RGB-only
+run producing a file literally named "lrgb" would be misleading on disk.
+
+Relay the `05_lrgb_final` checkpoint (RGB-only: `05_rgb_final` -- this
+one renders FAITHFULLY, not autostretched for display -- if it looks too
+dark or too flat, that is real information about the chosen
+`stretch_method`, not a preview artifact) and look at its preview PNG.
 
 **Menu:**
 ```
@@ -255,7 +281,8 @@ Abort          -- stop here
 
 Report, plainly:
 - the exported TIFF path (`TIFF` line from `run_stage.py`'s output --
-  named `<target>_lrgb.tif`, e.g. `M51_lrgb.tif`, not a hardcoded stem);
+  named `<target>_lrgb.tif`, e.g. `M51_lrgb.tif`, not a hardcoded stem;
+  RGB-only mode: `<target>_rgb.tif`, e.g. `Abell 6 and HFG1_rgb.tif`);
 - the faithful preview PNG path, for a quick look without opening
   Photoshop;
 - clipped-low/clipped-high fractions from the export, if either is

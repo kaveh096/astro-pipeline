@@ -20,6 +20,7 @@ from astro_pipeline.pipeline import (
     run_lrgb,
     select_luminance_source,
 )
+from astro_pipeline.siril_driver import find_siril_cli
 
 from conftest import (
     FINAL_DIR,
@@ -33,6 +34,13 @@ from conftest import (
 requires_real_session = pytest.mark.skipif(
     not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine"
 )
+
+try:
+    find_siril_cli()
+    SIRIL_AVAILABLE = True
+except FileNotFoundError:
+    SIRIL_AVAILABLE = False
+requires_siril = pytest.mark.skipif(not SIRIL_AVAILABLE, reason="Siril not installed on this machine")
 
 
 # --- 1.1 multi-telescope Luminance discovery --------------------------------
@@ -740,3 +748,169 @@ def test_run_lrgb_force_final_only_touches_final_not_reconciled_or_masters() -> 
     assert (FINAL_DIR / "lrgb_final.fit").stat().st_mtime != final_before
     assert (FINAL_DIR / "rgb_reconciled.fit").stat().st_mtime == reconciled_before
     assert (FINAL_DIR / "lum_bg.fits").stat().st_mtime == lum_bg_before
+
+
+# --- RGB-only mode (2026-09): a target with zero Luminance data on any -----
+# --- telescope (real case: Abell 6 and HFG1, T02, one-shot-colour) --------
+
+
+@requires_siril
+def test_run_lrgb_rgb_only_full_run_no_luminance_no_crash(tmp_path: Path, monkeypatch) -> None:
+    """Real integration-style test, exercising the exact code path that had
+    THREE real crash bugs found by adversarial review before this test was
+    written (see plan-rgb-only-mode.md ??6b): a bare TypeError in
+    RunSignature construction (`selected_key[0]` on None), a NameError on
+    `lum_for_compose_path` (referenced outside both of its guarding
+    branches), and the original IndexError in select_luminance_source
+    itself. A fake report with zero Luminance data and one mono RGB
+    contributor (monkeypatched _build_colour_contributor -- avoids real
+    Siril/GraXpert/SPCC for the colour BUILD step, but stretch_rgb() at
+    the end still runs a REAL Siril autostretch call on a tiny synthetic
+    composite, so this is gated on requires_siril, not a pure unit test)
+    drives a full run_lrgb() call end to end and asserts the RGB-only
+    control flow (skip checkpoints 01/03, single-contributor rgb_reconciled
+    = direct copy, checkpoint 05_rgb_final not 05_lrgb_final, export stem
+    "<target>_rgb" not "<target>_lrgb") all actually happened.
+    """
+    import astro_pipeline.pipeline as pipeline_module
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "kaveh096") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    class _FakeReport:
+        def instrument_groups(self):
+            # No Luminance filter group at all for this target -- the real
+            # Abell 6/T02 shape.
+            return {
+                ("T02", "Abell 6 and HFG1", "Red", 1): [_FakeLightFrame("r.fit")],
+                ("T02", "Abell 6 and HFG1", "Green", 1): [_FakeLightFrame("g.fit")],
+                ("T02", "Abell 6 and HFG1", "Blue", 1): [_FakeLightFrame("b.fit")],
+            }
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            # Real Bias+Dark present -> infer_calibration_mode resolves
+            # RAW_LOCAL for T02 in this fake -- irrelevant to what this test
+            # actually exercises (the RGB-only control flow), since
+            # _build_colour_contributor is monkeypatched wholesale below and
+            # never reads this.
+            return {("T02", "Bias", 1, 0.0): ["b"], ("T02", "Dark", 1, 300.0): ["d"]}
+
+        def flat_index(self):
+            return {}
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+
+    # A real, tiny, readable 3-channel FITS -- what a real ColourContributor's
+    # composite_path would point to (rgb_colour_calibrated.fit shape).
+    stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
+    data = np.random.default_rng(0).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+    fits.PrimaryHDU(data=data).writeto(stub_composite)
+
+    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
+        # Real _build_colour_contributor writes rgb_colour_calibrated.fit
+        # into contrib_dir before returning -- checkpoint 02's emission is
+        # gated on that file existing on disk (primary_calibrated.exists()),
+        # so the mock must reproduce that side effect, not just the return
+        # value.
+        contrib_dir.mkdir(parents=True, exist_ok=True)
+        import shutil as _shutil
+        _shutil.copy2(stub_composite, contrib_dir / "rgb_colour_calibrated.fit")
+        return ColourContributor(
+            telescope=telescope, binning=binning, composite_path=stub_composite,
+            sub_count=7, stack_total=6,
+        )
+
+    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    result = run_lrgb(
+        project_dir, telescope="T02", target="Abell 6 and HFG1", ra_hours=3.02, dec_deg=64.70,
+        lum_binning=1, rgb_binning=1,
+    )
+
+    assert "Luminance" not in result.masters
+    checkpoint_labels = [cp.label for cp in result.checkpoints]
+    assert "01_master_luminance" not in checkpoint_labels
+    assert "03_lum_background_extracted" not in checkpoint_labels
+    assert "02_primary_rgb_colour_calibrated" in checkpoint_labels
+    assert "04_rgb_reconciled" in checkpoint_labels
+    assert "05_rgb_final" in checkpoint_labels
+    assert "05_lrgb_final" not in checkpoint_labels
+
+    assert result.composite_path is not None
+    assert result.composite_path.name == "rgb_final.fit"
+    assert result.export_result is not None
+    assert result.export_result.tiff_path.name == "Abell 6 and HFG1_rgb.tif"
+
+    signature_path = project_dir / "_pipeline" / "run_signature.json"
+    assert signature_path.exists()
+    import json
+    persisted = json.loads(signature_path.read_text(encoding="utf-8"))
+    assert persisted["luminance_selected"] == ""
+    assert persisted["luminance"] == {}
+
+
+def test_run_lrgb_rgb_only_multi_contributor_raises_not_implemented(tmp_path: Path, monkeypatch) -> None:
+    """The deferred multi-contributor RGB-only case (plan-rgb-only-mode.md
+    ??7 non-goal) must fail loudly, not silently attempt an unverified
+    combine. Pure unit test -- no real Siril needed, since the
+    NotImplementedError fires before any reprojection/stretch call."""
+    import astro_pipeline.pipeline as pipeline_module
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "kaveh096") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    class _FakeReport:
+        def instrument_groups(self):
+            return {
+                ("T02", "Fake Target", "Red", 1): [_FakeLightFrame("r1.fit")],
+                ("T02", "Fake Target", "Green", 1): [_FakeLightFrame("g1.fit")],
+                ("T02", "Fake Target", "Blue", 1): [_FakeLightFrame("b1.fit")],
+                ("T02", "Fake Target", "Red", 2): [_FakeLightFrame("r2.fit")],
+                ("T02", "Fake Target", "Green", 2): [_FakeLightFrame("g2.fit")],
+                ("T02", "Fake Target", "Blue", 2): [_FakeLightFrame("b2.fit")],
+            }
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {("T02", "Bias", 1, 0.0): ["b"], ("T02", "Dark", 1, 300.0): ["d"],
+                     ("T02", "Bias", 2, 0.0): ["b"], ("T02", "Dark", 2, 300.0): ["d"]}
+
+        def flat_index(self):
+            return {}
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+
+    stub_composite = tmp_path / "stub.fit"
+    data = np.zeros((3, 4, 4), dtype=np.float32)
+    fits.PrimaryHDU(data=data).writeto(stub_composite)
+
+    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
+        return ColourContributor(
+            telescope=telescope, binning=binning, composite_path=stub_composite,
+            sub_count=1, stack_total=1,
+        )
+
+    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    with pytest.raises(NotImplementedError):
+        run_lrgb(
+            project_dir, telescope="T02", target="Fake Target", ra_hours=1.0, dec_deg=1.0,
+            lum_binning=1, rgb_binning=1,
+        )

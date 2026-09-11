@@ -144,7 +144,7 @@ from .run_signature import (
 )
 from .siril_driver import run_script
 from .solving import solve
-from .stretch_compose import stretch_and_compose
+from .stretch_compose import stretch_and_compose, stretch_rgb
 from .workspace import group_name_for, pipeline_dir
 
 RGB_FILTERS = ("Red", "Green", "Blue")
@@ -1188,10 +1188,32 @@ def run_lrgb(
             _log(f"       {lum_label}: median FWHM {fwhm_arcsec:.2f}\"", notes)
         lum_candidates.append((lum_key, lum_master_path, fwhm_arcsec))
 
-    selected_key, selected_path, selected_fwhm = select_luminance_source(
-        lum_candidates, lum_source, (telescope, lum_binning), notes
-    )
-    result.masters[LUMINANCE_FILTER] = selected_path
+    # RGB-only mode (2026-09): no Luminance data exists for this target on ANY
+    # telescope -- lum_candidates stays empty when discover_luminance_contributors
+    # found nothing real to build (the build loop's MIN_SEQUENCE_FRAMES skip above
+    # can also leave it empty for a telescope with too few Luminance lights).
+    # "Zero Luminance masters could be built for this target, anywhere" is a
+    # purely structural, unambiguous fact once the build loop has run -- unlike
+    # CalibrationMode's own auto-detection (a judgement call about degraded vs
+    # intentional data), there is no real target where "some but deliberately
+    # excluded" Luminance would misfire on this: select_luminance_source's own
+    # sharpest-wins rule already handles "built but not chosen"; empty only
+    # happens when literally nothing could be built. Real case: Abell 6 and
+    # HFG1 (T02), a one-shot-colour delivery with no Luminance filter at all.
+    is_rgb_only = not lum_candidates
+    if is_rgb_only:
+        if lum_source is not None:
+            raise ValueError(
+                f"lum_source={lum_source!r} given but no Luminance data exists for "
+                f"{target} on any telescope -- nothing to select from"
+            )
+        _log(f"[run ] no Luminance data found for {target} on any telescope -- RGB-only mode", notes)
+        selected_key, selected_path, selected_fwhm = None, None, None
+    else:
+        selected_key, selected_path, selected_fwhm = select_luminance_source(
+            lum_candidates, lum_source, (telescope, lum_binning), notes
+        )
+        result.masters[LUMINANCE_FILTER] = selected_path
 
     # --- colour contributors: one per binning that has a full R/G/B set,
     # for this telescope+target. rgb_binning is the PRIMARY contributor and
@@ -1332,7 +1354,14 @@ def run_lrgb(
     new_signature = RunSignature(
         stretch_method=stretch_method,
         pedestal=pedestal,
-        luminance_selected=f"{selected_key[0]}_bin{selected_key[1]}",
+        # RGB-only mode: selected_key is None (no Luminance exists for this
+        # target on any telescope) -- "" mirrors this dataclass's own existing
+        # empty-string sentinel for "nothing selected" (colour_reference's
+        # default, below), and diff_invalidation's real comparison is a plain
+        # equality check that handles "" like any other string: a target
+        # gaining/losing Luminance data between runs correctly registers as a
+        # signature change.
+        luminance_selected=f"{selected_key[0]}_bin{selected_key[1]}" if selected_key else "",
         luminance={
             key: ContributorSignature(
                 key=key, stackcnt=lum_stackcnt[key], frame_hash=lum_frame_hashes[key],
@@ -1387,14 +1416,15 @@ def run_lrgb(
     # --- checkpoints for the "masters" stop_after boundary ----------------
     previous = None
     previous_linear: bool | None = None
-    cp = checkpoint(
-        selected_path, f"01_master_{LUMINANCE_FILTER.lower()}", output_dir=checkpoint_dir,
-        linear=True, previous=previous, previous_linear=previous_linear,
-    )
-    result.checkpoints.append(cp)
-    previous, previous_linear = cp.stats, True
-    _log(cp.summary(), notes)
-    save_checkpoints(result.checkpoints, checkpoints_path)
+    if not is_rgb_only:
+        cp = checkpoint(
+            selected_path, f"01_master_{LUMINANCE_FILTER.lower()}", output_dir=checkpoint_dir,
+            linear=True, previous=previous, previous_linear=previous_linear,
+        )
+        result.checkpoints.append(cp)
+        previous, previous_linear = cp.stats, True
+        _log(cp.summary(), notes)
+        save_checkpoints(result.checkpoints, checkpoints_path)
 
     primary_calibrated = final / "rgb_colour_calibrated.fit"
     if primary_calibrated.exists():
@@ -1408,45 +1438,64 @@ def run_lrgb(
         save_checkpoints(result.checkpoints, checkpoints_path)
 
     if stop_after == "masters":
-        _log(
-            "[stop] stop_after='masters' -- Luminance selected and every colour contributor "
-            "built; stopping before reconciliation",
-            notes,
+        masters_note = (
+            "every colour contributor built (RGB-only, no Luminance data found)"
+            if is_rgb_only else "Luminance selected and every colour contributor built"
         )
+        _log(f"[stop] stop_after='masters' -- {masters_note}; stopping before reconciliation", notes)
         return result
 
     # --- luminance: background extraction --------------------------------
-    lum_bg = final / "lum_bg.fits"
-    if not usable(lum_bg, notes):
-        shutil.copy2(result.masters[LUMINANCE_FILTER], final / "lum.fit")
-        _log("[run ] GraXpert background extraction on L", notes)
-        lum_bg = run_graxpert_background_extraction(final / "lum.fit", output_stem="lum_bg")
-    else:
-        _log("[skip] L background extraction already done", notes)
+    # Skipped entirely for is_rgb_only -- there is no L to extract a
+    # background from. lum_bg/lum_for_compose_path (both real inputs to the
+    # reprojection block below) only exist on the Luminance-driven path.
+    if not is_rgb_only:
+        lum_bg = final / "lum_bg.fits"
+        if not usable(lum_bg, notes):
+            shutil.copy2(result.masters[LUMINANCE_FILTER], final / "lum.fit")
+            _log("[run ] GraXpert background extraction on L", notes)
+            lum_bg = run_graxpert_background_extraction(final / "lum.fit", output_stem="lum_bg")
+        else:
+            _log("[skip] L background extraction already done", notes)
 
-    cp = checkpoint(
-        lum_bg, "03_lum_background_extracted", output_dir=checkpoint_dir,
-        linear=True, previous=previous, previous_linear=previous_linear,
-    )
-    result.checkpoints.append(cp)
-    previous, previous_linear = cp.stats, True
-    _log(cp.summary(), notes)
-    save_checkpoints(result.checkpoints, checkpoints_path)
+        cp = checkpoint(
+            lum_bg, "03_lum_background_extracted", output_dir=checkpoint_dir,
+            linear=True, previous=previous, previous_linear=previous_linear,
+        )
+        result.checkpoints.append(cp)
+        previous, previous_linear = cp.stats, True
+        _log(cp.summary(), notes)
+        save_checkpoints(result.checkpoints, checkpoints_path)
+
+        # `lum_for_compose_path` is computed unconditionally (not inside the
+        # usable() guard below) so a RESUMED run -- which skips rebuilding
+        # rgb_reconciled entirely -- still picks the same L file that was
+        # actually paired with it. Getting this wrong pairs a cropped
+        # rgb_reconciled with the original, larger lum_bg on resume: a shape
+        # mismatch feeding into rgbcomp -lum=.
+        lum_for_compose_path = lum_bg
+        if len(contributors) > 1:
+            lum_for_compose_path = final / "lum_bg_cropped.fits"
 
     # --- reproject every colour contributor onto L's grid, then combine --
-    # `lum_for_compose_path` is computed unconditionally (not inside the
-    # usable() guard below) so a RESUMED run -- which skips rebuilding
-    # rgb_reconciled entirely -- still picks the same L file that was
-    # actually paired with it. Getting this wrong pairs a cropped
-    # rgb_reconciled with the original, larger lum_bg on resume: a shape
-    # mismatch feeding into rgbcomp -lum=.
-    lum_for_compose_path = lum_bg
-    if len(contributors) > 1:
-        lum_for_compose_path = final / "lum_bg_cropped.fits"
-
     rgb_reconciled = final / "rgb_reconciled.fit"
     if not usable(rgb_reconciled, notes):
-        if len(contributors) == 1:
+        if is_rgb_only:
+            # No L to reproject onto -- rgb_reconciled is a direct copy of
+            # the single contributor's colour-calibrated output (same
+            # pixels, same WCS grid, nothing to reconcile against). More
+            # than one RGB-only contributor needs real gain-match/crop
+            # logic with no L to crop against -- untested, deferred rather
+            # than built blind (see plan-rgb-only-mode.md's non-goals).
+            if len(contributors) != 1:
+                raise NotImplementedError(
+                    f"RGB-only mode with {len(contributors)} colour contributors "
+                    f"({[c.key for c in contributors]}) is not supported -- only the "
+                    "single-contributor case (no reconciliation needed) is implemented."
+                )
+            _log("[run ] RGB-only: no Luminance to reproject onto -- using contributor directly", notes)
+            shutil.copy2(contributors[0].composite_path, rgb_reconciled)
+        elif len(contributors) == 1:
             _log("[run ] reprojecting colour onto L's pixel grid", notes)
             recon = reproject_to_reference(contributors[0].composite_path, lum_bg, rgb_reconciled)
             _log(f"       footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f}", notes)
@@ -1548,31 +1597,42 @@ def run_lrgb(
     save_checkpoints(result.checkpoints, checkpoints_path)
 
     if stop_after == "reconciled":
-        _log(
-            "[stop] stop_after='reconciled' -- L background extracted and colour reconciled; "
-            "stopping before stretch/export",
-            notes,
+        reconciled_note = (
+            "colour ready (RGB-only, no Luminance to extract/reconcile against)"
+            if is_rgb_only else "L background extracted and colour reconciled"
         )
+        _log(f"[stop] stop_after='reconciled' -- {reconciled_note}; stopping before stretch/export", notes)
         return result
 
-    # --- stretch + LRGB composition --------------------------------------
-    composite = final / "lrgb_final.fit"
+    # --- stretch + composition --------------------------------------------
+    # RGB-only: stretch the reconciled RGB alone, no rgbcomp -lum= (no L to
+    # composite onto). Output named "rgb_final" (not "lrgb_final") -- an
+    # RGB-only run producing a file literally named "lrgb" would be
+    # misleading on disk.
+    composite_name = "rgb_final" if is_rgb_only else "lrgb_final"
+    composite = final / f"{composite_name}.fit"
     if not usable(composite, notes):
-        lum_in = final / "lum_for_compose.fit"
-        rgb_in = final / "rgb_for_compose.fit"
-        shutil.copy2(lum_for_compose_path, lum_in)
-        shutil.copy2(rgb_reconciled, rgb_in)
-        _log(f"[run ] stretch ({stretch_method}) + rgbcomp -lum", notes)
-        compose = stretch_and_compose(
-            lum_in, rgb_in, final, output_stem="lrgb_final", method=stretch_method,
-        )
+        if is_rgb_only:
+            rgb_in = final / "rgb_for_compose.fit"
+            shutil.copy2(rgb_reconciled, rgb_in)
+            _log(f"[run ] stretch ({stretch_method}), RGB-only (no Luminance to compose)", notes)
+            compose = stretch_rgb(rgb_in, final, output_stem=composite_name, method=stretch_method)
+        else:
+            lum_in = final / "lum_for_compose.fit"
+            rgb_in = final / "rgb_for_compose.fit"
+            shutil.copy2(lum_for_compose_path, lum_in)
+            shutil.copy2(rgb_reconciled, rgb_in)
+            _log(f"[run ] stretch ({stretch_method}) + rgbcomp -lum", notes)
+            compose = stretch_and_compose(
+                lum_in, rgb_in, final, output_stem=composite_name, method=stretch_method,
+            )
         composite = compose.composite_path
     else:
-        _log("[skip] LRGB composite already present", notes)
+        _log(f"[skip] {'RGB' if is_rgb_only else 'LRGB'} composite already present", notes)
     result.composite_path = composite
 
     cp = checkpoint(
-        composite, "05_lrgb_final", output_dir=checkpoint_dir,
+        composite, "05_rgb_final" if is_rgb_only else "05_lrgb_final", output_dir=checkpoint_dir,
         linear=False, previous=previous, previous_linear=previous_linear,  # post-stretch: render faithfully
     )
     result.checkpoints.append(cp)
@@ -1593,7 +1653,9 @@ def run_lrgb(
     # generalize the handoff path to whatever target Kaveh throws at it
     # next instead of silently mislabeling every future target's TIFF as
     # M51's.
-    result.export_result = export(composite, output_dir=final, stem=f"{target}_lrgb")
+    result.export_result = export(
+        composite, output_dir=final, stem=f"{target}_rgb" if is_rgb_only else f"{target}_lrgb"
+    )
     _log(
         f"       row order {result.export_result.row_order}, "
         f"clipped low {result.export_result.clipped_low_fraction:.4f} / "

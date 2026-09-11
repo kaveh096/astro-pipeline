@@ -118,7 +118,13 @@ class ContributorSignature:
     key: str
     stackcnt: int
     frame_hash: str
-    spcc_profile: tuple[str, str, str, str] | None = None
+    # tuple[str, ...] not tuple[str, str, str, str]: a mono contributor's
+    # profile is a 4-tuple (mono_sensor, red_filter, green_filter,
+    # blue_filter), but an OSC contributor's (RGB-only mode, 2026-09) is a
+    # 3-tuple (osc_sensor, osc_filter or "", osc_lpf or "") -- to_dict()/
+    # from_dict()'s round-trip is already length-agnostic; this widening
+    # just makes the type hint honest about that.
+    spcc_profile: tuple[str, ...] | None = None
     flat_frame_hash: str = ""
     # Precalibrated-path plan (2026-09), purely diagnostic -- NOT
     # load-bearing for staleness, unlike frame_hash/flat_frame_hash above.

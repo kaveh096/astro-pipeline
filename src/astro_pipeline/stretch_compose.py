@@ -35,6 +35,7 @@ undo the photometric colour calibration done in Stage 6/7.
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -176,6 +177,33 @@ def rgbcomp_lum(
     return output_path, result
 
 
+def _apply_stretch(
+    path: Path,
+    work_dir: Path,
+    method: str,
+    shadows_clip: float,
+    target_background: float,
+    ghs_strength: float,
+    siril_cli: Path | None = None,
+) -> SirilResult:
+    """Dispatch one image to the real stretch call for `method`, in place
+    (load/process/save -- see auto_stretch/auto_ghs_stretch's own
+    docstrings). Factored out of stretch_and_compose() (RGB-only mode,
+    2026-09) so stretch_rgb() below can apply the identical method
+    dispatch to a single RGB composite with no Luminance to pair it
+    against, without duplicating the branching logic."""
+    if method == "autostretch":
+        return auto_stretch(path, work_dir, shadows_clip, target_background, siril_cli=siril_cli)
+    if method == "autoghs":
+        return auto_ghs_stretch(path, work_dir, shadows_clip, ghs_strength, siril_cli=siril_cli)
+    if method == "autoghs+auto":
+        auto_ghs_stretch(path, work_dir, shadows_clip, ghs_strength, siril_cli=siril_cli)
+        return auto_stretch(path, work_dir, shadows_clip, target_background, siril_cli=siril_cli)
+    raise ValueError(
+        f"Unknown stretch method {method!r}; expected 'autostretch', 'autoghs' or 'autoghs+auto'."
+    )
+
+
 def stretch_and_compose(
     lum_path: str | Path,
     rgb_path: str | Path,
@@ -211,16 +239,7 @@ def stretch_and_compose(
     work_dir = Path(work_dir)
 
     def apply(path: Path) -> SirilResult:
-        if method == "autostretch":
-            return auto_stretch(path, work_dir, shadows_clip, target_background, siril_cli=siril_cli)
-        if method == "autoghs":
-            return auto_ghs_stretch(path, work_dir, shadows_clip, ghs_strength, siril_cli=siril_cli)
-        if method == "autoghs+auto":
-            auto_ghs_stretch(path, work_dir, shadows_clip, ghs_strength, siril_cli=siril_cli)
-            return auto_stretch(path, work_dir, shadows_clip, target_background, siril_cli=siril_cli)
-        raise ValueError(
-            f"Unknown stretch method {method!r}; expected 'autostretch', 'autoghs' or 'autoghs+auto'."
-        )
+        return _apply_stretch(path, work_dir, method, shadows_clip, target_background, ghs_strength, siril_cli)
 
     lum_log = apply(lum_path)
     rgb_log = apply(rgb_path)
@@ -233,3 +252,41 @@ def stretch_and_compose(
         rgb_stretch_log=rgb_log,
         compose_log=compose_log,
     )
+
+
+@dataclass
+class RGBComposeResult:
+    composite_path: Path
+    rgb_stretch_log: SirilResult
+
+
+def stretch_rgb(
+    rgb_path: str | Path,
+    work_dir: str | Path,
+    output_stem: str = "rgb_composite",
+    method: str = "autostretch",
+    shadows_clip: float = DEFAULT_SHADOWS_CLIP,
+    target_background: float = DEFAULT_TARGET_BACKGROUND,
+    ghs_strength: float = 2.0,
+    siril_cli: Path | None = None,
+) -> RGBComposeResult:
+    """Stretch rgb_path alone and export it under output_stem -- the
+    RGB-only-mode (2026-09) counterpart of stretch_and_compose(), for a
+    run with no Luminance to composite onto (see pipeline.run_lrgb's
+    is_rgb_only branch). No `rgbcomp -lum=` call.
+
+    Mirrors rgbcomp_lum()'s own output-path convention (a NEW file at
+    `work_dir / f"{output_stem}.fit"`, inputs left untouched) rather than
+    stretching rgb_path in place: copy first, stretch the copy -- so a
+    caller passing the same rgb_path used elsewhere in the pipeline (e.g.
+    the reconciled composite still needed for a resumed run) doesn't get
+    it silently mutated as a side effect of exporting a stretched version.
+    """
+    rgb_path = Path(rgb_path)
+    work_dir = Path(work_dir)
+    output_path = work_dir / f"{output_stem}.fit"
+    shutil.copy2(rgb_path, output_path)
+
+    rgb_log = _apply_stretch(output_path, work_dir, method, shadows_clip, target_background, ghs_strength, siril_cli)
+
+    return RGBComposeResult(composite_path=output_path, rgb_stretch_log=rgb_log)
