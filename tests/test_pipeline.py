@@ -914,3 +914,53 @@ def test_run_lrgb_rgb_only_multi_contributor_raises_not_implemented(tmp_path: Pa
             project_dir, telescope="T02", target="Fake Target", ra_hours=1.0, dec_deg=1.0,
             lum_binning=1, rgb_binning=1,
         )
+
+
+def test_run_lrgb_mixed_osc_and_rgb_same_binning_raises_not_implemented(tmp_path: Path, monkeypatch) -> None:
+    """The real mixed-shape guard trigger: a telescope with genuine R/G/B
+    AND genuine Color data at the SAME binning must raise, not silently
+    combine them (unverified channel-order parity between debayer output
+    and rgbcomp -- see plan-rgb-only-mode.md ??7). Distinguishes the real
+    trigger from the false-positive case (a target with NEITHER real R/G/B
+    NOR real Color data at the caller's own rgb_binning, which must NOT
+    raise -- both discovery lists unconditionally include the caller's own
+    combo regardless of real data, so a naive intersection of the padded
+    lists would misfire on every real OSC-only target; caught during real
+    testing, not by adversarial review, and covered separately by
+    test_run_lrgb_rgb_only_full_run_no_luminance_no_crash actually passing)."""
+    import astro_pipeline.pipeline as pipeline_module
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "kaveh096") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    class _FakeReport:
+        def instrument_groups(self):
+            return {
+                ("T02", "Mixed Target", "Red", 1): [_FakeLightFrame("r.fit")],
+                ("T02", "Mixed Target", "Green", 1): [_FakeLightFrame("g.fit")],
+                ("T02", "Mixed Target", "Blue", 1): [_FakeLightFrame("b.fit")],
+                ("T02", "Mixed Target", "Color", 1): [_FakeLightFrame("c1.fit"), _FakeLightFrame("c2.fit")],
+            }
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {("T02", "Bias", 1, 0.0): ["b"], ("T02", "Dark", 1, 300.0): ["d"]}
+
+        def flat_index(self):
+            return {}
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    with pytest.raises(NotImplementedError, match="both full R/G/B and one-shot-colour"):
+        run_lrgb(
+            project_dir, telescope="T02", target="Mixed Target", ra_hours=1.0, dec_deg=1.0,
+            lum_binning=1, rgb_binning=1,
+        )

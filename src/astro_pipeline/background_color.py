@@ -206,10 +206,55 @@ T73_PROFILE = InstrumentProfile(
 INSTRUMENT_PROFILES: dict[str, InstrumentProfile] = {"T24": T24_PROFILE, "T73": T73_PROFILE}
 
 
+@dataclass(frozen=True)
+class OSCInstrumentProfile:
+    """Sensor (+ optional filter/LPF in front of it) for a one-shot-colour
+    (OSC) camera's SPCC calibration, as they appear in Siril's spcc-database
+    -- the OSC-shaped counterpart of InstrumentProfile (RGB-only/OSC plan,
+    2026-09). Siril's `spcc` command has a genuinely separate argument
+    shape for OSC (`-oscsensor=`/`-oscfilter=`/`-osclpf=`, verified via the
+    real installed Siril 1.4.4's own `help spcc`), not a reuse of
+    `-monosensor=`/`-rfilter=`/etc -- a bare OSC sensor (no filter/LPF in
+    front of it, T02's real case) only ever needs `osc_sensor`.
+
+    IMPORTANT ASYMMETRY, confirmed by a real `spcc -oscsensor=...` run
+    (not assumed by analogy to InstrumentProfile): `osc_sensor` must be
+    the database's `model` field, NOT its `name` field the way
+    InstrumentProfile.mono_sensor/red_filter/etc use. Siril's
+    osc_sensors/*.json entries split one physical sensor into per-channel
+    Red/Green/Blue rows (`"model": "Sony IMX071", "name": "Sony IMX071
+    Red"`, etc) -- `-oscsensor="Sony IMX071"` (the shared `model`) is what
+    Siril's combo box actually resolves; the per-channel `name` values are
+    Siril's own internal detail, never passed as an argument here.
+    Verified real: `spcc -catalog=localgaia "-oscsensor=Sony IMX071"`
+    against a real debayered, plate-solved T02 master logged `SPCC will
+    use OSC sensor "Sony IMX071" and filter "No filter"` and found a real
+    solution (798 stars) -- not silently guessed.
+    """
+
+    osc_sensor: str
+    osc_filter: str | None = None
+    osc_lpf: str | None = None
+
+
+# iTelescope T02 (New Mexico): QHY168C One Shot Color CMOS, confirmed via
+# iTelescope's own published T02 support page (2026-09 fetch:
+# https://support.itelescope.net/support/solutions/articles/231901) and
+# cross-checked against the real T02 FITS header (XPIXSZ=3.76um, matching
+# the QHY168C's published pixel size exactly). The QHY168C's sensor is the
+# Sony IMX071 (public spec). `osc_sensor="Sony IMX071"` confirmed working
+# against the real installed Siril 1.4.4's spcc-database -- see
+# OSCInstrumentProfile's own docstring for the model-vs-name asymmetry
+# this required discovering, not assuming.
+T02_OSC_PROFILE = OSCInstrumentProfile(osc_sensor="Sony IMX071")
+
+OSC_INSTRUMENT_PROFILES: dict[str, OSCInstrumentProfile] = {"T02": T02_OSC_PROFILE}
+
+
 def run_spcc(
     rgb_composite_path: str | Path,
     work_dir: str | Path,
-    profile: InstrumentProfile = T24_PROFILE,
+    profile: InstrumentProfile | OSCInstrumentProfile = T24_PROFILE,
     catalog: str = "localgaia",
     siril_cli: Path | None = None,
 ) -> SPCCResult:
@@ -234,12 +279,28 @@ def run_spcc(
     smaller population than plain photometry. That is normal, not a sign of
     a coverage gap; verified for this field, which lies entirely inside one
     catalogue chunk even out to 3 degrees.
+
+    `profile` accepts either shape (RGB-only/OSC plan, 2026-09): an
+    `InstrumentProfile` (mono sensor + 3 named filters, `-monosensor=`/
+    `-rfilter=`/`-gfilter=`/`-bfilter=`) or an `OSCInstrumentProfile` (one
+    OSC sensor + optional filter/LPF in front of it, `-oscsensor=`/
+    `-oscfilter=`/`-osclpf=`) -- genuinely separate argument shapes in
+    Siril's real `spcc` command (verified via `help spcc` against the real
+    installed Siril 1.4.4), not a guessed reuse of the mono path.
     """
     rgb_composite_path = Path(rgb_composite_path)
     work_dir = Path(work_dir)
 
     # Filter names contain spaces, and Siril's .ssf parser splits arguments
     # on whitespace, so each argument has to be quoted.
+    if isinstance(profile, OSCInstrumentProfile):
+        command = f'spcc -catalog={catalog} "-oscsensor={profile.osc_sensor}"'
+        if profile.osc_filter is not None:
+            command += f' "-oscfilter={profile.osc_filter}"'
+        if profile.osc_lpf is not None:
+            command += f' "-osclpf={profile.osc_lpf}"'
+        return _run_spcc_command(rgb_composite_path, work_dir, command, siril_cli)
+
     command = (
         f"spcc -catalog={catalog} "
         f'"-monosensor={profile.mono_sensor}" '
@@ -247,7 +308,15 @@ def run_spcc(
         f'"-gfilter={profile.green_filter}" '
         f'"-bfilter={profile.blue_filter}"'
     )
+    return _run_spcc_command(rgb_composite_path, work_dir, command, siril_cli)
 
+
+def _run_spcc_command(
+    rgb_composite_path: Path, work_dir: Path, command: str, siril_cli: Path | None
+) -> SPCCResult:
+    """Shared execution + error-handling for both run_spcc() argument
+    shapes (mono and OSC, RGB-only/OSC plan) -- only the command string
+    itself differs between them."""
     try:
         result = run_load_process_save(
             rgb_composite_path, [command], work_dir, siril_cli=siril_cli

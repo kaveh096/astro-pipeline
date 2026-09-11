@@ -110,6 +110,8 @@ from astropy.io import fits
 
 from .background_color import (
     INSTRUMENT_PROFILES,
+    OSC_INSTRUMENT_PROFILES,
+    OSCInstrumentProfile,
     UnknownInstrumentError,
     run_graxpert_background_extraction,
     run_spcc,
@@ -149,6 +151,15 @@ from .workspace import group_name_for, pipeline_dir
 
 RGB_FILTERS = ("Red", "Green", "Blue")
 LUMINANCE_FILTER = "Luminance"
+# One-shot-colour (OSC) filter identity (RGB-only/OSC plan, 2026-09). A
+# genuinely different build shape from RGB_FILTERS -- one already-Bayer-
+# mosaic filter debayered into a 3-channel composite directly, not three
+# separate mono masters combined via rgbcomp. Deliberately NOT folded
+# into RGB_FILTERS -- mixing the two build shapes into one constant would
+# blur them. Only "Color" is special-cased; any other unrecognized filter
+# keeps falling through to the existing "missing R/G/B, skip this
+# contributor" behaviour, not silently treated as OSC.
+OSC_FILTER = "Color"
 
 
 @dataclass
@@ -523,6 +534,25 @@ def discover_luminance_contributors(
     return contributors
 
 
+def discover_osc_contributors(
+    report, target: str, telescope: str, osc_binning: int
+) -> list[tuple[str, int]]:
+    """Every (telescope, binning) with one-shot-colour (Color/OSC) data
+    for `target` (RGB-only/OSC plan, 2026-09) -- mirrors
+    discover_luminance_contributors() exactly: same all-telescopes-for-
+    this-target scope, same caller-binning-prepended-if-missing shape."""
+    contributors = sorted(
+        {
+            (key[0], key[3])
+            for key in report.instrument_groups()
+            if key[1] == target and key[2] == OSC_FILTER
+        }
+    )
+    if (telescope, osc_binning) not in contributors:
+        contributors = [(telescope, osc_binning), *contributors]
+    return contributors
+
+
 def resolve_lights(
     report,
     telescope: str,
@@ -564,13 +594,26 @@ class ColourContributor:
     """One (telescope, binning) RGB contributor, once built -- Slice 3's
     naming fix (3.3) means downstream code identifies a contributor by
     this, not by its position in a loop (see run_lrgb's combine-multiple-
-    contributors branch and its earlier positional `contrib{i}` bug)."""
+    contributors branch and its earlier positional `contrib{i}` bug).
+
+    `filter_shape` (RGB-only/OSC plan, 2026-09): "rgb" (default, the
+    existing mono path -- three separate R/G/B masters combined via
+    rgbcomp) or "osc" (_build_osc_colour_contributor -- one already-Bayer-
+    mosaic filter debayered directly into a 3-channel composite). Exists
+    so run_lrgb can detect and refuse a mixed OSC+mono-RGB reconciliation
+    at contributor-collection time, BEFORE any ColourContributor.key
+    collision could corrupt signature construction -- channel-order
+    parity between Siril's `-debayer` output and rgbcomp's R-then-G-then-B
+    convention has never been verified, so combining the two shapes is
+    deliberately unsupported (see run_lrgb's colour-contributor discovery
+    and the plan's non-goals)."""
 
     telescope: str
     binning: int
     composite_path: Path
     sub_count: int
     stack_total: int
+    filter_shape: str = "rgb"
 
     @property
     def key(self) -> str:
@@ -599,6 +642,22 @@ def resolve_instrument_profile(telescope: str):
             f"(known: {sorted(INSTRUMENT_PROFILES)}) -- refusing to guess a "
             "sensor/filter profile for colour calibration. Register an "
             f"InstrumentProfile for {telescope!r} in INSTRUMENT_PROFILES first."
+        )
+    return profile
+
+
+def resolve_osc_instrument_profile(telescope: str) -> OSCInstrumentProfile:
+    """OSCInstrumentProfile equivalent of resolve_instrument_profile()
+    (RGB-only/OSC plan, 2026-09) -- same never-guess policy: raise
+    UnknownInstrumentError for any unregistered telescope rather than
+    silently mis-profiling OSC data with the wrong sensor."""
+    profile = OSC_INSTRUMENT_PROFILES.get(telescope)
+    if profile is None:
+        raise UnknownInstrumentError(
+            f"No OSC SPCC InstrumentProfile registered for telescope {telescope!r} "
+            f"(known: {sorted(OSC_INSTRUMENT_PROFILES)}) -- refusing to guess an OSC "
+            f"sensor for colour calibration. Register an OSCInstrumentProfile for "
+            f"{telescope!r} in OSC_INSTRUMENT_PROFILES first."
         )
     return profile
 
@@ -851,6 +910,96 @@ def _build_colour_contributor(
     )
 
 
+def _build_osc_colour_contributor(
+    project_dir: Path,
+    contrib_dir: Path,
+    report,
+    telescope: str,
+    target: str,
+    binning: int,
+    ra_hours: float,
+    dec_deg: float,
+    notes: list[str],
+    calibration_mode: CalibrationMode = CalibrationMode.PRECALIBRATED,
+    bayer_pattern: int = 0,
+) -> ColourContributor | None:
+    """One-shot-colour (OSC) counterpart of _build_colour_contributor()
+    (RGB-only/OSC plan, 2026-09) -- much shorter, since there is only one
+    filter group (`OSC_FILTER`) to build, not three, and no channel
+    alignment/crop/rgbcomp step: debayering already produces one already-
+    registered-together 3-channel composite per frame (all three channels
+    come from the SAME Bayer-mosaic exposure), so there is nothing to
+    align. Real case: T02 (Abell 6 and HFG1) -- confirmed genuine
+    undemosaiced Bayer CFA data (RGGB), no local Bias/Dark at all, so
+    `calibration_mode` is always PRECALIBRATED for every real OSC target
+    seen so far (see build_master()'s own NotImplementedError guard
+    against debayer=True + RAW_LOCAL).
+
+    Returns None -- logging why, rather than raising -- for the same
+    reasons _build_colour_contributor does: no OSC lights found, or too
+    few to form a Siril sequence (MIN_SEQUENCE_FRAMES).
+    """
+    contrib_dir.mkdir(parents=True, exist_ok=True)
+
+    lights, group_name = resolve_lights(
+        report, telescope, target, OSC_FILTER, binning, calibration_mode=calibration_mode
+    )
+    if not lights:
+        _log(
+            f"[skip] BIN{binning}: no {OSC_FILTER} lights found for {telescope}/{target} "
+            "-- skipping this OSC contributor rather than aborting the whole run",
+            notes,
+        )
+        return None
+    if len(lights) < MIN_SEQUENCE_FRAMES:
+        _log(
+            f"[skip] BIN{binning}: only {len(lights)} {OSC_FILTER} light(s) for "
+            f"{telescope}/{target}, need at least {MIN_SEQUENCE_FRAMES} to form a Siril "
+            "sequence -- skipping this contributor rather than crashing the whole run",
+            notes,
+        )
+        return None
+
+    master_path = build_master(
+        project_dir, lights, {}, group_name, OSC_FILTER, telescope, binning, ra_hours, dec_deg, notes,
+        flat_frames=[], flat_policy=FlatPolicy.SKIP_IF_MISSING,
+        calibration_mode=calibration_mode, debayer=True, bayer_pattern=bayer_pattern,
+    )
+    stack_total = int(fits.getheader(master_path).get("STACKCNT", len(lights)))
+
+    # master_path is now a plate-solved, ALREADY-RGB (3, ny, nx) master --
+    # genuinely equivalent to rgb_native.fit in the mono-RGB path, just
+    # produced by debayer+stack instead of 3x-build+rgbcomp. No channel
+    # alignment/crop needed (see docstring).
+    rgb_bg = contrib_dir / "rgb_native_bg.fits"
+    if not usable(rgb_bg, notes):
+        _log(f"[run ] BIN{binning}: GraXpert background extraction on OSC RGB", notes)
+        rgb_bg = run_graxpert_background_extraction(master_path, output_stem="rgb_native_bg")
+    else:
+        _log(f"[skip] BIN{binning}: OSC RGB background extraction already done", notes)
+
+    colour_calibrated = contrib_dir / "rgb_colour_calibrated.fit"
+    if not usable(colour_calibrated, notes):
+        staging = contrib_dir / "rgb_colour_calibrated__inprogress.fit"
+        shutil.copy2(rgb_bg, staging)
+        profile = resolve_osc_instrument_profile(telescope)
+        _log(f"[run ] BIN{binning}: SPCC colour calibration ({profile.osc_sensor}, local Gaia, OSC)", notes)
+        solution = run_spcc(staging, contrib_dir, profile=profile)
+        os.replace(staging, colour_calibrated)
+        _log(
+            f"       BIN{binning} SPCC used {solution.stars_used} stars, "
+            f"white balance {solution.white_balance}",
+            notes,
+        )
+    else:
+        _log(f"[skip] BIN{binning}: SPCC already done", notes)
+
+    return ColourContributor(
+        telescope=telescope, binning=binning, composite_path=colour_calibrated,
+        sub_count=len(lights), stack_total=stack_total, filter_shape="osc",
+    )
+
+
 # --- Slice 4.1: run-signature helpers ---------------------------------------
 # Factored out of run_lrgb as their own functions for the same reason
 # select_luminance_source/resolve_instrument_profile were: directly
@@ -877,6 +1026,19 @@ def _colour_contributor_frame_hash(report, telescope: str, target: str, binning:
         lights, _ = resolve_lights(report, telescope, target, filter_name, binning)
         names.extend(f.path.name for f in lights)
     return frame_identity_hash(names)
+
+
+def _osc_contributor_frame_hash(
+    report, telescope: str, target: str, binning: int, calibration_mode: CalibrationMode
+) -> str:
+    """OSC counterpart of _colour_contributor_frame_hash() (RGB-only/OSC
+    plan, 2026-09) -- one filter (OSC_FILTER) instead of three, and
+    calibration_mode must be threaded through explicitly (unlike the mono
+    helper's RAW_LOCAL default) since every real OSC contributor is
+    PRECALIBRATED and resolve_lights() looks up a different provenance
+    view for that mode."""
+    lights, _ = resolve_lights(report, telescope, target, OSC_FILTER, binning, calibration_mode=calibration_mode)
+    return frame_identity_hash([f.path.name for f in lights])
 
 
 def _flat_frame_hash(flat_frames: list) -> str:
@@ -962,6 +1124,36 @@ def _clear_colour_contributor_products(
         if master_path.exists():
             master_path.unlink()
             deleted.append(master_path)
+    return deleted
+
+
+def _clear_osc_contributor_products(
+    contrib_dir: Path,
+    project_dir: Path,
+    report,
+    telescope: str,
+    target: str,
+    binning: int,
+    calibration_mode: CalibrationMode,
+) -> list[Path]:
+    """OSC counterpart of _clear_colour_contributor_products() (RGB-only/
+    OSC plan, 2026-09) -- no rgb_native.fit/red.fit/green.fit/blue.fit
+    intermediates exist for OSC (debayer+stack produces the RGB composite
+    directly), so only the background-extracted and colour-calibrated
+    products, plus the one OSC master, need clearing."""
+    deleted: list[Path] = []
+    for name in ("rgb_native_bg.fits", "rgb_colour_calibrated.fit"):
+        candidate = contrib_dir / name
+        if candidate.exists():
+            candidate.unlink()
+            deleted.append(candidate)
+    _, group_name = resolve_lights(
+        report, telescope, target, OSC_FILTER, binning, calibration_mode=calibration_mode
+    )
+    master_path = pipeline_dir(project_dir) / group_name / "lights" / f"master_{OSC_FILTER.lower()}.fit"
+    if master_path.exists():
+        master_path.unlink()
+        deleted.append(master_path)
     return deleted
 
 
@@ -1245,18 +1437,82 @@ def run_lrgb(
     if rgb_binning not in rgb_binnings:
         rgb_binnings = [rgb_binning, *rgb_binnings]
 
+    # RGB-only/OSC plan (2026-09): one-shot-colour (Color/OSC) binnings for
+    # this telescope+target, symmetric with the RGB discovery above --
+    # deliberately telescope-scoped the same way (discover_osc_contributors
+    # itself searches every telescope, mirroring discover_luminance_
+    # contributors, but this caller only ever builds its OWN telescope's
+    # OSC contributors, matching RGB discovery's existing, documented
+    # hard-scoping -- broadening either one is a separate, later concern).
+    osc_binnings = sorted(
+        {
+            b for (osc_telescope, b) in discover_osc_contributors(report, target, telescope, rgb_binning)
+            if osc_telescope == telescope
+        }
+    )
+    # Mixed OSC+mono-RGB reconciliation is deliberately unsupported (see
+    # plan-rgb-only-mode.md ??7): channel-order parity between Siril's
+    # -debayer output and rgbcomp's R-then-G-then-B convention has never
+    # been verified, and a binning with BOTH real shapes of colour data
+    # would produce two ColourContributors with the IDENTICAL `.key` -- a
+    # real dict-key collision that would silently corrupt colour_frame_
+    # hashes/colour_flat_frame_hashes/new_signature.colour construction
+    # below. Caught HERE, at contributor-collection time, before any
+    # build or signature construction -- not deferred to reconciliation,
+    # which round-2 adversarial review found is already too late to
+    # prevent the corruption.
+    #
+    # Checked against REAL data presence (report.instrument_groups()
+    # directly), NOT the padded `rgb_binnings`/`osc_binnings` lists above --
+    # both of those unconditionally prepend the caller's own `rgb_binning`
+    # even with zero real data of that shape (mirrors discover_luminance_
+    # contributors' own "always include caller's combo" convention), so
+    # intersecting the padded lists directly would false-positive on
+    # *every* real OSC-only target, since there is no separate osc_binning
+    # parameter distinguishing the two intentions -- caught during real
+    # testing, not by either adversarial review round.
+    _real_rgb_binnings = {
+        key[3] for key in report.instrument_groups()
+        if key[0] == telescope and key[1] == target and key[2] in RGB_FILTERS
+    }
+    _real_osc_binnings = {
+        key[3] for key in report.instrument_groups()
+        if key[0] == telescope and key[1] == target and key[2] == OSC_FILTER
+    }
+    _mixed_shape_binnings = _real_rgb_binnings & _real_osc_binnings
+    if _mixed_shape_binnings:
+        raise NotImplementedError(
+            f"{telescope}/{target} has both full R/G/B and one-shot-colour (Color) data at "
+            f"binning(s) {sorted(_mixed_shape_binnings)} -- combining a mono-RGB and an OSC "
+            "contributor for the same (telescope, binning) is not supported (unverified "
+            "channel-order parity between debayer output and rgbcomp)."
+        )
+
+    # RGB-only/OSC plan (2026-09): try mono first, then OSC, before giving
+    # up -- a telescope registered ONLY as OSC (T02's real case) must not
+    # silently compute profile_tuple=None here while its own
+    # _build_osc_colour_contributor persists a real OSC signature later.
+    # An earlier version of this only tried the mono resolver, which
+    # meant profile_tuple was unconditionally None for T02 every run,
+    # while the (not-yet-existing-at-that-point) OSC signature was real --
+    # `existing.spcc_profile != profile_tuple` would then always compare
+    # true, deleting and rebuilding SPCC's output on every single
+    # invocation, silently defeating resume-safety. Caught by round-1
+    # adversarial review before this ever shipped.
     try:
         profile = resolve_instrument_profile(telescope)
+        profile_tuple = (profile.mono_sensor, profile.red_filter, profile.green_filter, profile.blue_filter)
     except UnknownInstrumentError:
-        # Let _build_colour_contributor raise this at the right point
-        # (inside SPCC, once there is actually a contributor to fail on)
-        # rather than aborting discovery over a telescope with no colour
-        # data at all; recorded as no profile for signature purposes.
-        profile = None
-    profile_tuple = (
-        (profile.mono_sensor, profile.red_filter, profile.green_filter, profile.blue_filter)
-        if profile is not None else None
-    )
+        try:
+            osc_profile = resolve_osc_instrument_profile(telescope)
+            profile_tuple = (osc_profile.osc_sensor, osc_profile.osc_filter or "", osc_profile.osc_lpf or "")
+        except UnknownInstrumentError:
+            # Let _build_colour_contributor/_build_osc_colour_contributor
+            # raise this at the right point (inside SPCC, once there is
+            # actually a contributor to fail on) rather than aborting
+            # discovery over a telescope with no registered profile of
+            # either shape; recorded as no profile for signature purposes.
+            profile_tuple = None
 
     # Slice 2.2: colour discovery is hard-scoped to the caller's own
     # `telescope` (see module docstring / plan-flats-v3.md fact 11), so
@@ -1337,10 +1593,55 @@ def run_lrgb(
                 notes,
             )
 
+    # RGB-only/OSC plan (2026-09): one-shot-colour (Color) contributors,
+    # built alongside the mono-RGB ones above into the SAME `contributors`
+    # list -- the mixed-shape guard earlier already ruled out any binning
+    # collision between the two discovery results.
+    for binning in osc_binnings:
+        contributor_key = f"{telescope}_bin{binning}"
+        contrib_dir = contributor_dir(final, telescope, binning, rgb_binning)
+        frame_hash = _osc_contributor_frame_hash(report, telescope, target, binning, colour_calibration_mode)
+        colour_frame_hashes[contributor_key] = frame_hash
+        colour_flat_frame_hashes[contributor_key] = ""  # OSC never consults flats -- see build_master docstring
+
+        needs_full_rebuild = force_masters or (
+            old_signature is not None
+            and old_signature.contributor_stale("colour", contributor_key, frame_hash, pedestal, "")
+        )
+        if needs_full_rebuild:
+            deleted = _clear_osc_contributor_products(
+                contrib_dir, project_dir, report, telescope, target, binning,
+                calibration_mode=colour_calibration_mode,
+            )
+            if deleted:
+                _log(
+                    f"[run ] BIN{binning}: run signature changed -- deleted "
+                    f"{len(deleted)} stale OSC contributor file(s) to force rebuild",
+                    notes,
+                )
+        elif old_signature is not None:
+            existing = old_signature.colour.get(contributor_key)
+            if existing is not None and existing.spcc_profile != profile_tuple:
+                _delete_if_exists(
+                    contrib_dir / "rgb_colour_calibrated.fit",
+                    f"BIN{binning}: SPCC profile changed",
+                    notes,
+                )
+
+        contributor = _build_osc_colour_contributor(
+            project_dir, contrib_dir, report, telescope, target, binning,
+            ra_hours, dec_deg, notes, calibration_mode=colour_calibration_mode,
+        )
+        if contributor is None:
+            continue
+        contributors.append(contributor)
+
     if not contributors:
         raise RuntimeError(
-            f"No usable RGB colour contributor for {telescope}/{target} -- every discovered "
-            f"binning ({rgb_binnings}) was missing at least one of Red/Green/Blue."
+            f"No usable RGB or OSC colour contributor for {telescope}/{target} -- every "
+            f"discovered RGB binning ({rgb_binnings}) was missing at least one of "
+            f"Red/Green/Blue, and every discovered OSC binning ({osc_binnings}) had no "
+            f"usable Color data either."
         )
 
     # Slice 3.4/3.5's designated reference -- the contributor with the
