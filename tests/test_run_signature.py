@@ -288,6 +288,41 @@ def test_old_format_run_signature_json_without_flat_frame_hash_still_loads(tmp_p
     ) is True
 
 
+def test_old_format_run_signature_json_without_calibration_mode_still_loads(tmp_path) -> None:
+    """calibration_mode (precalibrated-path plan, 2026-09) is purely
+    diagnostic, NOT load-bearing for staleness (frame_hash already covers
+    a mode switch for free, since raw- vs calibrated- provenance changes
+    every light's filename). Confirms a pre-existing run_signature.json
+    with no "calibration_mode" key at all still loads and reads back the
+    documented default "raw_local"."""
+    import json
+
+    old_format = {
+        "stretch_method": "autostretch",
+        "pedestal": 0.1,
+        "luminance_selected": "T21_bin1",
+        "luminance": {
+            "T21_bin1": {
+                "key": "T21_bin1",
+                "stackcnt": 2,
+                "frame_hash": "c2b76b333110b4a6",
+                "spcc_profile": None,
+                "flat_frame_hash": "",
+                # deliberately no "calibration_mode" key.
+            }
+        },
+        "colour_reference": "T24_bin2",
+        "colour": {},
+        "quality_filter_policy": "filter_fwhm_pct=filter_round_pct=90.0 if n>=10 else None",
+    }
+    path = tmp_path / "run_signature.json"
+    path.write_text(json.dumps(old_format), encoding="utf-8")
+
+    loaded = load_run_signature(path)
+    assert loaded is not None
+    assert loaded.luminance["T21_bin1"].calibration_mode == "raw_local"
+
+
 # --- THE call-site-exercising test: round 2's actual finding was that
 # giving contributor_stale a defaulted flat_frame_hash parameter WITHOUT
 # updating pipeline.run_lrgb's two real (pure-positional) call sites would
@@ -383,6 +418,9 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
 
         def instrument_groups(self):
             return {("T99", "M51", "Luminance", 1): [lum_light]}
+
+        def calibrated_instrument_groups(self):
+            return {}
 
         def flat_index(self):
             return {("T99", 1, "Luminance"): new_flats}
@@ -570,6 +608,9 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
 
         def instrument_groups(self):
             return {("T99", "M51", "Luminance", 1): [lum_light]}
+
+        def calibrated_instrument_groups(self):
+            return {}
 
         def flat_index(self):
             return colour_flats

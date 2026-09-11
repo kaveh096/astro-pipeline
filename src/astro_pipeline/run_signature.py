@@ -120,6 +120,18 @@ class ContributorSignature:
     frame_hash: str
     spcc_profile: tuple[str, str, str, str] | None = None
     flat_frame_hash: str = ""
+    # Precalibrated-path plan (2026-09), purely diagnostic -- NOT
+    # load-bearing for staleness, unlike frame_hash/flat_frame_hash above.
+    # frame_hash alone already covers this correctly for free: a
+    # calibration_mode switch changes every light's filename (raw- vs
+    # calibrated- provenance prefix), which changes frame_hash, which
+    # contributor_stale() already treats as "rebuild this master." Recorded
+    # here anyway so which mode actually produced a persisted master is
+    # visible in run_signature.json (matches this module's own stated
+    # philosophy -- see spcc_profile's docstring above), and a future code
+    # change to the inference/override logic would at least be documented
+    # against real recorded values, not silently invisible.
+    calibration_mode: str = "raw_local"
 
     def to_dict(self) -> dict:
         return {
@@ -128,6 +140,7 @@ class ContributorSignature:
             "frame_hash": self.frame_hash,
             "spcc_profile": list(self.spcc_profile) if self.spcc_profile else None,
             "flat_frame_hash": self.flat_frame_hash,
+            "calibration_mode": self.calibration_mode,
         }
 
     @classmethod
@@ -139,6 +152,7 @@ class ContributorSignature:
             frame_hash=d["frame_hash"],
             spcc_profile=tuple(profile) if profile else None,
             flat_frame_hash=d.get("flat_frame_hash", ""),
+            calibration_mode=d.get("calibration_mode", "raw_local"),
         )
 
 
