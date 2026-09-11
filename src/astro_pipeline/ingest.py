@@ -12,7 +12,7 @@ Observed conventions -- at least three distinct ones across two telescopes,
 so this module tries several regexes rather than assuming one:
 
   Light (T24 and T21 both):
-    <provenance>-<telescope>-<user>-<target>-<YYYYMMDD>-<HHMMSS>-<Filter>-BIN<n>-<E|W>-<exptime>-<seq>.<ext>
+    <provenance>-<telescope>-<user>-<target>-<YYYYMMDD>-<HHMMSS>-<Filter>-BIN<n>-<E|W|_>-<exptime>-<seq>.<ext>
     provenance is "raw" (unprocessed), "calibrated" (iTelescope-side
     calibrated -- a real delivery had BOTH raw and calibrated versions of
     the same exposure bundled together), or "jpeg" (quick-look preview).
@@ -20,7 +20,11 @@ so this module tries several regexes rather than assuming one:
     by real data containing both. An earlier version of this module
     hardcoded it as literal "-E-", which was a filename-shape bug, not a
     real convention; it only looked constant because the first sample
-    happened to be all-"E".
+    happened to be all-"E". A real T72 exposure (NGC 3628, Feb 2025) uses
+    "_" here instead -- meridian side not tracked/applicable for that
+    frame. <target> may itself contain spaces (real: "NGC 3628") -- an
+    earlier alphanumeric-only pattern silently excluded every light frame
+    from that whole session as UnrecognizedFrame.
 
   Bias/Dark (T24 style, telescope embedded in filename):
     <telescope>-<user>-Bias-000-LD<YYYYMMDD>-LT<HHMMSS>-BIN<n>.fit
@@ -70,10 +74,27 @@ _TELESCOPE_DIR_RE = re.compile(r"^T\d+$", re.IGNORECASE)
 # Extension is deliberately broad (not just .fit/.fits): the same per-exposure
 # naming convention is also used for iTelescope-side-calibrated TIFFs and JPEG
 # previews of the same exposure, confirmed in real deliveries.
+#
+# Target allows internal spaces (` `), not just alphanumerics: a real NGC
+# 3628 delivery (Feb 2025) uses literal "NGC 3628" as the target token in
+# the filename (e.g. "calibrated-T73-kaveh096-NGC 3628-20250224-...-Red-
+# BIN2-E-240-001.fit") -- an earlier alphanumeric-only pattern silently
+# classified every one of that session's 150 real light frames as
+# UnrecognizedFrame (caught via classify_frame's own diagnostic: "Filename
+# did not match known conventions, but FITS header IMAGETYP='Light Frame'").
+# Safe to widen without ambiguity: target can't contain a literal "-", so
+# the following "-<8-digit date>-<6-digit time>-" boundary still resolves
+# unambiguously via backtracking.
+#
+# Side also allows "_": a real T72 exposure of NGC 3628 (single Luminance
+# test sub, Feb 2025) uses "-_-" where every other real sample uses "-E-"
+# or "-W-" -- meridian side not tracked/applicable for that exposure,
+# rather than a third real side value. Stored as "_" (LightFrame.side),
+# not normalized away, since nothing downstream groups or filters on side.
 _LIGHT_RE = re.compile(
     r"^(?P<provenance>raw|calibrated|jpeg)-(?P<telescope>[A-Za-z0-9]+)-(?P<user>[A-Za-z0-9]+)-"
-    r"(?P<target>[A-Za-z0-9]+)-(?P<date>\d{8})-(?P<time>\d{6})-(?P<filter>[A-Za-z0-9]+)-"
-    r"BIN(?P<bin>\d+)-(?P<side>[EW])-(?P<exptime>\d+)-(?P<seq>\d+)\.(?:fits?|fts|tiff?|jpe?g)$",
+    r"(?P<target>[A-Za-z0-9 ]+)-(?P<date>\d{8})-(?P<time>\d{6})-(?P<filter>[A-Za-z0-9]+)-"
+    r"BIN(?P<bin>\d+)-(?P<side>[EW_])-(?P<exptime>\d+)-(?P<seq>\d+)\.(?:fits?|fts|tiff?|jpe?g)$",
     re.IGNORECASE,
 )
 
@@ -113,7 +134,8 @@ class LightFrame:
     time: str
     filter_name: str
     binning: int
-    side: str  # "E" | "W" -- meridian side, not a constant
+    side: str  # "E" | "W" -- meridian side, not a constant; "_" seen on at
+    # least one real exposure where meridian side wasn't tracked/applicable
     exptime: float
     sequence: int
 
@@ -149,6 +171,19 @@ class IngestReport:
     calibration: list[CalibrationFrame] = field(default_factory=list)
     unrecognized: list[UnrecognizedFrame] = field(default_factory=list)
 
+    def _light_groups_by_provenance(
+        self, provenance: str
+    ) -> dict[tuple[str, str, str, str, int], list[LightFrame]]:
+        """Shared implementation behind light_groups()/calibrated_light_groups()
+        so the two provenance views cannot silently drift apart."""
+        groups: dict[tuple[str, str, str, str, int], list[LightFrame]] = {}
+        for frame in self.lights:
+            if frame.provenance != provenance:
+                continue
+            key = (frame.telescope, frame.user, frame.target, frame.filter_name, frame.binning)
+            groups.setdefault(key, []).append(frame)
+        return groups
+
     def light_groups(self) -> dict[tuple[str, str, str, str, int], list[LightFrame]]:
         """Group RAW lights by (telescope, user, target, filter, binning).
         `user` is part of the key deliberately: a real delivery has two
@@ -165,15 +200,31 @@ class IngestReport:
         pipeline as if they were unprocessed subs (a real delivery bundles
         both raw and iTelescope-calibrated versions of the same exposure;
         conflating them would double-process or silently prefer one over
-        the other).
+        the other). See calibrated_light_groups() for the mirror view used
+        by CalibrationMode.PRECALIBRATED (calibration.py) -- a group is
+        either fed through local bias/dark/flat calibration (raw_local) or
+        used directly (precalibrated), never both, never silently chosen
+        between.
         """
-        groups: dict[tuple[str, str, str, str, int], list[LightFrame]] = {}
-        for frame in self.lights:
-            if frame.provenance != "raw":
-                continue
-            key = (frame.telescope, frame.user, frame.target, frame.filter_name, frame.binning)
-            groups.setdefault(key, []).append(frame)
-        return groups
+        return self._light_groups_by_provenance("raw")
+
+    def calibrated_light_groups(self) -> dict[tuple[str, str, str, str, int], list[LightFrame]]:
+        """Group CALIBRATED-provenance lights by (telescope, user, target,
+        filter, binning) -- the mirror of light_groups() for iTelescope-side
+        precalibrated deliveries (CalibrationMode.PRECALIBRATED,
+        calibration.py). Never merged into light_groups()'s own raw-only
+        view; see that method's docstring for why the split is deliberate.
+        """
+        return self._light_groups_by_provenance("calibrated")
+
+    def _instrument_groups_from(
+        self, groups: dict[tuple[str, str, str, str, int], list[LightFrame]]
+    ) -> dict[tuple[str, str, str, int], list[LightFrame]]:
+        merged: dict[tuple[str, str, str, int], list[LightFrame]] = {}
+        for (telescope, _user, target, filter_name, binning), frames in groups.items():
+            key = (telescope, target, filter_name, binning)
+            merged.setdefault(key, []).extend(frames)
+        return merged
 
     def instrument_groups(self) -> dict[tuple[str, str, str, int], list[LightFrame]]:
         """Group RAW lights by (telescope, target, filter, binning), merging
@@ -194,11 +245,11 @@ class IngestReport:
         reconciled at the MASTER level instead, once each binning's own
         master exists (see reconciliation.py).
         """
-        groups: dict[tuple[str, str, str, int], list[LightFrame]] = {}
-        for (telescope, _user, target, filter_name, binning), frames in self.light_groups().items():
-            key = (telescope, target, filter_name, binning)
-            groups.setdefault(key, []).extend(frames)
-        return groups
+        return self._instrument_groups_from(self.light_groups())
+
+    def calibrated_instrument_groups(self) -> dict[tuple[str, str, str, int], list[LightFrame]]:
+        """Mirror of instrument_groups() over calibrated_light_groups()."""
+        return self._instrument_groups_from(self.calibrated_light_groups())
 
     def calibration_index(self) -> dict[tuple[str, str, int, float], list[CalibrationFrame]]:
         """Index calibration frames by (telescope, frame_type, binning, exptime)."""

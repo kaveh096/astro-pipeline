@@ -308,6 +308,18 @@ def test_scan_real_multi_telescope_session() -> None:
     for frames in groups.values():
         assert all(f.provenance == "raw" for f in frames)
 
+    # calibrated_light_groups() is the mirror view (Slice 1 of the
+    # precalibrated-path plan): every "calibrated" provenance frame must be
+    # retrievable there, and light_groups() (raw-only) must never include
+    # them -- both views partition self.lights strictly by frame.provenance.
+    calibrated_groups = report.calibrated_light_groups()
+    for frames in calibrated_groups.values():
+        assert all(f.provenance == "calibrated" for f in frames)
+    assert sum(len(v) for v in calibrated_groups.values()) == len(calibrated_lights)
+
+    calibrated_merged = report.calibrated_instrument_groups()
+    assert sum(len(v) for v in calibrated_merged.values()) == len(calibrated_lights)
+
     # The two users' data must land in SEPARATE groups, not merged --
     # confirmed real: without `user` in the grouping key, Kaveh's 13
     # kaveh096 Luminance/BIN1 subs and jmwill's 8 would have silently
