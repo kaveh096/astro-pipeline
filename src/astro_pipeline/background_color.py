@@ -203,7 +203,29 @@ T73_PROFILE = InstrumentProfile(
     blue_filter="Chroma Blue",
 )
 
-INSTRUMENT_PROFILES: dict[str, InstrumentProfile] = {"T24": T24_PROFILE, "T73": T73_PROFILE}
+# iTelescope T59 (Siding Spring, Australia): sensor and filters verified
+# against real sources, not guessed -- iTelescope's own published T59
+# support page (2026-09 fetch: support.itelescope.net/support/solutions/
+# articles/254307-telescope-59) states the camera is an "FLI Proline 16803"
+# with a "KAF-16803" sensor and "Astrodon E-Series Luminance Red, Green,
+# Blue" filters -- identical make/model to T24's own profile. Cross-checked
+# against the real T59 FITS header (`XPIXSZ=9.0`, `NAXIS1/2=4096`,
+# `INSTRUME='FLI'`), which matches the KAF-16803's published 9um/4096x4096
+# spec exactly (T59's own header has no INSTRUME/TELESCOP identity string
+# beyond the bare camera vendor, so this cross-check is what confirms the
+# sensor, not the header alone).
+T59_PROFILE = InstrumentProfile(
+    mono_sensor="KAF16803",
+    red_filter="Astrodon Red (E series)",
+    green_filter="Astrodon Green (E series)",
+    blue_filter="Astrodon Blue (E / I series)",
+)
+
+INSTRUMENT_PROFILES: dict[str, InstrumentProfile] = {
+    "T24": T24_PROFILE,
+    "T73": T73_PROFILE,
+    "T59": T59_PROFILE,
+}
 
 
 @dataclass(frozen=True)
