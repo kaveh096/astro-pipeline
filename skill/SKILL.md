@@ -70,12 +70,22 @@ touching Photoshop -- this skill's job ends the moment a TIFF path exists.
      or whether it's a genuine `[BLOCKED]` gap `run_lrgb` will raise
      `CalibrationFramesMissingError` on. Surface `[BLOCKED]` entries
      prominently -- those are real stoppers, not cosmetic warnings.
+   - a **`Precalibrated: <telescopes>` line** (only printed when at least
+     one telescope qualifies): these telescopes have no local Bias/Dark
+     frames at all but DO have iTelescope-side-calibrated (`calibrated-`
+     provenance) lights, so `run_lrgb` will use them directly
+     (`CalibrationMode.PRECALIBRATED`) instead of locally recalibrating --
+     real case: T73 (NGC 3628) and T02 (Abell 6 and HFG1). This is
+     detected automatically; nothing to ask Kaveh about or pass as a
+     parameter. Its calibration-gap warnings for that telescope are
+     already filtered out of the deduplicated list below it (they'd
+     otherwise read as a blocking problem when they're actually expected).
 
 3. **Present the summary** to Kaveh: telescopes/targets/binnings/users
-   found, the deduplicated calibration gaps, and the dark-scaling notes.
-   If there's a `[BLOCKED]` entry, say so plainly and ask whether to
-   proceed anyway (it will fail loudly inside `run_lrgb` when it gets
-   there) or stop here.
+   found, which telescopes are precalibrated (if any), the deduplicated
+   calibration gaps, and the dark-scaling notes. If there's a `[BLOCKED]`
+   entry, say so plainly and ask whether to proceed anyway (it will fail
+   loudly inside `run_lrgb` when it gets there) or stop here.
 
 4. **Confirm the run parameters**, asking for whatever isn't already
    obvious from the scan:
@@ -138,10 +148,20 @@ with a full R/G/B set for the primary telescope.
   every colour contributor for the primary telescope is done) -- each
   with background/noise/SNR/star-count/warnings.
   **RGB-only mode**: if the scan found no Luminance data for this target
-  on any telescope (a one-shot-colour/OSC delivery, e.g. no filter but
-  "Color" -- `run_lrgb` detects this automatically, no parameter to set),
-  checkpoint `01_master_luminance` never appears -- only `02_primary_rgb_
-  colour_calibrated`. This is expected, not a partial/failed run.
+  on any telescope, checkpoint `01_master_luminance` never appears -- only
+  `02_primary_rgb_colour_calibrated`. This is expected, not a partial/
+  failed run. `run_lrgb` detects this automatically, no parameter to set.
+  The real trigger case so far is a one-shot-colour (OSC) delivery -- a
+  telescope with a `Color` filter group instead of separate Luminance/
+  Red/Green/Blue ones (real case: T02, Abell 6 and HFG1). OSC lights are
+  genuine undemosaiced Bayer-mosaic sensor data, debayered automatically
+  as part of building that contributor -- nothing to ask Kaveh about
+  there either. A target with BOTH a full mono R/G/B set AND `Color` data
+  at the same (telescope, binning) raises `NotImplementedError` instead
+  of silently combining them (channel-order parity between Siril's
+  debayer output and the mono path's `rgbcomp` has never been verified) --
+  a real, deliberate limitation, not a bug; relay the exception message
+  verbatim if it comes up.
 - The `=== PREVIEWS ===` section lists each checkpoint's preview PNG path.
   **Actually look at them** — use the Read tool on each preview path
   before presenting the checkpoint, the same way a human would look at a
@@ -307,16 +327,30 @@ work. No separate cleanup step exists or is needed.
   (once live via `run_lrgb`'s internal `print()`, once again under
   `=== NOTES ===` since that's `result.notes` printed back) -- cosmetic,
   not a bug; treat `=== NOTES ===` as the authoritative transcript.
-- This skill has only been walked through against the real M51 project
-  folder (both telescopes, both binnings, a Luminance override round-trip
-  that succeeded, and one that raised `ReprojectionError` -- see above).
+- This skill has been walked through against three real project folders:
+  M51 (both telescopes, both binnings, a Luminance override round-trip
+  that succeeded, and one that raised `ReprojectionError` -- see above),
+  NGC 3628 (T73, `CalibrationMode.PRECALIBRATED` -- confirmed the
+  "Precalibrated" interview line and its calibration-gap filtering both
+  work end to end on a real no-local-dark delivery), and Abell 6 and HFG1
+  (T02, RGB-only + OSC -- confirmed checkpoints `02`/`04`/`05_rgb_final`
+  all fire correctly with no `01`/`03`, and the `_rgb.tif` export naming).
   It has not been exercised against a project with zero colour
-  contributors, an unknown telescope (`UnknownInstrumentError`), or a
-  genuinely `[BLOCKED]` calibration gap -- those paths exist in the
-  underlying pipeline (Slice 3.1/3.2, `calibration.select_dark`) but
-  weren't hit on real data this session. If one comes up, relay
+  contributors at all, an unknown telescope (`UnknownInstrumentError`), a
+  genuinely `[BLOCKED]` calibration gap, or the mixed-OSC-and-mono-RGB
+  `NotImplementedError` case -- those paths exist in the underlying
+  pipeline but weren't hit on real data yet. If one comes up, relay
   `run_lrgb`'s actual exception message rather than guessing what it
   means.
+- **This machine's ~8GB RAM can OOM-kill a real Siril `register`/`stack`
+  call outright** on a handful of large (6000x4000+) frames -- confirmed
+  real on the Abell 6/HFG1 run (7 frames, killed mid-`stack`, no partial/
+  corrupt output). `run_lrgb`'s own resumability already covers this:
+  the staged/debayered lights survive the kill, so simply re-running the
+  identical `run_stage.py` command resumes from `register+stack` rather
+  than restaging from scratch. If a real run dies this way, say so
+  plainly and just re-run the same command -- don't treat it as a code
+  bug to fix first.
 - **Forcing a Luminance-tier rebuild is not byte-reproducible**, even
   reverting to the exact same parameters afterward: reverting the M51
   override back to `T24-bin1` during this slice's validation re-ran
