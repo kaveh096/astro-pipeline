@@ -166,3 +166,47 @@ def export(
         clipped_high_fraction=clipped_high,
         row_order=row_order,
     )
+
+
+def export_with_black_point(
+    fits_path: str | Path,
+    black_point: float,
+    output_dir: str | Path | None = None,
+    stem: str | None = None,
+    write_preview: bool = True,
+    preview_max_dim: int = 1400,
+) -> ExportResult:
+    """Optional aesthetic post-processing stage (capability D2, 2026-09):
+    crush the black point of an already-stretched final composite.
+
+    This is deliberately NOT new pixel-math -- it is exactly `export()`'s
+    existing [low, high] input-range mapping, called with `low=black_point`
+    instead of 0.0. Raising the low end of that mapping is precisely a
+    Levels-style black-point operation: pixels at or below `black_point`
+    clip to output 0, and the remaining range up to `high=1.0` is rescaled
+    to fill the full output range -- the same `clipped_low_fraction`
+    reporting `export()` already does for free tells the caller how much
+    was actually crushed.
+
+    Kept as a SEPARATE function from `export()` rather than a new default
+    parameter there, because `black_point` is a genuine aesthetic
+    preference (how much shadow detail to trade for a punchier
+    background), not a pipeline default -- this project's convention is
+    to surface personal-preference knobs as an explicit ask, not bake one
+    in. There is deliberately no default value here; the caller must
+    decide.
+
+    Never overwrites the faithful default export -- callers should pass a
+    distinct `stem` (e.g. f"{target}_darkened") so both files coexist.
+    """
+    if not 0.0 <= black_point < 1.0:
+        raise ValueError(f"black_point must be in [0, 1) -- got {black_point}")
+    return export(
+        fits_path,
+        output_dir=output_dir,
+        stem=stem,
+        write_preview=write_preview,
+        preview_max_dim=preview_max_dim,
+        low=black_point,
+        high=1.0,
+    )

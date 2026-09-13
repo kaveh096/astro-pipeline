@@ -6,7 +6,13 @@ import tifffile
 from astropy.io import fits
 from PIL import Image
 
-from astro_pipeline.export_image import ExportError, _orient_for_display, _scale_to_uint, export
+from astro_pipeline.export_image import (
+    ExportError,
+    _orient_for_display,
+    _scale_to_uint,
+    export,
+    export_with_black_point,
+)
 
 
 def write_fits(path: Path, data: np.ndarray, row_order: str | None = None) -> Path:
@@ -132,3 +138,63 @@ def test_export_reports_nan_fraction(tmp_path: Path) -> None:
     result = export(src, output_dir=tmp_path, write_preview=False)
 
     assert result.nan_fraction == pytest.approx(0.25)
+
+
+# --- export_with_black_point (capability D2, 2026-09) -----------------------
+
+
+def test_black_point_crushes_shadows_and_rescales_remaining_range(tmp_path: Path) -> None:
+    """A black_point of 0.2 should clip everything at/below 0.2 to output 0,
+    and rescale [0.2, 1.0] to fill the full output range -- NOT just shift
+    everything down uniformly."""
+    data = np.array([0.0, 0.2, 0.6, 1.0], dtype=np.float32)
+    src = write_fits(tmp_path / "shadows.fit", data, row_order="TOP-DOWN")
+
+    result = export_with_black_point(src, black_point=0.2, output_dir=tmp_path, write_preview=False)
+
+    tiff = tifffile.imread(result.tiff_path)
+    # 0.0 is strictly below black_point -> clipped. 0.2 lands exactly at the
+    # new zero point via the rescale math itself (0.2-0.2)/(1.0-0.2) = 0.0,
+    # not via the clipped-pixel counter (which only counts data < low,
+    # matching _scale_to_uint's existing, already-tested semantics).
+    assert tiff[0] == 0 and tiff[1] == 0
+    # 0.6 is (0.6-0.2)/(1.0-0.2) = 0.5 of the remaining range.
+    assert abs(int(tiff[2]) - 32768) <= 1
+    assert tiff[3] == 65535
+    assert result.clipped_low_fraction == pytest.approx(0.25)  # only the 0.0 pixel is < black_point
+
+
+def test_black_point_zero_is_equivalent_to_plain_export(tmp_path: Path) -> None:
+    data = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+    src = write_fits(tmp_path / "plain.fit", data, row_order="TOP-DOWN")
+
+    plain = export(src, output_dir=tmp_path, stem="plain_out", write_preview=False)
+    darkened = export_with_black_point(
+        src, black_point=0.0, output_dir=tmp_path, stem="darkened_out", write_preview=False
+    )
+
+    assert np.array_equal(tifffile.imread(plain.tiff_path), tifffile.imread(darkened.tiff_path))
+
+
+def test_black_point_writes_a_separate_file_not_overwriting_the_faithful_export(tmp_path: Path) -> None:
+    data = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+    src = write_fits(tmp_path / "orion.fit", data, row_order="TOP-DOWN")
+
+    faithful = export(src, output_dir=tmp_path, stem="orion_lrgb", write_preview=False)
+    darkened = export_with_black_point(
+        src, black_point=0.3, output_dir=tmp_path, stem="orion_darkened", write_preview=False
+    )
+
+    assert faithful.tiff_path != darkened.tiff_path
+    assert faithful.tiff_path.exists() and darkened.tiff_path.exists()
+    assert not np.array_equal(tifffile.imread(faithful.tiff_path), tifffile.imread(darkened.tiff_path))
+
+
+def test_black_point_rejects_out_of_range_values(tmp_path: Path) -> None:
+    data = np.array([0.5], dtype=np.float32)
+    src = write_fits(tmp_path / "x.fit", data, row_order="TOP-DOWN")
+
+    with pytest.raises(ValueError):
+        export_with_black_point(src, black_point=1.0, output_dir=tmp_path, write_preview=False)
+    with pytest.raises(ValueError):
+        export_with_black_point(src, black_point=-0.1, output_dir=tmp_path, write_preview=False)
