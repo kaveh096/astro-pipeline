@@ -8,6 +8,7 @@ from astro_pipeline.background_color import UnknownInstrumentError
 from astro_pipeline.calibration import CalibrationMode, FlatPolicy
 from astro_pipeline.ingest import scan_session
 from astro_pipeline.pipeline import (
+    NARROWBAND_PALETTES,
     ColourContributor,
     _build_colour_contributor,
     contributor_dir,
@@ -15,6 +16,7 @@ from astro_pipeline.pipeline import (
     discover_luminance_contributors,
     infer_calibration_mode,
     infer_flat_policy,
+    normalize_narrowband_filter_name,
     resolve_instrument_profile,
     resolve_lights,
     run_lrgb,
@@ -580,6 +582,196 @@ def test_build_colour_contributor_skips_on_missing_green_not_just_red(tmp_path: 
     green_lights, _ = resolve_lights(report, "T24", "M51", "Green", 2)
     assert red_lights  # present
     assert not green_lights  # missing -- this is the one that should skip
+
+
+# --- capability A (narrowband, 2026-09): _build_colour_contributor's new --
+# --- filters/run_colour_calibration parameters ------------------------------
+
+
+class _FakeReportNarrowband:
+    """Real T20/M42 narrowband shape (Ha/OIII/SII), 3 lights each -- enough
+    to clear MIN_SEQUENCE_FRAMES and reach the alignment/rgbcomp logic."""
+
+    def instrument_groups(self):
+        return {
+            ("T20", "M42", "Ha", 2): [_FakeLightFrame(), _FakeLightFrame()],
+            ("T20", "M42", "OIII", 2): [_FakeLightFrame(), _FakeLightFrame()],
+        }
+
+    def calibration_index(self):
+        return {}
+
+    def flat_index(self):
+        return {}
+
+
+def _write_stub_master(path: Path, fill: float) -> Path:
+    fits.PrimaryHDU(data=np.full((8, 8), fill, dtype=np.float32)).writeto(path, overwrite=True)
+    return path
+
+
+def test_build_colour_contributor_hoo_duplicates_repeated_filter_and_adds_nosum(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The real, new logic this capability adds: HOO's (Ha, OIII, OIII)
+    triplet must build only 2 real masters (Ha, OIII -- deduplicated),
+    but produce 3 on-disk channel files for rgbcomp (oiii.fit duplicated
+    to oiii_2.fit rather than colliding), and the rgbcomp command must
+    include -nosum (only added because of the real repeat), while never
+    running SPCC (run_colour_calibration=False)."""
+    import astro_pipeline.pipeline as pipeline_module
+
+    contrib_dir = tmp_path / "contrib"
+
+    def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *args, **kwargs):
+        # One real, tiny, readable FITS master per unique filter.
+        return _write_stub_master(tmp_path / f"master_{filter_name}.fit", fill=0.3)
+
+    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+
+    def fake_reproject(source, reference, out_path):
+        _write_stub_master(out_path, fill=0.3)
+
+        class _FakeReconResult:
+            footprint_mean = 1.0
+
+        return _FakeReconResult()
+
+    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject)
+    monkeypatch.setattr(pipeline_module, "crop_to_common_coverage", lambda paths, out_dir: None)
+
+    captured_rgbcomp_command = {}
+
+    def fake_run_script(commands, workdir=None, **kwargs):
+        captured_rgbcomp_command["command"] = commands[0]
+        _write_stub_master(Path(workdir) / "rgb_native.fit", fill=0.3)
+
+        class _FakeResult:
+            log_lines: list[str] = []
+
+        return _FakeResult()
+
+    monkeypatch.setattr(pipeline_module, "run_script", fake_run_script)
+    monkeypatch.setattr(
+        pipeline_module, "run_graxpert_background_extraction",
+        lambda fits_path, output_stem: _write_stub_master(Path(fits_path).parent / f"{output_stem}.fits", fill=0.3),
+    )
+
+    result = _build_colour_contributor(
+        tmp_path, contrib_dir, _FakeReportNarrowband(), "T20", "M42", 2,
+        5.588, -5.391, [],
+        filters=("Ha", "OIII", "OIII"),
+        run_colour_calibration=False,
+    )
+
+    assert result is not None
+    # The repeated filter (OIII) must be duplicated under a distinct name,
+    # not silently collided on disk.
+    assert (contrib_dir / "ha.fit").exists()
+    assert (contrib_dir / "oiii.fit").exists()
+    assert (contrib_dir / "oiii_2.fit").exists()
+    # -nosum must be present -- only because of the real repeated filter.
+    assert "-nosum" in captured_rgbcomp_command["command"]
+    assert captured_rgbcomp_command["command"] == "rgbcomp ha oiii oiii_2 -out=rgb_native -nosum"
+    # SPCC skipped entirely -- the final composite is the background-
+    # extracted output copied straight through, no colour_calibrated
+    # inprogress staging file left behind.
+    assert not (contrib_dir / "rgb_colour_calibrated__inprogress.fit").exists()
+    assert result.composite_path == contrib_dir / "rgb_colour_calibrated.fit"
+    assert result.composite_path.exists()
+
+
+def test_build_colour_contributor_rgb_default_produces_no_nosum(tmp_path: Path, monkeypatch) -> None:
+    """Regression guard: the default (no repeated filter) RGB path must
+    NEVER get -nosum appended -- verifies has_repeated_filter is actually
+    False for the unchanged default case, not just narrowband."""
+    import astro_pipeline.pipeline as pipeline_module
+
+    contrib_dir = tmp_path / "contrib_rgb"
+
+    def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *args, **kwargs):
+        return _write_stub_master(tmp_path / f"master_{filter_name}.fit", fill=0.3)
+
+    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+
+    def fake_reproject(source, reference, out_path):
+        _write_stub_master(out_path, fill=0.3)
+
+        class _FakeReconResult:
+            footprint_mean = 1.0
+
+        return _FakeReconResult()
+
+    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject)
+    monkeypatch.setattr(pipeline_module, "crop_to_common_coverage", lambda paths, out_dir: None)
+
+    captured = {}
+
+    def fake_run_script(commands, workdir=None, **kwargs):
+        captured["command"] = commands[0]
+        _write_stub_master(Path(workdir) / "rgb_native.fit", fill=0.3)
+
+        class _FakeResult:
+            log_lines: list[str] = []
+
+        return _FakeResult()
+
+    monkeypatch.setattr(pipeline_module, "run_script", fake_run_script)
+    monkeypatch.setattr(
+        pipeline_module, "run_graxpert_background_extraction",
+        lambda fits_path, output_stem: _write_stub_master(Path(fits_path).parent / f"{output_stem}.fits", fill=0.3),
+    )
+
+    class _FakeReportRGB:
+        def instrument_groups(self):
+            return {
+                ("T24", "M51", "Red", 2): [_FakeLightFrame(), _FakeLightFrame()],
+                ("T24", "M51", "Green", 2): [_FakeLightFrame(), _FakeLightFrame()],
+                ("T24", "M51", "Blue", 2): [_FakeLightFrame(), _FakeLightFrame()],
+            }
+
+        def calibration_index(self):
+            return {}
+
+        def flat_index(self):
+            return {}
+
+    result = _build_colour_contributor(
+        tmp_path, contrib_dir, _FakeReportRGB(), "T24", "M51", 2,
+        13.4980, 47.1953, [],
+        run_colour_calibration=False,
+    )
+
+    assert result is not None
+    assert captured["command"] == "rgbcomp red green blue -out=rgb_native"
+    assert "-nosum" not in captured["command"]
+
+
+# --- capability A (narrowband, 2026-09): filter-name normalization --------
+
+
+def test_narrowband_palettes_are_the_real_verified_mappings() -> None:
+    assert NARROWBAND_PALETTES["sho"] == ("SII", "Ha", "OIII")
+    assert NARROWBAND_PALETTES["hoo"] == ("Ha", "OIII", "OIII")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("Ha", "Ha"), ("ha", "Ha"), ("H-Alpha", "Ha"), ("Halpha", "Ha"), ("HYDROGEN-ALPHA", "Ha"),
+        ("OIII", "OIII"), ("oiii", "OIII"), ("O3", "OIII"), ("O-III", "OIII"), ("Oxygen-III", "OIII"),
+        ("SII", "SII"), ("sii", "SII"), ("S2", "SII"), ("S-II", "SII"), ("Sulfur-II", "SII"),
+    ],
+)
+def test_normalize_narrowband_filter_name_handles_real_world_spelling_variants(raw: str, expected: str) -> None:
+    assert normalize_narrowband_filter_name(raw) == expected
+
+
+def test_normalize_narrowband_filter_name_leaves_non_narrowband_names_unchanged() -> None:
+    """This is deliberately NOT a general-purpose filter normalizer --
+    Red/Green/Blue/Luminance must pass through untouched."""
+    for name in ("Red", "Green", "Blue", "Luminance", "Color"):
+        assert normalize_narrowband_filter_name(name) == name
 
 
 # --- Slice 3.3: contributor naming is telescope-explicit and keyed, -------

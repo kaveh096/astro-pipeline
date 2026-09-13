@@ -161,6 +161,54 @@ LUMINANCE_FILTER = "Luminance"
 # contributor" behaviour, not silently treated as OSC.
 OSC_FILTER = "Color"
 
+# Narrowband palette mappings (capability A, 2026-09): each maps to a
+# (red, green, blue) filter-name triplet, reusing the exact same
+# `_build_colour_contributor` machinery as broadband RGB (register+stack
+# per filter, reproject onto the first filter's grid, crop to common
+# coverage, rgbcomp) -- confirmed real via fresh research that Siril's
+# `rgbcomp` is genuinely filter-name-agnostic (see docs/
+# colour-calibration-catalogues.md's SPCC section for the related,
+# narrowband-specific SPCC caveat). "sho" (the stylized Hubble palette,
+# NOT physically-real relative line intensities) maps SII/Ha/OIII to
+# R/G/B. "hoo" (bicolor) reuses OIII for both G and B -- Siril's own real
+# HOO tutorial passes `-nosum` specifically for this reuse case, to avoid
+# double-counting exposure/stack-count metadata; the OIII master file is
+# duplicated to a second path rather than referencing the same file
+# twice, as the safe, verified-mechanical choice (untested whether Siril
+# accepts the identical path twice for `rgbcomp` -- not worth the risk
+# for the one extra file copy this avoids).
+NARROWBAND_PALETTES: dict[str, tuple[str, str, str]] = {
+    "sho": ("SII", "Ha", "OIII"),
+    "hoo": ("Ha", "OIII", "OIII"),
+}
+
+# Real FILTER header spelling varies across the wider amateur/network
+# community (confirmed real for THIS project's own telescopes: T20's
+# real FITS headers use exactly "Ha"/"OIII"/"SII", verified 2026-09 --
+# but other deliveries, especially non-iTelescope ones, commonly spell
+# these "H-Alpha"/"Halpha", "O3"/"O-III", "S2"/"S-II"). This table
+# normalizes known real-world variants to this codebase's own internal
+# canonical spelling (matching NARROWBAND_PALETTES above) -- resolve_
+# lights() callers for narrowband should normalize through this before
+# matching, so a differently-spelled real delivery gets a real match
+# instead of a silent "no lights found".
+NARROWBAND_FILTER_ALIASES: dict[str, str] = {
+    "ha": "Ha", "h-alpha": "Ha", "halpha": "Ha", "hydrogen-alpha": "Ha",
+    "oiii": "OIII", "o3": "OIII", "o-iii": "OIII", "oxygen-iii": "OIII",
+    "sii": "SII", "s2": "SII", "s-ii": "SII", "sulfur-ii": "SII",
+}
+
+
+def normalize_narrowband_filter_name(filter_name: str) -> str:
+    """Map a real FITS FILTER header string to this codebase's canonical
+    Ha/OIII/SII spelling, case- and punctuation-insensitively, via
+    NARROWBAND_FILTER_ALIASES. Returns the input unchanged if it doesn't
+    match any known narrowband alias (e.g. "Luminance", "Red") -- this
+    function is deliberately NOT a general-purpose filter normalizer,
+    only a narrowband one."""
+    key = filter_name.strip().lower()
+    return NARROWBAND_FILTER_ALIASES.get(key, filter_name)
+
 
 @dataclass
 class PipelineResult:
@@ -759,21 +807,55 @@ def _build_colour_contributor(
     notes: list[str],
     flat_policy: FlatPolicy = FlatPolicy.SKIP_IF_MISSING,
     calibration_mode: CalibrationMode = CalibrationMode.RAW_LOCAL,
+    filters: tuple[str, str, str] = RGB_FILTERS,
+    run_colour_calibration: bool = True,
 ) -> ColourContributor | None:
-    """Build one binning's R/G/B masters, align + crop + composite them,
-    then background-extract and colour-calibrate -- everything the
-    single-contributor pipeline always did, just namespaced under
+    """Build one binning's 3-filter masters, align + crop + composite them,
+    then background-extract and (optionally) colour-calibrate -- everything
+    the single-contributor pipeline always did, just namespaced under
     `contrib_dir` so multiple binnings can coexist.
 
-    Returns None -- logging why, rather than raising -- if any of R/G/B is
-    missing for this (telescope, binning): a colour contributor needs all
-    three, but a partial set is a real, survivable state once RGB
-    discovery broadens beyond one telescope (this function's own
-    behaviour is scoped narrowly here; broadening the discovery loop
-    itself is a separate, later concern -- see run_lrgb). Before Slice 3
-    this raised RuntimeError and aborted the entire run over one missing
-    filter on one binning; that's disproportionate once a partial
-    contributor is an expected, not exceptional, outcome.
+    `filters` (capability A, narrowband/SHO-HOO plan, 2026-09): the
+    (red-slot, green-slot, blue-slot) filter-name triplet fed to
+    `rgbcomp`, defaulting to `RGB_FILTERS` -- this default reproduces the
+    exact pre-existing behaviour byte-for-byte (same on-disk filenames,
+    same log text, same rgbcomp invocation), verified via the existing
+    RGB test suite. A repeated filter name across slots (HOO's real
+    `("Ha", "OIII", "OIII")` -- OIII feeding both G and B) is handled by
+    duplicating that filter's file under a second on-disk name rather
+    than assuming Siril's `rgbcomp` accepts the identical path twice
+    (unverified) -- `-nosum` is then added to the `rgbcomp` call, per
+    Siril's own real HOO tutorial, to avoid double-counting exposure/
+    stack-count metadata from the reused filter; only added when a
+    repeat is actually present, so the default RGB path's `rgbcomp`
+    invocation is completely unchanged.
+
+    `run_colour_calibration` (capability A): SPCC models real broadband
+    filter + sensor spectral response against Gaia's realistic stellar
+    spectra -- verified real (Siril's own SPCC docs) that this produces a
+    physically "correct" but visually wrong result for a narrowband
+    palette (a "huge green cast" on SHO, since it models SII's genuinely
+    much fainter real line intensity rather than preserving the stylized
+    Hubble-palette convention). Callers building a narrowband composite
+    should pass False; every existing (broadband RGB) caller keeps the
+    default True, unchanged. NOTE: this flag alone does not yet apply any
+    real substitute colour balancing for narrowband output -- per-channel
+    background equalization (the actual common alternative to SPCC in
+    real narrowband workflows) is real, necessary follow-up work
+    deliberately NOT implemented here, since deriving the right formula
+    requires real narrowband masters to measure against (see Task 2 of
+    the publish roadmap), not a guess. A narrowband composite built via
+    this flag today will look plausible but un-colour-balanced.
+
+    Returns None -- logging why, rather than raising -- if any filter in
+    `filters` is missing for this (telescope, binning): a colour
+    contributor needs all three, but a partial set is a real, survivable
+    state once RGB discovery broadens beyond one telescope (this
+    function's own behaviour is scoped narrowly here; broadening the
+    discovery loop itself is a separate, later concern -- see run_lrgb).
+    Before Slice 3 this raised RuntimeError and aborted the entire run
+    over one missing filter on one binning; that's disproportionate once
+    a partial contributor is an expected, not exceptional, outcome.
 
     `flat_policy` (Slice 2.2 of plan-flats-v3.md): threaded in from
     run_lrgb's own per-telescope inference/override (see
@@ -798,17 +880,24 @@ def _build_colour_contributor(
     contrib_dir.mkdir(parents=True, exist_ok=True)
     cal_index = report.calibration_index()
 
+    unique_filters = list(dict.fromkeys(filters))  # de-duplicated, order preserved
+    # "all three"/"both" must match the real distinct-filter count -- HOO's
+    # real (Ha, OIII, OIII) has only 2 unique filters, not 3, so a fixed
+    # "all three" would misdescribe it.
+    _quantifier = {1: "the", 2: "both", 3: "all three"}.get(len(unique_filters), f"all {len(unique_filters)}")
+    filters_label = f"{_quantifier} of {'/'.join(unique_filters)}"
+
     channel_masters: dict[str, Path] = {}
     sub_count = 0
     stack_total = 0
-    for filter_name in RGB_FILTERS:
+    for filter_name in unique_filters:
         lights, group_name = resolve_lights(
             report, telescope, target, filter_name, binning, calibration_mode=calibration_mode
         )
         if not lights:
             _log(
                 f"[skip] BIN{binning}: no {filter_name} lights found for {telescope}/{target} "
-                "-- a colour contributor needs all three of Red/Green/Blue; skipping this "
+                f"-- a colour contributor needs {filters_label}; skipping this "
                 "contributor rather than aborting the whole run",
                 notes,
             )
@@ -843,6 +932,7 @@ def _build_colour_contributor(
         stack_total += int(fits.getheader(master_path).get("STACKCNT", len(lights)))
 
     rgb_native = contrib_dir / "rgb_native.fit"
+    has_repeated_filter = len(unique_filters) < len(filters)
     if not usable(rgb_native, notes):
         # Each filter was registered against its OWN reference frame, so the
         # three masters do not share a pointing -- and `rgbcomp` stacks them
@@ -850,28 +940,43 @@ def _build_colour_contributor(
         # real data, Green sat 8.8px from Red and Blue 4.4px, comparable to
         # the stars' own ~5-9px FWHM, which showed up as red/green fringing
         # on every star in the checkpoint preview. Reproject the other two
-        # onto Red's grid first so the channels actually correspond.
-        reference = channel_masters["Red"]
-        shutil.copy2(reference, contrib_dir / "red.fit")
-        for filter_name in ("Green", "Blue"):
-            out_path = contrib_dir / f"{filter_name.lower()}.fit"
+        # onto the reference (first slot)'s grid first so the channels
+        # actually correspond.
+        reference_filter = filters[0]
+        reference = channel_masters[reference_filter]
+        slot_names = [f"{reference_filter.lower()}.fit"]
+        shutil.copy2(reference, contrib_dir / slot_names[0])
+        seen_names = {slot_names[0]}
+        for filter_name in filters[1:]:
+            candidate_name = f"{filter_name.lower()}.fit"
+            if candidate_name in seen_names:
+                # A repeated filter across slots (HOO's real OIII-for-G-
+                # and-B case) -- duplicate under a distinct name rather
+                # than colliding on disk or assuming rgbcomp accepts the
+                # identical path twice for two channels (unverified).
+                candidate_name = f"{filter_name.lower()}_2.fit"
+            seen_names.add(candidate_name)
+            out_path = contrib_dir / candidate_name
             recon = reproject_to_reference(channel_masters[filter_name], reference, out_path)
             _log(
-                f"[run ] BIN{binning}: aligned {filter_name} onto Red's grid "
+                f"[run ] BIN{binning}: aligned {filter_name} onto {reference_filter}'s grid "
                 f"(footprint {recon.footprint_mean:.3f})",
                 notes,
             )
+            slot_names.append(candidate_name)
         # Crop away the slivers alignment left uncovered rather than filling
         # them -- a constant fill is visible to GraXpert's background model
         # and produced a green band across the finished image. See
         # crop_to_common_coverage.
-        channel_paths = [contrib_dir / f"{f.lower()}.fit" for f in RGB_FILTERS]
+        channel_paths = [contrib_dir / name for name in slot_names]
         crop_to_common_coverage(channel_paths, contrib_dir)
         cropped_shape = fits.getdata(channel_paths[0], memmap=False).shape
         _log(f"[run ] BIN{binning}: cropped channels to common coverage {cropped_shape}", notes)
 
         _log(f"[run ] BIN{binning}: rgbcomp at native resolution", notes)
-        run_script(["rgbcomp red green blue -out=rgb_native"], workdir=contrib_dir)
+        stems = [p.stem for p in channel_paths]
+        nosum_flag = " -nosum" if has_repeated_filter else ""
+        run_script([f"rgbcomp {stems[0]} {stems[1]} {stems[2]} -out=rgb_native{nosum_flag}"], workdir=contrib_dir)
     else:
         _log(f"[skip] BIN{binning}: rgb_native.fit already present", notes)
 
@@ -884,25 +989,39 @@ def _build_colour_contributor(
 
     colour_calibrated = contrib_dir / "rgb_colour_calibrated.fit"
     if not usable(colour_calibrated, notes):
-        # Do the work on a temporary name and only move it into place once
-        # it succeeds -- see module docstring / commit history: copying the
-        # input to the final name up-front and processing in place leaves a
-        # valid-looking file behind when the stage fails, and `usable()`
-        # cannot tell the difference, since the data IS intact, it simply
-        # has not been transformed. Existence must mean completion.
-        staging = contrib_dir / "rgb_colour_calibrated__inprogress.fit"
-        shutil.copy2(rgb_bg, staging)
-        profile = resolve_instrument_profile(telescope)
-        _log(f"[run ] BIN{binning}: SPCC colour calibration ({profile.mono_sensor}, local Gaia)", notes)
-        solution = run_spcc(staging, contrib_dir, profile=profile)
-        os.replace(staging, colour_calibrated)
-        _log(
-            f"       BIN{binning} SPCC used {solution.stars_used} stars, "
-            f"white balance {solution.white_balance}",
-            notes,
-        )
-    else:
+        if run_colour_calibration:
+            # Do the work on a temporary name and only move it into place
+            # once it succeeds -- see module docstring / commit history:
+            # copying the input to the final name up-front and processing
+            # in place leaves a valid-looking file behind when the stage
+            # fails, and `usable()` cannot tell the difference, since the
+            # data IS intact, it simply has not been transformed.
+            # Existence must mean completion.
+            staging = contrib_dir / "rgb_colour_calibrated__inprogress.fit"
+            shutil.copy2(rgb_bg, staging)
+            profile = resolve_instrument_profile(telescope)
+            _log(f"[run ] BIN{binning}: SPCC colour calibration ({profile.mono_sensor}, local Gaia)", notes)
+            solution = run_spcc(staging, contrib_dir, profile=profile)
+            os.replace(staging, colour_calibrated)
+            _log(
+                f"       BIN{binning} SPCC used {solution.stars_used} stars, "
+                f"white balance {solution.white_balance}",
+                notes,
+            )
+        else:
+            # Narrowband (capability A): SPCC deliberately skipped (see
+            # this function's own docstring) -- the background-extracted
+            # composite IS the contributor's final composite as-is.
+            shutil.copy2(rgb_bg, colour_calibrated)
+            _log(
+                f"[run ] BIN{binning}: colour calibration skipped (narrowband palette) "
+                "-- using background-extracted composite directly",
+                notes,
+            )
+    elif run_colour_calibration:
         _log(f"[skip] BIN{binning}: SPCC already done", notes)
+    else:
+        _log(f"[skip] BIN{binning}: colour calibration stage already done (narrowband, no SPCC)", notes)
 
     return ColourContributor(
         telescope=telescope, binning=binning, composite_path=colour_calibrated,
