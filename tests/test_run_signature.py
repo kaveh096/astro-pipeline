@@ -381,12 +381,20 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
             self.user = user
             self.exptime = 300.0
 
+    # Two lights, not one: a later slice added a MIN_SEQUENCE_FRAMES=2
+    # skip in run_lrgb's Luminance loop (Siril refuses to form a sequence
+    # from a single frame) -- a single fake light here would be silently
+    # skipped before ever reaching the contributor_stale call site this
+    # test exists to exercise, which is exactly what happened when this
+    # test regressed: it kept passing for the wrong reason (RGB-only mode
+    # raising early) until a real assertion caught the mismatch.
     lum_light = _FakeLightFrame("SAME-LIGHTS-UNCHANGED.fit")
+    lum_light2 = _FakeLightFrame("SAME-LIGHTS-UNCHANGED-2.fit")
     # The persisted frame_hash must be the REAL computed hash for this
     # light set, not an arbitrary string -- otherwise the light-set
     # comparison alone would already report stale, and this test would no
     # longer isolate "only the flat set changed" as the actual cause.
-    real_light_frame_hash = frame_identity_hash([lum_light.path.name])
+    real_light_frame_hash = frame_identity_hash([lum_light.path.name, lum_light2.path.name])
     persisted = {
         "stretch_method": "autostretch",
         "pedestal": 0.1,
@@ -394,7 +402,7 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
         "luminance": {
             "T99_bin1": {
                 "key": "T99_bin1",
-                "stackcnt": 1,
+                "stackcnt": 2,
                 "frame_hash": real_light_frame_hash,
                 "spcc_profile": None,
                 # no flat_frame_hash key -- old format.
@@ -417,7 +425,7 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
             return {}
 
         def instrument_groups(self):
-            return {("T99", "M51", "Luminance", 1): [lum_light]}
+            return {("T99", "M51", "Luminance", 1): [lum_light, lum_light2]}
 
         def calibrated_instrument_groups(self):
             return {}
