@@ -9,10 +9,12 @@ from astro_pipeline.background_color import (
     BackgroundExtractionError,
     CatalogueUnavailableError,
     ColorCalibrationError,
+    DenoiseError,
     _parse_spcc_result,
     calibrate_color_and_background,
     find_graxpert,
     run_graxpert_background_extraction,
+    run_graxpert_denoise,
     run_spcc,
 )
 from astro_pipeline.siril_driver import SirilResult, find_siril_cli
@@ -158,6 +160,106 @@ def test_run_graxpert_raises_on_degenerate_nan_output(tmp_path: Path, monkeypatc
 
     with pytest.raises(BackgroundExtractionError, match="NaN"):
         run_graxpert_background_extraction(src, output_stem="fake_bg", timeout=30)
+
+
+# --- run_graxpert_denoise (capability D1, 2026-09) --------------------------
+# gpu=False everywhere here: -gpu true (DirectML) was verified real-crashing
+# on this development machine's own GPU/driver stack (ONNX runtime
+# "Unspecified error" on the very first real denoise call) -- see
+# run_graxpert_denoise's own docstring. Tests must not depend on GPU support
+# being present/working on whatever machine runs them.
+
+
+def test_denoise_output_path_uses_bare_stem_convention(tmp_path: Path) -> None:
+    if not GRAXPERT_AVAILABLE:
+        pytest.skip("GraXpert not installed")
+    y, x = np.mgrid[0:96, 0:96]
+    synthetic = (1000 + (x + y).astype(np.float32) * 2.0)
+    src = tmp_path / "tiny.fit"
+    fits.writeto(src, synthetic)
+
+    output_path = run_graxpert_denoise(src, output_stem="tiny_denoised", gpu=False, timeout=180)
+
+    assert output_path == tmp_path / "tiny_denoised.fits"
+    assert_valid_pixel_data(output_path)
+
+
+def test_run_graxpert_denoise_raises_when_output_missing(tmp_path: Path) -> None:
+    if not GRAXPERT_AVAILABLE:
+        pytest.skip("GraXpert not installed")
+    missing = tmp_path / "does_not_exist.fit"
+    with pytest.raises((DenoiseError, FileNotFoundError, Exception)):
+        run_graxpert_denoise(missing, output_stem="whatever", gpu=False, timeout=30)
+
+
+def test_run_graxpert_denoise_raises_on_degenerate_nan_output(tmp_path: Path, monkeypatch) -> None:
+    """Same regression guard as background-extraction's own NaN test --
+    denoising reuses the identical NaN-safety pattern, so it must be
+    exercised for denoising independently, not assumed to inherit
+    coverage from the other function's test."""
+    if not GRAXPERT_AVAILABLE:
+        pytest.skip("GraXpert not installed")
+
+    fake_output = tmp_path / "fake_denoised.fits"
+    fits.writeto(fake_output, np.full((32, 32), np.nan, dtype=np.float32))
+
+    import subprocess as subprocess_module
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = "fake success output"
+
+    monkeypatch.setattr(subprocess_module, "run", lambda *a, **k: FakeCompletedProcess())
+
+    src = tmp_path / "input.fit"
+    fits.writeto(src, np.ones((32, 32), dtype=np.float32))
+
+    with pytest.raises(DenoiseError, match="NaN"):
+        run_graxpert_denoise(src, output_stem="fake_denoised", gpu=False, timeout=30)
+
+
+def test_run_graxpert_denoise_fills_and_does_not_restore_nan_by_default(tmp_path: Path, monkeypatch) -> None:
+    """Mocked (no real GraXpert call): confirms the NaN-fill-before step
+    actually runs on a NaN-containing input, and that restore_nan=False
+    (the default) leaves the output's NaN-free-filled state alone rather
+    than reintroducing NaN -- mirrors the equivalent, already-real
+    behavior of run_graxpert_background_extraction, exercised here
+    independently for the denoise code path."""
+    import subprocess as subprocess_module
+
+    fed_data_holder = {}
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = "fake success output"
+
+    def fake_run(cmd, **kwargs):
+        # The input path GraXpert was actually invoked against is the last
+        # positional argument in the real command list. Read its data NOW,
+        # inside the mock -- the real code deletes this temp file right
+        # after subprocess.run returns, so it won't exist afterward.
+        fed_data_holder["data"] = fits.getdata(Path(cmd[-1]), memmap=False)
+        # Write a plausible, non-degenerate output so the post-call NaN
+        # check passes and this test isolates the NaN-fill step alone.
+        out = kwargs["cwd"] / "denoised_out.fits"
+        fits.writeto(out, np.ones((8, 8), dtype=np.float32) * 5.0)
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(subprocess_module, "run", fake_run)
+
+    src = tmp_path / "has_nan.fit"
+    data = np.ones((8, 8), dtype=np.float32)
+    data[0, 0] = np.nan
+    fits.writeto(src, data)
+
+    output_path = run_graxpert_denoise(src, output_stem="denoised_out", gpu=False, timeout=30)
+
+    # GraXpert was actually called against a NaN-FILLED copy, not the raw
+    # NaN-containing source.
+    assert not np.isnan(fed_data_holder["data"]).any()
+    # restore_nan defaults to False -- the output keeps whatever GraXpert
+    # produced, no NaN reintroduced.
+    assert not np.isnan(fits.getdata(output_path)).any()
 
 
 # --- real end-to-end tests against a pedestal-corrected real composite -----
