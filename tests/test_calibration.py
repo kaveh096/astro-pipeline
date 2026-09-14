@@ -29,6 +29,7 @@ except FileNotFoundError:
 requires_siril = pytest.mark.skipif(not SIRIL_AVAILABLE, reason="Siril not installed on this machine")
 
 from conftest import ABELL6_PROJECT_DIR, requires_abell6_project
+from conftest import IC1396_PROJECT_DIR, requires_ic1396_project
 from conftest import NGC3628_PROJECT_DIR, requires_ngc3628_project
 from conftest import PROJECT_DIR as REAL_SESSION_DIR
 requires_real_session = pytest.mark.skipif(
@@ -216,6 +217,22 @@ def test_calibrate_command_no_dark_state_matches_fact8_bias_only_command() -> No
     assert "-opt=exp" not in cmd
 
 
+def test_calibrate_command_debayer_appends_flag_before_prefix() -> None:
+    """Capability B (OSC + local raw calibration, 2026-09): -debayer must
+    be appended to the same calibrate call, and must not perturb any
+    existing default (debayer=False) call shape."""
+    cmd = _calibrate_command(
+        "lights_", dark_stem=None, bias_stem="masterbias", flat_stem=None,
+        dark_optimize=False, debayer=True,
+    )
+    assert cmd == "calibrate lights_ -bias=masterbias -debayer -prefix=pp_"
+
+
+def test_calibrate_command_debayer_default_false_unchanged() -> None:
+    cmd = _calibrate_command("lights_", "masterdark", None, None, dark_optimize=False)
+    assert "-debayer" not in cmd
+
+
 def test_calibrate_command_no_dark_state_ignores_dark_optimize_true() -> None:
     """dark_optimize=True must NOT resurrect -opt=exp when dark_stem=None
     -- -opt requires an actual dark master (Siril's own `help calibrate`),
@@ -370,6 +387,51 @@ def test_calibrate_lights_real_t24_command_unaffected_by_slice1(tmp_path: Path) 
         calibration_module._calibrate_command = real_calibrate_command
 
     assert captured["command"] == "calibrate lights_ -dark=masterdark -cc=dark -prefix=pp_"
+
+
+@requires_siril
+@requires_ic1396_project
+def test_calibrate_lights_real_t68_bias_only_debayer_produces_valid_rgb(tmp_path: Path) -> None:
+    """Capability B (OSC + local raw calibration, 2026-09), the real,
+    load-bearing claim: T68 (IC 1396) has real local bias (48 subs) but
+    NO real local dark frames at all -- master_dark=None, subtract_bias
+    =True, debayer=True must produce genuine, non-degenerate, plausible
+    3-channel calibrated+debayered output from real raw OSC lights, in
+    ONE calibrate_lights() call (not a separate debayer pass).
+    """
+    from astro_pipeline.calibration import build_master_bias
+
+    class _FakeLightFrame:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.user = "kaveh096"
+            self.exptime = 240.0
+
+    bias_files = sorted((IC1396_PROJECT_DIR / "bias2").glob("Calibration-*-bias.fit"))
+    assert bias_files, "real T68 bias fixture files missing"
+    bias_frames = [CalibrationFrame(path=p, telescope="T68", frame_type="Bias", binning=1, exptime=0.0) for p in bias_files]
+    master_bias = build_master_bias(bias_frames, tmp_path)
+
+    light_files = sorted((IC1396_PROJECT_DIR / "lights").glob("raw-*.fit"))[:2]
+    assert len(light_files) == 2, "real T68 raw OSC light fixture files missing"
+    lights = [_FakeLightFrame(p) for p in light_files]
+
+    calibrated, _ = calibrate_lights(
+        lights, master_bias, master_dark=None, work_dir=tmp_path,
+        subtract_bias=True, debayer=True, bayer_pattern=0, pedestal=0.0,
+    )
+
+    assert len(calibrated) == 2
+    for path in calibrated:
+        data = fits.getdata(path, memmap=False)
+        assert data.ndim == 3 and data.shape[0] == 3, f"{path.name} is not genuinely 3-channel: {data.shape}"
+        assert not np.isnan(data).all(), f"{path.name} is degenerate (all-NaN)"
+        # A real demosaiced OSC frame has distinct per-channel statistics
+        # (green is real-sky-brighter in a Bayer sensor, not a coincidence
+        # of random noise) -- confirms genuine demosaicing happened, not
+        # e.g. the same plane copied into all 3 channels.
+        means = [float(data[ch].mean()) for ch in range(3)]
+        assert len(set(round(m, 6) for m in means)) == 3, f"{path.name}'s 3 channels are not distinct: {means}"
 
 
 # --- select_dark: the Slice 1 dark-scaling policy, unit-tested against

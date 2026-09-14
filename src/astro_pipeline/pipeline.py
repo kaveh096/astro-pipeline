@@ -340,17 +340,6 @@ def build_master(
 
     light_exptimes = {f.exptime for f in lights}
 
-    if debayer and calibration_mode != CalibrationMode.PRECALIBRATED:
-        # RGB-only/OSC plan (2026-09): no real delivery needs a debayer step
-        # on the RAW_LOCAL (local bias/dark/flat) path -- every OSC target
-        # handled so far arrives already server-side calibrated, hence
-        # PRECALIBRATED. Raise rather than silently mishandling an
-        # unverified combination.
-        raise NotImplementedError(
-            "debayer=True with calibration_mode=RAW_LOCAL is not supported -- no real "
-            "delivery needs it yet (every OSC target seen so far is PRECALIBRATED)."
-        )
-
     if calibration_mode == CalibrationMode.PRECALIBRATED:
         _log(
             f"[run ] {group_name}: staging {len(lights)} precalibrated lights "
@@ -363,22 +352,47 @@ def build_master(
         )
     else:
         bias = cal_index[(telescope, "Bias", binning, 0.0)]
-        dark_selection = select_dark(cal_index, telescope, binning, light_exptimes)
+
+        # OSC + local raw calibration plan (2026-09): a real, not
+        # hypothetical, case -- T68 (IC 1396) has real local bias but NO
+        # real local dark frames at all. select_dark() correctly raises
+        # CalibrationFramesMissingError when no dark exists at this
+        # binning (its own documented case 3) -- appropriate for a mono
+        # RAW_LOCAL telescope (dark is always required there), but real,
+        # expected state for a debayer=True OSC delivery like T68's. Only
+        # skip select_dark() when debayer=True AND no dark genuinely
+        # exists for this (telescope, binning) at all -- if one DOES
+        # exist, still use it normally (a future OSC delivery might have
+        # real darks; this must not silently ignore data that exists).
+        has_any_dark = any(
+            t == telescope and ftype == "Dark" and b == binning
+            for (t, ftype, b, _e) in cal_index
+        )
+        if debayer and not has_any_dark:
+            dark_frames: list = []
+            dark_scaled = False
+            dark_note = "no dark (bias-only + debayer)"
+        else:
+            dark_selection = select_dark(cal_index, telescope, binning, light_exptimes)
+            dark_frames = dark_selection.frames
+            dark_scaled = dark_selection.scaled
+            dark_note = f"{len(dark_frames)} dark" + (
+                f", scaled from {dark_selection.exptime:.0f}s via -opt=exp" if dark_scaled else ""
+            )
 
         exptimes_str = ", ".join(f"{e:.0f}s" for e in sorted(light_exptimes))
-        scaling_note = (
-            f", scaled from {dark_selection.exptime:.0f}s via -opt=exp" if dark_selection.scaled else ""
-        )
         flat_note = f", {len(flat_frames)} {filter_name} flat" if flat_frames else ""
         _log(
             f"[run ] {group_name}: calibrating {len(lights)} lights at {exptimes_str} "
-            f"({len(bias)} bias, {len(dark_selection.frames)} dark{scaling_note}{flat_note})",
+            f"({len(bias)} bias, {dark_note}{flat_note})",
             notes,
         )
         calibration_result = run_calibration(
-            lights, bias, dark_selection.frames, work_dir=work_dir,
+            lights, bias, dark_frames, work_dir=work_dir,
             flat_frames=flat_frames, flat_policy=flat_policy,
-            dark_scaled=dark_selection.scaled, pedestal=pedestal, notes=notes,
+            dark_scaled=dark_scaled, pedestal=pedestal, notes=notes,
+            require_dark=not (debayer and not has_any_dark),
+            debayer=debayer, bayer_pattern=bayer_pattern,
         )
         if flat_frames:
             _log(

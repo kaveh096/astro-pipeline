@@ -275,7 +275,7 @@ def _dark_light_gap_note(master_dark: Path, light_frames: list[LightFrame]) -> s
 class CalibrationResult:
     calibrated_lights: list[Path]
     master_bias: Path
-    master_dark: Path
+    master_dark: Path | None
     master_flat: Path | None
     flat_corrected: bool
     dark_scaled: bool = False
@@ -387,6 +387,7 @@ def _calibrate_command(
     flat_stem: str | None,
     dark_optimize: bool,
     prefix: str = "pp_",
+    debayer: bool = False,
 ) -> str:
     """Pure command-string builder, split out from calibrate_lights so the
     "nothing changes for existing T24 data" claim is checkable without
@@ -421,6 +422,15 @@ def _calibrate_command(
     unchanged unless it passes something else) -- build_master_flat passes
     prefix="bc_" so its own follow-on `stack bc_<seq>...` command actually
     finds the files this step just produced.
+
+    `debayer` (OSC + local raw calibration plan, 2026-09): appends
+    `-debayer` to the SAME `calibrate` call rather than needing a separate
+    pass. MEASURED, not assumed, against the real installed Siril 1.4.4:
+    real T68 (IC 1396) raw OSC lights, bias-only calibration (no dark --
+    T68 has no real local darks), `-bias=<master> -debayer` in one call
+    produced genuine 3-layer (RGGB-demosaiced) `pp_*` output with
+    plausible, non-degenerate per-channel statistics -- default False so
+    every existing caller's command is completely unchanged.
     """
     if dark_stem is not None:
         command = f"calibrate {seq} -dark={dark_stem}"
@@ -437,6 +447,8 @@ def _calibrate_command(
         command += " -opt=exp"
     if flat_stem is not None:
         command += f" -flat={flat_stem}"
+    if debayer:
+        command += " -debayer"
     command += f" -prefix={prefix}"
     return command
 
@@ -568,7 +580,7 @@ def _apply_pedestal(paths: list[Path], pedestal: float) -> None:
 def calibrate_lights(
     light_frames: list[LightFrame],
     master_bias: Path,
-    master_dark: Path,
+    master_dark: Path | None,
     work_dir: str | Path,
     master_flat: Path | None = None,
     basename: str = "lights",
@@ -576,6 +588,8 @@ def calibrate_lights(
     subtract_bias: bool = False,
     dark_optimize: bool = False,
     notes: list[str] | None = None,
+    debayer: bool = False,
+    bayer_pattern: int = 0,
 ) -> tuple[list[Path], SirilResult]:
     """Convert light_frames to a sequence and run Siril's `calibrate`
     against the given masters. Returns (calibrated file paths, sorted,
@@ -620,6 +634,30 @@ def calibrate_lights(
     end-to-end against T21's real 600s/300s Luminance lights and 900s dark:
     Siril computes a per-image coefficient (`k0 = light exptime / dark
     exptime`) and applies it individually, exactly as documented.
+
+    `master_dark=None` (OSC + local raw calibration plan, 2026-09): a
+    genuine, real-data-driven case, not a hypothetical -- T68 (IC 1396)
+    has real local bias (48 subs) but NO real local dark frames at all.
+    Bias-only calibration (`-bias=<master>`, no `-dark=`/`-cc=dark`) is a
+    real, independently-optional combination per Siril's own `help
+    calibrate` text (`-bias=`/`-dark=`/`-flat=` are each independently
+    optional), confirmed working against real T68 lights. `dark_optimize`
+    requires a real dark (scaling one exposure time to another has no
+    meaning without a dark), so it is the caller's responsibility not to
+    pass `dark_optimize=True` with `master_dark=None`.
+
+    `debayer`/`bayer_pattern` (OSC + local raw calibration plan, 2026-09):
+    appends `-debayer` to the SAME `calibrate` call rather than a separate
+    pass, mirroring `stage_precalibrated_lights()`'s existing debayer
+    parameters. MEASURED, not assumed, against real T68 data: standard
+    astrophotography practice is calibrate-the-still-Bayer-mosaic-data-
+    first then debayer, and Siril's `calibrate -bias=<master> -debayer`
+    does exactly this in one call, confirmed to produce genuine 3-layer,
+    plausible (non-degenerate, green-channel-brightest) RGGB-demosaiced
+    output on real T68 raw OSC lights. `set debayer.use_bayer_header=false`
+    is required first because T68's real BAYERPAT header holds a
+    non-standard placeholder value ("VALID", not a real pattern code) --
+    same real finding, same fix, as `stage_precalibrated_lights()`.
     """
     if not light_frames:
         raise CalibrationFramesMissingError("No light frames provided to calibrate.")
@@ -651,10 +689,23 @@ def calibrate_lights(
     # The extension is stripped in the arguments: Siril appends its own, and
     # passing one yields "<path>.fit.[any_allowed_extension] not found".
     seq = sequence_name(basename)
-    run_script([f"convert {basename}"], workdir=stage_dir, script_name="convert.ssf")
+    convert_commands = []
+    if debayer:
+        # Same real fix as stage_precalibrated_lights(): T68's real
+        # BAYERPAT header holds a non-standard placeholder ("VALID", not
+        # a real pattern code), so use_bayer_header must be disabled and
+        # the pattern set explicitly -- never guessed as a hardcoded
+        # default.
+        convert_commands += [
+            "set debayer.use_bayer_header=false",
+            f"set debayer.pattern={bayer_pattern}",
+        ]
+    convert_commands.append(f"convert {basename}")
+    run_script(convert_commands, workdir=stage_dir, script_name="convert.ssf")
 
     staged_dark = stage_dir / "masterdark.fit"
-    shutil.copy2(master_dark, staged_dark)
+    if master_dark is not None:
+        shutil.copy2(master_dark, staged_dark)
     staged_bias = stage_dir / "masterbias.fit"
     if subtract_bias:
         shutil.copy2(master_bias, staged_bias)
@@ -663,10 +714,11 @@ def calibrate_lights(
         shutil.copy2(master_flat, staged_flat)
 
     command = _calibrate_command(
-        seq, staged_dark.stem,
+        seq, staged_dark.stem if master_dark is not None else None,
         staged_bias.stem if subtract_bias else None,
         staged_flat.stem if master_flat is not None else None,
         dark_optimize=dark_optimize,
+        debayer=debayer,
     )
 
     result = run_script([command], workdir=stage_dir, script_name="calibrate.ssf")
@@ -700,10 +752,14 @@ def run_calibration(
     subtract_bias: bool = False,
     dark_scaled: bool = False,
     notes: list[str] | None = None,
+    require_dark: bool = True,
+    debayer: bool = False,
+    bayer_pattern: int = 0,
 ) -> CalibrationResult:
     """Orchestrate one (telescope, binning[, exptime]) calibration group.
 
-    Bias/dark missing is always a hard error. Flats missing is governed by
+    Bias missing is always a hard error. Dark missing is a hard error
+    UNLESS `require_dark=False` (see below). Flats missing is governed by
     flat_policy: REQUIRE raises, SKIP_IF_MISSING proceeds without flat
     correction -- but flat_corrected on the result always says which
     actually happened, so it's never silently ambiguous downstream.
@@ -718,10 +774,24 @@ def run_calibration(
     the lights' -- it forces `calibrate_lights`' `-opt=exp` dark-scaling
     path (which in turn forces bias subtraction, since `-opt` requires
     it) instead of today's dark-only path.
+
+    `require_dark=False` (OSC + local raw calibration plan, 2026-09): a
+    real, not hypothetical, case -- T68 (IC 1396) has real local bias but
+    NO real local dark frames at all. When `require_dark=False` and
+    `dark_frames` is empty, the dark-master build is skipped entirely and
+    `calibrate_lights()` is called with `master_dark=None` (bias-only
+    calibration, a real Siril-supported call shape, confirmed against
+    real T68 data). Every existing caller keeps `require_dark=True`
+    (default, unchanged) -- this does not relax the requirement for any
+    telescope that already has real local darks, only opts a caller in
+    explicitly when there genuinely are none.
+
+    `debayer`/`bayer_pattern`: threaded straight through to
+    `calibrate_lights()`, unchanged from their own meaning there.
     """
     if not bias_frames:
         raise CalibrationFramesMissingError("No bias frames available; cannot calibrate.")
-    if not dark_frames:
+    if not dark_frames and require_dark:
         raise CalibrationFramesMissingError("No dark frames available; cannot calibrate.")
 
     if not flat_frames and flat_policy == FlatPolicy.REQUIRE:
@@ -732,7 +802,9 @@ def run_calibration(
 
     work_dir = Path(work_dir)
     master_bias = build_master_bias(bias_frames, work_dir)
-    master_dark = build_master_dark(dark_frames, work_dir)
+    master_dark: Path | None = None
+    if dark_frames:
+        master_dark = build_master_dark(dark_frames, work_dir)
 
     master_flat: Path | None = None
     if flat_frames:
@@ -745,9 +817,11 @@ def run_calibration(
         work_dir,
         master_flat=master_flat,
         pedestal=pedestal,
-        subtract_bias=subtract_bias,
+        subtract_bias=subtract_bias or master_dark is None,
         dark_optimize=dark_scaled,
         notes=notes,
+        debayer=debayer,
+        bayer_pattern=bayer_pattern,
     )
 
     return CalibrationResult(

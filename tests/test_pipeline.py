@@ -11,6 +11,7 @@ from astro_pipeline.pipeline import (
     NARROWBAND_PALETTES,
     ColourContributor,
     _build_colour_contributor,
+    build_master,
     contributor_dir,
     contributor_fwhm_arcsec,
     discover_luminance_contributors,
@@ -582,6 +583,128 @@ def test_build_colour_contributor_skips_on_missing_green_not_just_red(tmp_path: 
     green_lights, _ = resolve_lights(report, "T24", "M51", "Green", 2)
     assert red_lights  # present
     assert not green_lights  # missing -- this is the one that should skip
+
+
+# --- capability B (OSC + local raw calibration, 2026-09): build_master's -
+# --- debayer=True + RAW_LOCAL + no-real-dark path (formerly a real,       -
+# --- deliberate NotImplementedError -- see calibration.py's real T68     -
+# --- validation for the underlying calibrate_lights()/run_calibration()  -
+# --- claim; this test covers build_master's own orchestration logic      -
+# --- (dark-selection bypass) with everything below it mocked out, since  -
+# --- that part needs no real Siril to verify). ------------------------------
+
+
+def test_build_master_debayer_with_no_real_dark_skips_select_dark_and_requires_bias_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The real, new logic: for a debayer=True RAW_LOCAL group with NO dark
+    at all in cal_index (T68's real shape), select_dark() must NOT be
+    called (it would raise CalibrationFramesMissingError for this exact
+    case -- correct for a mono telescope, wrong here), and run_calibration
+    must receive dark_frames=[] and require_dark=False."""
+    import astro_pipeline.pipeline as pipeline_module
+
+    captured = {}
+
+    def fake_run_calibration(light_frames, bias, dark_frames, **kwargs):
+        captured["dark_frames"] = dark_frames
+        captured["require_dark"] = kwargs.get("require_dark")
+        captured["debayer"] = kwargs.get("debayer")
+
+        class _FakeCalResult:
+            flat_corrected = False
+
+        return _FakeCalResult()
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("select_dark() must not be called when no dark exists for a debayer group")
+
+    monkeypatch.setattr(pipeline_module, "run_calibration", fake_run_calibration)
+    monkeypatch.setattr(pipeline_module, "select_dark", fail_if_called)
+
+    stub_master = tmp_path / "stub_master.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
+
+    class _FakeStackResult:
+        master_path = stub_master
+
+    monkeypatch.setattr(
+        pipeline_module, "register_and_stack", lambda *a, **k: _FakeStackResult()
+    )
+    monkeypatch.setattr(pipeline_module, "solve", lambda *a, **k: None)
+
+    cal_index = {("T68", "Bias", 1, 0.0): [_FakeLightFrame()]}  # no "Dark" key at all
+
+    class _FakeLightFrameWithExptime:
+        def __init__(self) -> None:
+            self.user = "kaveh096"
+            self.exptime = 240.0
+
+    build_master(
+        tmp_path, [_FakeLightFrameWithExptime(), _FakeLightFrameWithExptime()], cal_index, "group", "Color",
+        "T68", 1, 5.588, -5.391, [],
+        flat_frames=[], flat_policy=FlatPolicy.SKIP_IF_MISSING,
+        debayer=True, bayer_pattern=0,
+    )
+
+    assert captured["dark_frames"] == []
+    assert captured["require_dark"] is False
+    assert captured["debayer"] is True
+
+
+def test_build_master_debayer_with_a_real_dark_present_still_uses_it(tmp_path: Path, monkeypatch) -> None:
+    """If a dark DOES exist for this (telescope, binning) even with
+    debayer=True, it must still be used normally (select_dark() called,
+    require_dark stays True) -- a future OSC delivery might have real
+    darks; this must not silently ignore data that exists."""
+    import astro_pipeline.pipeline as pipeline_module
+    from astro_pipeline.calibration import DarkSelection
+
+    captured = {}
+
+    def fake_select_dark(cal_index, telescope, binning, light_exptimes):
+        captured["select_dark_called"] = True
+        return DarkSelection([_FakeLightFrame()], exptime=240.0, scaled=False)
+
+    def fake_run_calibration(light_frames, bias, dark_frames, **kwargs):
+        captured["require_dark"] = kwargs.get("require_dark")
+
+        class _FakeCalResult:
+            flat_corrected = False
+
+        return _FakeCalResult()
+
+    monkeypatch.setattr(pipeline_module, "select_dark", fake_select_dark)
+    monkeypatch.setattr(pipeline_module, "run_calibration", fake_run_calibration)
+
+    stub_master = tmp_path / "stub_master.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
+
+    class _FakeStackResult:
+        master_path = stub_master
+
+    monkeypatch.setattr(pipeline_module, "register_and_stack", lambda *a, **k: _FakeStackResult())
+    monkeypatch.setattr(pipeline_module, "solve", lambda *a, **k: None)
+
+    cal_index = {
+        ("T68", "Bias", 1, 0.0): [_FakeLightFrame()],
+        ("T68", "Dark", 1, 240.0): [_FakeLightFrame()],
+    }
+
+    class _FakeLightFrameWithExptime:
+        def __init__(self) -> None:
+            self.user = "kaveh096"
+            self.exptime = 240.0
+
+    build_master(
+        tmp_path, [_FakeLightFrameWithExptime(), _FakeLightFrameWithExptime()], cal_index, "group", "Color",
+        "T68", 1, 5.588, -5.391, [],
+        flat_frames=[], flat_policy=FlatPolicy.SKIP_IF_MISSING,
+        debayer=True, bayer_pattern=0,
+    )
+
+    assert captured["select_dark_called"] is True
+    assert captured["require_dark"] is True
 
 
 # --- capability A (narrowband, 2026-09): _build_colour_contributor's new --

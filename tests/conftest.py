@@ -104,3 +104,18 @@ ABELL6_PROJECT_DIR = Path(
 requires_abell6_project = pytest.mark.skipif(
     not ABELL6_PROJECT_DIR.exists(), reason=f"raw project folder not present: {ABELL6_PROJECT_DIR}"
 )
+
+# IC 1396/T68 (Sep 2021) real delivery -- one-shot-colour (OSC), genuine
+# undemosaiced Bayer CFA data, with REAL LOCAL BIAS (48 subs, in bias2/)
+# but NO real local dark frames at all -- the real fixture for capability
+# B's bias-only + debayer RAW_LOCAL calibration path (2026-09 publish
+# roadmap). Real BAYERPAT header holds a non-standard placeholder
+# ("VALID"), confirmed via direct header inspection, not a real pattern
+# code -- bayer_pattern must be passed explicitly (RGGB=0), never
+# auto-detected from this delivery's header.
+IC1396_PROJECT_DIR = Path(
+    r"D:\Raw Photo Backups\iTelescope\IC 1396 - Elephant Trunk - RGB - T68 - Sep 2021"
+)
+requires_ic1396_project = pytest.mark.skipif(
+    not IC1396_PROJECT_DIR.exists(), reason=f"raw project folder not present: {IC1396_PROJECT_DIR}"
+)
