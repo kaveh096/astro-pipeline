@@ -546,6 +546,10 @@ def run_graxpert_denoise(
     output_path = output_dir / f"{output_stem}.fits"
 
     filled_path, nan_mask = _nan_fill_for_graxpert(fits_path, output_dir)
+    # Read BEFORE the subprocess call (not after) and BEFORE filled_path is
+    # deleted below -- needed for the post-call no-op check, since this is
+    # exactly what filled_path looked like going INTO GraXpert.
+    input_data_for_comparison = fits.getdata(filled_path, memmap=False)
 
     proc = subprocess.run(
         [
@@ -572,6 +576,31 @@ def run_graxpert_denoise(
         )
 
     _check_graxpert_output_not_corrupt(output_path, "denoising", DenoiseError)
+
+    # Real, measured failure mode (2026-09): a real full-resolution
+    # (4096x4096) denoise run against real NaN-containing input FED
+    # DIRECTLY (bypassing this function's own NaN-fill, in a manual
+    # diagnostic CLI test) exited 0, logged real progress 1%->99%, and
+    # wrote a fully-formed, non-degenerate, valid-looking output file --
+    # that was BYTE-IDENTICAL to the input. GraXpert silently no-op'd
+    # after 2+ hours of apparent real compute. Re-verified through this
+    # actual function (NaN-filled first) on a real-NaN-fraction-matched
+    # synthetic image at 2048x2048: genuinely denoised correctly (real
+    # std reduction, not identical) -- so this function's own NaN-fill
+    # step is the likely real fix, but "valid output" and "not mostly
+    # NaN" are BOTH insufficient checks on their own, exactly like the
+    # NaN-corruption bug this module already guards against elsewhere.
+    # Belt-and-suspenders: verify the output actually differs from what
+    # went in, not just that it looks superficially fine.
+    output_data = fits.getdata(output_path, memmap=False)
+    if output_data.shape == input_data_for_comparison.shape and np.array_equal(
+        output_data, input_data_for_comparison, equal_nan=True
+    ):
+        raise DenoiseError(
+            f"GraXpert produced {output_path.name} but it is byte-identical to the input -- "
+            "denoising silently did nothing (a real, confirmed GraXpert failure mode on "
+            "large images, not a hypothetical). Treating as a failure, not a false success."
+        )
 
     if restore_nan and nan_mask.any():
         data, header = fits.getdata(output_path, header=True, memmap=False)

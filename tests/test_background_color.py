@@ -182,6 +182,12 @@ def test_denoise_output_path_uses_bare_stem_convention(tmp_path: Path) -> None:
 
     assert output_path == tmp_path / "tiny_denoised.fits"
     assert_valid_pixel_data(output_path)
+    # Regression guard for the real, confirmed silent-no-op bug: "valid,
+    # non-degenerate output" alone is NOT sufficient -- a real full-res
+    # run once produced output byte-identical to its input after 2+ hours
+    # of apparent compute. Confirm this small real smoke test genuinely
+    # changed the data too, not just that it looks superficially fine.
+    assert not np.array_equal(fits.getdata(src), fits.getdata(output_path))
 
 
 def test_run_graxpert_denoise_raises_when_output_missing(tmp_path: Path) -> None:
@@ -216,6 +222,40 @@ def test_run_graxpert_denoise_raises_on_degenerate_nan_output(tmp_path: Path, mo
 
     with pytest.raises(DenoiseError, match="NaN"):
         run_graxpert_denoise(src, output_stem="fake_denoised", gpu=False, timeout=30)
+
+
+def test_run_graxpert_denoise_raises_when_output_is_byte_identical_to_input(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression guard for the real, confirmed silent-no-op bug: a real
+    full-resolution GraXpert denoise run once exited 0, logged real
+    progress, and wrote a fully-formed, non-degenerate output file that
+    was byte-identical to its input -- 2+ hours of apparent compute that
+    silently did nothing. Simulate that exact shape here (mocked, no real
+    GraXpert call) and confirm it raises rather than reporting false
+    success."""
+    import subprocess as subprocess_module
+
+    src = tmp_path / "input.fit"
+    data = np.linspace(0, 1, 32 * 32, dtype=np.float32).reshape(32, 32)
+    fits.writeto(src, data)
+
+    def fake_run(cmd, **kwargs):
+        # Simulate GraXpert copying the (NaN-filled) input straight
+        # through to the output, unchanged -- the real observed bug shape.
+        out = kwargs["cwd"] / "noop_out.fits"
+        fits.writeto(out, data)
+
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = "fake success output"
+
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(subprocess_module, "run", fake_run)
+
+    with pytest.raises(DenoiseError, match="byte-identical"):
+        run_graxpert_denoise(src, output_stem="noop_out", gpu=False, timeout=30)
 
 
 def test_run_graxpert_denoise_fills_and_does_not_restore_nan_by_default(tmp_path: Path, monkeypatch) -> None:
