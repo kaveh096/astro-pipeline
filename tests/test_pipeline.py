@@ -11,16 +11,20 @@ from astro_pipeline.pipeline import (
     NARROWBAND_PALETTES,
     ColourContributor,
     _build_colour_contributor,
+    _NarrowbandNormalizingReport,
     build_master,
+    build_single_filter_master,
     contributor_dir,
     contributor_fwhm_arcsec,
     discover_luminance_contributors,
+    equalize_narrowband_channels,
     infer_calibration_mode,
     infer_flat_policy,
     normalize_narrowband_filter_name,
     resolve_instrument_profile,
     resolve_lights,
     run_lrgb,
+    run_narrowband,
     select_luminance_source,
 )
 from astro_pipeline.siril_driver import find_siril_cli
@@ -895,6 +899,359 @@ def test_normalize_narrowband_filter_name_leaves_non_narrowband_names_unchanged(
     Red/Green/Blue/Luminance must pass through untouched."""
     for name in ("Red", "Green", "Blue", "Luminance", "Color"):
         assert normalize_narrowband_filter_name(name) == name
+
+
+# --- capability A (narrowband, 2026-09): _NarrowbandNormalizingReport -----
+
+
+class _FakeRawReport:
+    """A real-world-shaped report using NON-canonical narrowband spelling
+    (H-Alpha instead of Ha) -- exactly the case
+    _NarrowbandNormalizingReport exists to fix."""
+
+    def instrument_groups(self):
+        return {
+            ("T20", "M42", "H-Alpha", 2): ["ha_light_1"],
+            ("T20", "M42", "O-III", 2): ["oiii_light_1"],
+            ("T20", "M42", "Red", 2): ["red_light_1"],
+        }
+
+    def calibrated_instrument_groups(self):
+        return {("T20", "M42", "S-II", 2): ["sii_calibrated_light_1"]}
+
+    def flat_index(self):
+        return {("T20", 2, "H-Alpha"): ["ha_flat_1"]}
+
+    def calibration_index(self):
+        return {"sentinel": "delegated-through-unchanged"}
+
+
+def test_narrowband_normalizing_report_normalizes_instrument_groups() -> None:
+    report = _NarrowbandNormalizingReport(_FakeRawReport())
+    groups = report.instrument_groups()
+    assert groups[("T20", "M42", "Ha", 2)] == ["ha_light_1"]
+    assert groups[("T20", "M42", "OIII", 2)] == ["oiii_light_1"]
+    # Non-narrowband filters pass through unchanged.
+    assert groups[("T20", "M42", "Red", 2)] == ["red_light_1"]
+
+
+def test_narrowband_normalizing_report_normalizes_calibrated_instrument_groups() -> None:
+    report = _NarrowbandNormalizingReport(_FakeRawReport())
+    groups = report.calibrated_instrument_groups()
+    assert groups[("T20", "M42", "SII", 2)] == ["sii_calibrated_light_1"]
+
+
+def test_narrowband_normalizing_report_normalizes_flat_index() -> None:
+    report = _NarrowbandNormalizingReport(_FakeRawReport())
+    flats = report.flat_index()
+    assert flats[("T20", 2, "Ha")] == ["ha_flat_1"]
+
+
+def test_narrowband_normalizing_report_delegates_unknown_methods() -> None:
+    """calibration_index (and every other real IngestReport method) is
+    delegated through __getattr__ unchanged -- this proxy only touches
+    the three methods that carry a filter name."""
+    report = _NarrowbandNormalizingReport(_FakeRawReport())
+    assert report.calibration_index() == {"sentinel": "delegated-through-unchanged"}
+
+
+def test_narrowband_normalizing_report_merges_on_real_collision() -> None:
+    """Two real spellings for the same filter (Ha and H-Alpha) at the
+    same (telescope, target, binning) must merge their light lists, not
+    silently drop one."""
+
+    class _FakeCollisionReport:
+        def instrument_groups(self):
+            return {
+                ("T20", "M42", "Ha", 2): ["light_a"],
+                ("T20", "M42", "H-Alpha", 2): ["light_b"],
+            }
+
+    report = _NarrowbandNormalizingReport(_FakeCollisionReport())
+    groups = report.instrument_groups()
+    assert set(groups[("T20", "M42", "Ha", 2)]) == {"light_a", "light_b"}
+
+
+# --- capability A (narrowband, 2026-09): equalize_narrowband_channels -----
+
+
+def test_equalize_narrowband_channels_normalizes_each_channel_independently(tmp_path: Path) -> None:
+    """Real, load-bearing claim: each channel's own median->0, own
+    high-percentile->~1, independent of the other channels' scale -- the
+    actual fix for SII being intrinsically much fainter than Ha/OIII."""
+    data = np.zeros((3, 10, 10), dtype=np.float32)
+    data[0] = 0.01  # SII-like: faint background
+    data[0, 5, 5] = 0.02  # a single bright SII pixel
+    data[1] = 0.5  # Ha-like: bright background
+    data[1, 5, 5] = 1.0
+    data[2] = 0.1
+    data[2, 5, 5] = 0.3
+    src = tmp_path / "narrowband_composite.fit"
+    fits.writeto(src, data)
+
+    out_path = tmp_path / "equalized.fit"
+    stats = equalize_narrowband_channels(src, out_path, high_percentile=99.0)
+
+    result = fits.getdata(out_path, memmap=False)
+    # Each channel's background (the dominant value) should now sit near
+    # 0, regardless of that channel's original absolute brightness.
+    assert abs(float(np.median(result[0])) - 0.0) < 0.01
+    assert abs(float(np.median(result[1])) - 0.0) < 0.01
+    assert abs(float(np.median(result[2])) - 0.0) < 0.01
+    assert "ch0_median" in stats and "ch1_median" in stats and "ch2_median" in stats
+
+
+def test_equalize_narrowband_channels_preserves_nan(tmp_path: Path) -> None:
+    data = np.full((3, 8, 8), 0.3, dtype=np.float32)
+    data[0, 0, 0] = np.nan
+    src = tmp_path / "with_nan.fit"
+    fits.writeto(src, data)
+
+    out_path = tmp_path / "equalized_nan.fit"
+    equalize_narrowband_channels(src, out_path)
+
+    result = fits.getdata(out_path, memmap=False)
+    assert np.isnan(result[0, 0, 0])
+
+
+def test_equalize_narrowband_channels_handles_degenerate_all_zero_channel(tmp_path: Path) -> None:
+    """A channel with zero real signal (median == high percentile) must
+    not raise a divide-by-zero -- it should come back near-zero, not
+    inventing signal that isn't there."""
+    data = np.zeros((3, 8, 8), dtype=np.float32)
+    data[1] = 0.5  # only one real channel
+    src = tmp_path / "degenerate.fit"
+    fits.writeto(src, data)
+
+    out_path = tmp_path / "equalized_degenerate.fit"
+    equalize_narrowband_channels(src, out_path)  # must not raise
+
+    result = fits.getdata(out_path, memmap=False)
+    assert np.all(result[0] == 0.0)
+
+
+def test_equalize_narrowband_channels_rejects_non_3channel_input(tmp_path: Path) -> None:
+    src = tmp_path / "mono.fit"
+    fits.writeto(src, np.ones((8, 8), dtype=np.float32))
+    with pytest.raises(ValueError, match="3-channel"):
+        equalize_narrowband_channels(src, tmp_path / "out.fit")
+
+
+# --- capability A (narrowband, 2026-09): run_narrowband orchestration -----
+
+
+def test_run_narrowband_rejects_unknown_palette(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="palette"):
+        run_narrowband(tmp_path, "T20", "M42", 5.588, -5.391, palette="not-a-real-palette")
+
+
+def test_run_narrowband_raises_with_real_filter_diagnostic_when_no_match(tmp_path: Path, monkeypatch) -> None:
+    """The real fix this orchestration adds: when the requested palette's
+    filters aren't found, the error names the REAL distinct FILTER
+    strings actually seen at this telescope/binning, not just a bare
+    'no lights found'."""
+    import astro_pipeline.pipeline as pipeline_module
+
+    class _FakeReportWrongSpelling:
+        def instrument_groups(self):
+            # Real narrowband data present, but under a spelling this
+            # test deliberately does NOT put in NARROWBAND_FILTER_ALIASES,
+            # so normalization can't rescue it -- exercising the genuine
+            # "nothing matched" diagnostic path.
+            return {("T20", "M42", "SomeWeirdSpelling", 2): ["light1", "light2"]}
+
+        def calibration_index(self):
+            return {}
+
+        def flat_index(self):
+            return {}
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReportWrongSpelling())
+
+    with pytest.raises(RuntimeError, match="SomeWeirdSpelling"):
+        run_narrowband(tmp_path, "T20", "M42", 5.588, -5.391, palette="sho")
+
+
+def test_run_narrowband_exports_with_palette_named_stem(tmp_path: Path, monkeypatch) -> None:
+    """End-to-end mocked run: confirms the real call sequence (contributor
+    build -> equalization -> stretch -> export) reaches export() with the
+    palette-named stem, not '_lrgb'/'_rgb'."""
+    import astro_pipeline.pipeline as pipeline_module
+    from astro_pipeline.workspace import pipeline_dir
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    class _FakeLightFrame:
+        def __init__(self) -> None:
+            self.user = "kaveh096"
+            self.exptime = 300.0
+
+    class _FakeReportSHO:
+        def instrument_groups(self):
+            return {
+                ("T20", "M42", f, 2): [_FakeLightFrame(), _FakeLightFrame()]
+                for f in ("SII", "Ha", "OIII")
+            }
+
+        def calibration_index(self):
+            return {}
+
+        def flat_index(self):
+            return {}
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda pd: _FakeReportSHO())
+
+    def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *args, **kwargs):
+        p = tmp_path / f"master_{filter_name}.fit"
+        fits.PrimaryHDU(data=np.full((16, 16), 0.3, dtype=np.float32)).writeto(p, overwrite=True)
+        return p
+
+    def fake_reproject(source, reference, out_path):
+        fits.PrimaryHDU(data=np.full((16, 16), 0.3, dtype=np.float32)).writeto(out_path, overwrite=True)
+
+        class _R:
+            footprint_mean = 1.0
+
+        return _R()
+
+    captured = {}
+
+    def fake_run_script(commands, workdir=None, **kwargs):
+        captured["rgbcomp_command"] = commands[0]
+        fits.PrimaryHDU(data=np.full((3, 16, 16), 0.3, dtype=np.float32)).writeto(
+            Path(workdir) / "rgb_native.fit", overwrite=True
+        )
+
+        class _R:
+            log_lines: list = []
+
+        return _R()
+
+    def fake_bg_extraction(fits_path, output_stem):
+        out = Path(fits_path).parent / f"{output_stem}.fits"
+        fits.PrimaryHDU(data=np.full((3, 16, 16), 0.3, dtype=np.float32)).writeto(out, overwrite=True)
+        return out
+
+    def fake_stretch_rgb(rgb_path, work_dir, output_stem, method):
+        out = Path(work_dir) / f"{output_stem}.fit"
+        fits.PrimaryHDU(data=np.full((3, 16, 16), 0.5, dtype=np.float32)).writeto(out, overwrite=True)
+
+        class _R:
+            composite_path = out
+
+        return _R()
+
+    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject)
+    monkeypatch.setattr(pipeline_module, "crop_to_common_coverage", lambda paths, out_dir: None)
+    monkeypatch.setattr(pipeline_module, "run_script", fake_run_script)
+    monkeypatch.setattr(pipeline_module, "run_graxpert_background_extraction", fake_bg_extraction)
+    monkeypatch.setattr(pipeline_module, "stretch_rgb", fake_stretch_rgb)
+
+    result = run_narrowband(project_dir, "T20", "M42", 5.588, -5.391, palette="sho", binning=2)
+
+    assert result.export_result is not None
+    assert result.export_result.tiff_path.name == "M42_sho.tif"
+    assert "-nosum" not in captured["rgbcomp_command"]  # sho has no repeated filter
+
+
+# --- narrowband-boost plan (2026-09): build_single_filter_master ----------
+
+
+def test_build_single_filter_master_skips_when_no_lights(tmp_path: Path) -> None:
+    class _FakeReportEmpty:
+        def instrument_groups(self):
+            return {}
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {}
+
+        def flat_index(self):
+            return {}
+
+    notes: list[str] = []
+    result = build_single_filter_master(
+        tmp_path, _FakeReportEmpty(), "T20", "M42", "Ha", 2, 5.588, -5.391, notes,
+    )
+    assert result is None
+    assert any("no Ha lights found" in n for n in notes)
+
+
+def test_build_single_filter_master_skips_on_too_few_frames(tmp_path: Path) -> None:
+    class _FakeLightFrame:
+        user = "kaveh096"
+        exptime = 300.0
+
+    class _FakeReportOneLight:
+        def instrument_groups(self):
+            return {("T20", "M42", "Ha", 2): [_FakeLightFrame()]}
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {}
+
+        def flat_index(self):
+            return {}
+
+    notes: list[str] = []
+    result = build_single_filter_master(
+        tmp_path, _FakeReportOneLight(), "T20", "M42", "Ha", 2, 5.588, -5.391, notes,
+    )
+    assert result is None
+    assert any("at least" in n for n in notes)
+
+
+def test_build_single_filter_master_precalibrated_calls_build_master_with_placeholders(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import astro_pipeline.pipeline as pipeline_module
+
+    class _FakeLightFrame:
+        user = "kaveh096"
+        exptime = 300.0
+
+    class _FakeReportPrecalibrated:
+        def calibrated_instrument_groups(self):
+            return {("T20", "M42", "Ha", 2): [_FakeLightFrame(), _FakeLightFrame()]}
+
+        def calibration_index(self):
+            return {"sentinel": "should not be read on the PRECALIBRATED path"}
+
+        def flat_index(self):
+            raise AssertionError("flat_index() must not be consulted on the PRECALIBRATED path")
+
+    captured = {}
+
+    def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *args, **kwargs):
+        captured["cal_index"] = cal_index
+        captured["flat_frames"] = kwargs.get("flat_frames")
+        captured["calibration_mode"] = kwargs.get("calibration_mode")
+        return tmp_path / "master_ha.fit"
+
+    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+
+    notes: list[str] = []
+    result = build_single_filter_master(
+        tmp_path, _FakeReportPrecalibrated(), "T20", "M42", "Ha", 2, 5.588, -5.391, notes,
+        calibration_mode=CalibrationMode.PRECALIBRATED,
+    )
+
+    assert result == tmp_path / "master_ha.fit"
+    assert captured["cal_index"] == {}
+    assert captured["flat_frames"] == []
+    assert captured["calibration_mode"] == CalibrationMode.PRECALIBRATED
 
 
 # --- Slice 3.3: contributor naming is telescope-explicit and keyed, -------

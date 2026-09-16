@@ -210,6 +210,128 @@ def normalize_narrowband_filter_name(filter_name: str) -> str:
     return NARROWBAND_FILTER_ALIASES.get(key, filter_name)
 
 
+class _NarrowbandNormalizingReport:
+    """Thin proxy around a real IngestReport that normalizes narrowband
+    FILTER-name spelling variants (see NARROWBAND_FILTER_ALIASES) to this
+    codebase's canonical Ha/OIII/SII spelling, so `resolve_lights()`'s
+    exact-string dict lookups (inside `_build_colour_contributor`) find
+    real data delivered under a different real-world spelling convention.
+
+    Real motivation (round-1b adversarial review finding on the original
+    narrowband plan): this project's own T20 data happens to already use
+    the canonical spelling, verified directly against real headers -- but
+    a stranger's own OSC/narrowband gear very plausibly does not (NINA/
+    SGP/ASIAIR deliveries commonly write "H-Alpha", "O-III", "S-II", or
+    similar). Without this, a real, valid narrowband delivery under a
+    different spelling would silently resolve to "no lights found" rather
+    than a genuine match.
+
+    Only touches `instrument_groups()`/`calibrated_instrument_groups()`/
+    `flat_index()` -- the three methods `_build_colour_contributor` (via
+    `resolve_lights`) actually reads a filter name out of. Every other
+    real `IngestReport` method (`calibration_index`, `light_groups`,
+    etc.) is delegated through unchanged via `__getattr__`.
+
+    If two real filter names collide onto the same canonical name for the
+    same (telescope, target, binning) -- e.g. a delivery genuinely mixing
+    "Ha" and "H-Alpha" spellings for what is really the same filter --
+    their light lists are merged rather than one silently overwriting the
+    other. Rare in practice; documented rather than silently ignored.
+    """
+
+    def __init__(self, report) -> None:
+        self._report = report
+
+    def _normalize_groups(self, groups: dict) -> dict:
+        out: dict = {}
+        for (telescope, target, filter_name, binning), frames in groups.items():
+            key = (telescope, target, normalize_narrowband_filter_name(filter_name), binning)
+            out[key] = out.get(key, []) + list(frames)
+        return out
+
+    def instrument_groups(self):
+        return self._normalize_groups(self._report.instrument_groups())
+
+    def calibrated_instrument_groups(self):
+        return self._normalize_groups(self._report.calibrated_instrument_groups())
+
+    def flat_index(self):
+        out: dict = {}
+        for (telescope, binning, filter_name), frames in self._report.flat_index().items():
+            key = (telescope, binning, normalize_narrowband_filter_name(filter_name))
+            out[key] = out.get(key, []) + list(frames)
+        return out
+
+    def __getattr__(self, name):
+        return getattr(self._report, name)
+
+
+def equalize_narrowband_channels(
+    fits_path: str | Path,
+    output_path: str | Path,
+    high_percentile: float = 99.5,
+) -> dict[str, float]:
+    """Per-channel background-and-scale normalization for a narrowband
+    composite (capability A, 2026-09) -- the real substitute for SPCC,
+    which is deliberately skipped on narrowband (see
+    `_build_colour_contributor`'s `run_colour_calibration` docstring:
+    SPCC would enforce physically real relative line intensities, which
+    looks wrong for the stylized Hubble-palette convention users
+    actually want).
+
+    Round-2 adversarial review of the original plan correctly found that
+    "GraXpert's background extraction already gives per-channel
+    background levels for free" was FALSE -- GraXpert returns only a
+    whole-image background-subtracted result, no reusable per-channel
+    scalar. This function is the real, new code that claim was missing:
+    for each channel independently, subtract its own robust background
+    level (median, over finite pixels only) and rescale so its own
+    `high_percentile`-th pixel value hits 1.0.
+
+    This is deliberately simple and NOT a physically-modeled colour
+    calibration -- it's the numeric equivalent of a manual per-channel
+    "levels" adjustment done before combining channels, which is common,
+    real practice in narrowband processing (per this session's own
+    research into real HaRGB/SHO workflows) specifically BECAUSE no
+    physically-correct relative intensity is wanted here. Narrowband
+    colour remains a stylized palette after this step, not a scientific
+    one -- exactly as intended.
+
+    Returns the real per-channel (median, high-percentile) values
+    actually measured, for logging -- inspectable, not a black box,
+    consistent with this project's checkpointed-not-black-box principle.
+    """
+    fits_path = Path(fits_path)
+    data, header = fits.getdata(fits_path, header=True, memmap=False)
+    if data.ndim != 3 or data.shape[0] != 3:
+        raise ValueError(
+            f"equalize_narrowband_channels expects a 3-channel (3, ny, nx) composite, "
+            f"got shape {data.shape}"
+        )
+
+    out = np.empty_like(data, dtype=np.float32)
+    stats: dict[str, float] = {}
+    for i in range(3):
+        channel = data[i]
+        finite = channel[np.isfinite(channel)]
+        median = float(np.median(finite)) if finite.size else 0.0
+        high = float(np.percentile(finite, high_percentile)) if finite.size else 1.0
+        span = high - median
+        if span <= 0:
+            # Degenerate channel (e.g. all-zero/all-equal) -- avoid a
+            # divide-by-zero; leaves this channel near-zero rather than
+            # inventing signal that isn't there.
+            span = 1.0
+        out[i] = np.clip((channel - median) / span, 0.0, None).astype(np.float32)
+        stats[f"ch{i}_median"] = median
+        stats[f"ch{i}_high_p{high_percentile:g}"] = high
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fits.writeto(output_path, out, header=header, overwrite=True)
+    return stats
+
+
 @dataclass
 class PipelineResult:
     masters: dict[str, Path] = field(default_factory=dict)
@@ -807,6 +929,64 @@ def contributor_dir(final: Path, telescope: str, binning: int, rgb_binning: int)
     if binning == rgb_binning:
         return final
     return final / f"contrib_{telescope}_bin{binning}"
+
+
+def build_single_filter_master(
+    project_dir: Path,
+    report,
+    telescope: str,
+    target: str,
+    filter_name: str,
+    binning: int,
+    ra_hours: float,
+    dec_deg: float,
+    notes: list[str],
+    flat_policy: FlatPolicy | None = None,
+    calibration_mode: CalibrationMode | None = None,
+) -> Path | None:
+    """Build one (telescope, filter, binning) master, handling the same
+    PRECALIBRATED-vs-RAW_LOCAL branching `_build_colour_contributor`'s
+    own per-filter loop does -- factored out as its own function
+    (narrowband-boost plan, 2026-09) so a caller needing exactly ONE
+    filter's master (e.g. a narrowband boost channel, not a full R/G/B
+    triplet) doesn't have to reimplement that branching. Returns None --
+    logging why, rather than raising -- if there isn't enough data to
+    build it (no lights, or too few to form a Siril sequence), matching
+    every other real "skip this contributor" pattern in this module.
+    """
+    resolved_calibration_mode = calibration_mode or infer_calibration_mode(report, telescope)
+
+    lights, group_name = resolve_lights(
+        report, telescope, target, filter_name, binning, calibration_mode=resolved_calibration_mode
+    )
+    if not lights:
+        _log(f"[skip] BIN{binning}: no {filter_name} lights found for {telescope}/{target}", notes)
+        return None
+    if len(lights) < MIN_SEQUENCE_FRAMES:
+        _log(
+            f"[skip] BIN{binning}: only {len(lights)} {filter_name} light(s) for "
+            f"{telescope}/{target}, need at least {MIN_SEQUENCE_FRAMES} to form a Siril sequence",
+            notes,
+        )
+        return None
+
+    if resolved_calibration_mode == CalibrationMode.PRECALIBRATED:
+        return build_master(
+            project_dir, lights, {}, group_name, filter_name, telescope, binning, ra_hours, dec_deg, notes,
+            flat_frames=[], flat_policy=FlatPolicy.SKIP_IF_MISSING, calibration_mode=resolved_calibration_mode,
+        )
+    # infer_flat_policy() calls report.flat_index() -- only safe/meaningful
+    # on the RAW_LOCAL path (a PRECALIBRATED telescope's flats are never
+    # consulted at all, see this function's own docstring), so this stays
+    # inside the else branch rather than being computed unconditionally
+    # up front.
+    resolved_flat_policy = flat_policy if flat_policy is not None else infer_flat_policy(report, telescope)
+    cal_index = report.calibration_index()
+    flat_frames = report.flat_index().get((telescope, binning, filter_name), [])
+    return build_master(
+        project_dir, lights, cal_index, group_name, filter_name, telescope, binning, ra_hours, dec_deg, notes,
+        flat_frames=flat_frames, flat_policy=resolved_flat_policy,
+    )
 
 
 def _build_colour_contributor(
@@ -2106,6 +2286,166 @@ def run_lrgb(
     result.export_result = export(
         composite, output_dir=final, stem=f"{target}_rgb" if is_rgb_only else f"{target}_lrgb"
     )
+    _log(
+        f"       row order {result.export_result.row_order}, "
+        f"clipped low {result.export_result.clipped_low_fraction:.4f} / "
+        f"high {result.export_result.clipped_high_fraction:.4f}",
+        notes,
+    )
+
+    return result
+
+
+def run_narrowband(
+    project_dir: str | Path,
+    telescope: str,
+    target: str,
+    ra_hours: float,
+    dec_deg: float,
+    palette: str = "sho",
+    binning: int = 2,
+    stretch_method: str = "autostretch",
+    pedestal: float = DEFAULT_PEDESTAL,
+    force: bool = False,
+    flat_policy: FlatPolicy | None = None,
+    calibration_mode: CalibrationMode | None = None,
+) -> PipelineResult:
+    """Build a pure narrowband false-colour composite (capability A,
+    2026-09) -- SHO ("Hubble palette": SII->R, Ha->G, OIII->B) or HOO
+    (bicolor: Ha->R, OIII->G and B). A parallel, deliberately SEPARATE
+    entry point from `run_lrgb`, not a mode of it: this run has no
+    Luminance, no reconciliation-against-L, and a genuinely different
+    colour-calibration story (SPCC skipped -- see
+    `_build_colour_contributor`'s `run_colour_calibration` docstring --
+    replaced by `equalize_narrowband_channels`'s per-channel balancing,
+    not a mode `run_lrgb`'s LRGB-shaped control flow already handles).
+
+    Real, tested combination for M42 (T20): `palette="sho"`,
+    `binning=2` (Ha/OIII/SII all ship at BIN2 on T20's real delivery,
+    same as the Red/Green/Blue filters -- see plan v3's build order).
+
+    Structurally simpler than `run_lrgb` on purpose: exactly ONE colour
+    contributor is ever built here (this target's `filters` triplet at
+    the given `telescope`+`binning`; no multi-binning/multi-telescope
+    discovery the way Luminance gets in `run_lrgb`, matching the same
+    real scope limit `_build_colour_contributor`'s RGB path already has
+    for non-primary binnings) -- so there is no reconciliation/combine
+    step to write, and `force` is a single on/off switch (delete every
+    downstream artifact and rebuild), not the `run_lrgb`'s per-stage
+    `{"masters","reconciled","final"}` vocabulary. This means narrowband
+    runs do NOT yet have `run_lrgb`'s RunSignature-based automatic
+    staleness detection (a parameter change like `palette` or
+    `stretch_method` will NOT auto-invalidate a stale composite on a
+    resumed run) -- pass `force=True` explicitly after changing a
+    parameter. A real, honest limitation, not silently pretended away;
+    real signature-tracking integration is legitimate future work once
+    this entry point has seen more real use.
+
+    Real FITS `FILTER` header spelling for Ha/OIII/SII varies across the
+    wider amateur/network community (this project's own T20 data already
+    uses the canonical "Ha"/"OIII"/"SII" spelling, verified directly
+    against real headers -- but NINA/SGP/ASIAIR deliveries commonly don't)
+    -- lights are looked up through `_NarrowbandNormalizingReport`, which
+    normalizes known real-world spelling variants before matching (see
+    its own docstring). If no lights match after normalization, the real
+    distinct FILTER strings actually present at this telescope/binning
+    are logged, so the failure is diagnosable rather than a bare "no
+    lights found".
+
+    Output: `<target>_sho.tif`/`<target>_hoo.tif` (never `_lrgb`/`_rgb` --
+    a narrowband composite exported under those names would misrepresent
+    what produced it).
+    """
+    if palette not in NARROWBAND_PALETTES:
+        raise ValueError(f"palette={palette!r} is not one of {sorted(NARROWBAND_PALETTES)}")
+    filters = NARROWBAND_PALETTES[palette]
+
+    project_dir = Path(project_dir)
+    out = pipeline_dir(project_dir)
+    final = out / "final"
+    final.mkdir(parents=True, exist_ok=True)
+    result = PipelineResult()
+    notes = result.notes
+
+    checkpoint_dir = out / "checkpoints"
+    checkpoints_path = checkpoint_dir / f"checkpoints_narrowband_{palette}.json"
+
+    _log(f"=== scanning {project_dir.name} (narrowband, palette={palette}) ===", notes)
+    raw_report = scan_session(project_dir)
+    report = _NarrowbandNormalizingReport(raw_report)
+
+    resolved_calibration_mode = calibration_mode or infer_calibration_mode(raw_report, telescope)
+    resolved_flat_policy = flat_policy if flat_policy is not None else infer_flat_policy(raw_report, telescope)
+
+    contrib_dir = final  # single contributor -- always the primary path, mirrors contributor_dir()'s own rule
+
+    if force:
+        for name in (
+            "rgb_native.fit", "rgb_native_bg.fits", "rgb_colour_calibrated.fit",
+            "rgb_equalized.fit", f"{palette}_final.fit",
+        ):
+            _delete_if_exists(contrib_dir / name, "force=True", notes)
+
+    contributor = _build_colour_contributor(
+        project_dir, contrib_dir, report, telescope, target, binning, ra_hours, dec_deg, notes,
+        flat_policy=resolved_flat_policy, calibration_mode=resolved_calibration_mode,
+        filters=filters, run_colour_calibration=False,
+    )
+    if contributor is None:
+        raw_filters_seen = sorted({
+            filt for (t, tgt, filt, b) in raw_report.instrument_groups()
+            if t == telescope and tgt == target and b == binning
+        })
+        raise RuntimeError(
+            f"No usable narrowband contributor for {telescope}/{target}/bin{binning} -- "
+            f"palette {palette!r} needs {filters}. Real FILTER header strings actually "
+            f"present at this telescope/binning: {raw_filters_seen or '(none)'}"
+        )
+    result.masters[f"narrowband_{palette}"] = contributor.composite_path
+
+    cp = checkpoint(
+        contributor.composite_path, "02_narrowband_colour_calibrated", output_dir=checkpoint_dir,
+    )
+    result.checkpoints.append(cp)
+    _log(cp.summary(), notes)
+    save_checkpoints(result.checkpoints, checkpoints_path)
+
+    equalized_path = contrib_dir / "rgb_equalized.fit"
+    if not usable(equalized_path, notes):
+        _log("[run ] per-channel background/scale equalization (narrowband colour substitute for SPCC)", notes)
+        stats = equalize_narrowband_channels(contributor.composite_path, equalized_path)
+        _log(f"       {', '.join(f'{k}={v:.4f}' for k, v in stats.items())}", notes)
+    else:
+        _log("[skip] narrowband channel equalization already done", notes)
+
+    cp = checkpoint(
+        equalized_path, "03_narrowband_equalized", output_dir=checkpoint_dir,
+        previous=cp.stats, previous_linear=True,
+    )
+    result.checkpoints.append(cp)
+    _log(cp.summary(), notes)
+    save_checkpoints(result.checkpoints, checkpoints_path)
+
+    composite_name = f"{palette}_final"
+    composite = final / f"{composite_name}.fit"
+    if not usable(composite, notes):
+        _log(f"[run ] stretch ({stretch_method}), narrowband (no Luminance to compose)", notes)
+        compose = stretch_rgb(equalized_path, final, output_stem=composite_name, method=stretch_method)
+        composite = compose.composite_path
+    else:
+        _log(f"[skip] {palette.upper()} composite already present", notes)
+    result.composite_path = composite
+
+    cp = checkpoint(
+        composite, f"04_{palette}_final", output_dir=checkpoint_dir,
+        linear=False, previous=cp.stats, previous_linear=False,
+    )
+    result.checkpoints.append(cp)
+    _log(cp.summary(), notes)
+    save_checkpoints(result.checkpoints, checkpoints_path)
+
+    _log("[run ] export TIFF + preview", notes)
+    result.export_result = export(composite, output_dir=final, stem=f"{target}_{palette}")
     _log(
         f"       row order {result.export_result.row_order}, "
         f"clipped low {result.export_result.clipped_low_fraction:.4f} / "
