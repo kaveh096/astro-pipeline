@@ -148,17 +148,17 @@ def test_session_summary_reports_real_counts_not_a_template() -> None:
 
     report = _FakeReport(
         groups={
-            ("T24", "M51", "Red", 2): [_Frame("kaveh096")],
-            ("T21", "M51", "Luminance", 1): [_Frame("kaveh096")],
+            ("T24", "M51", "Red", 2): [_Frame("observer1")],
+            ("T21", "M51", "Luminance", 1): [_Frame("observer1")],
         },
         cal_index={},
     )
-    report.lights = [_Frame("kaveh096"), _Frame("jmwill")]
+    report.lights = [_Frame("observer1"), _Frame("collaborator1")]
     summary = session_summary(report)
     assert summary["telescopes"] == ["T21", "T24"]
     assert summary["targets"] == ["M51"]
     assert summary["binnings"] == [1, 2]
-    assert summary["users"] == ["jmwill", "kaveh096"]
+    assert summary["users"] == ["collaborator1", "observer1"]
 
 
 # --- live check against the real M51 fixture ---------------------------------

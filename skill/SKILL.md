@@ -1,12 +1,12 @@
 ---
 name: astro-pipeline-lrgb
-description: Use when Kaveh wants to run, drive, resume, or continue the LRGB astrophotography pipeline in this repo against an iTelescope session folder -- phrases like "run the pipeline", "process <target>", "run the M51 project", "pick up where the pipeline left off", "build the masters for <target>", or any request to turn a folder of raw iTelescope FITS subs into a stretched, colour-calibrated LRGB TIFF. Drives astro_pipeline.pipeline.run_lrgb stage-by-stage (masters -> reconciled -> final), pausing at each checkpoint for a human Proceed/Adjust/Abort decision rather than running to completion unattended. Does not do framing, cropping, or colour-grading -- those stay Kaveh's manual Photoshop step.
+description: Use when the user wants to run, drive, resume, or continue the LRGB astrophotography pipeline in this repo against an iTelescope session folder -- phrases like "run the pipeline", "process <target>", "run the M51 project", "pick up where the pipeline left off", "build the masters for <target>", or any request to turn a folder of raw iTelescope FITS subs into a stretched, colour-calibrated LRGB TIFF. Drives astro_pipeline.pipeline.run_lrgb stage-by-stage (masters -> reconciled -> final), pausing at each checkpoint for a human Proceed/Adjust/Abort decision rather than running to completion unattended. Does not do framing, cropping, or colour-grading -- those stay the user's manual Photoshop step.
 version: 1.0.0
 ---
 
 # Astro Pipeline: LRGB run wrapper
 
-Interviews Kaveh about a project folder, then drives `run_lrgb()`
+Interviews the user about a project folder, then drives `run_lrgb()`
 (`src/astro_pipeline/pipeline.py`) one stage at a time via
 `skill/run_stage.py`, stopping at each of the three real control-flow
 boundaries the pipeline exposes (`stop_after="masters"` /
@@ -24,7 +24,7 @@ trust the code in `src/astro_pipeline/pipeline.py`, not this file.
 pass), no automatic override of which telescope's Luminance drives the
 composite (Slice 2's whole point is that this stays a human call -- surface
 the numbers, never silently pick against them), no cross-telescope
-Luminance blending (Kaveh's colour-only-rule decision is binding), and no
+Luminance blending (a deliberate scope decision, not yet configurable), and no
 touching Photoshop -- this skill's job ends the moment a TIFF path exists.
 
 ## Repo conventions to reuse, not reinvent
@@ -42,11 +42,10 @@ touching Photoshop -- this skill's job ends the moment a TIFF path exists.
 
 ## Step 1 -- Interview
 
-1. **Project folder.** Ask which project folder to run against. If Kaveh
-   doesn't name one, offer the one real fixture as a default --
-   `C:\Users\Kaveh\Desktop\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025`
-   -- but make clear it's a default, not the only option: this has to
-   generalize to whatever folder he points it at next.
+1. **Project folder.** Ask which project folder to run against -- there
+   is no default; every real run needs an explicit path to a real
+   iTelescope session folder (raw FITS lights, optionally local
+   bias/dark/flat calibration frames).
 
 2. **Scan it.**
    ```
@@ -61,7 +60,7 @@ touching Photoshop -- this skill's job ends the moment a TIFF path exists.
      docstring: that's deliberate there, collaborators' subs must not be
      silently merged at that layer, but it makes the raw output
      unreadable for a human standing at an interview checkpoint). Show
-     Kaveh the deduplicated list, not the raw one. If you want to show the
+     the user the deduplicated list, not the raw one. If you want to show the
      raw-vs-deduplicated contrast for transparency, that's fine too, but
      the deduplicated list is what should drive the conversation.
    - a **dark-scaling preview**: for any group whose exact-exptime dark is
@@ -76,12 +75,12 @@ touching Photoshop -- this skill's job ends the moment a TIFF path exists.
      provenance) lights, so `run_lrgb` will use them directly
      (`CalibrationMode.PRECALIBRATED`) instead of locally recalibrating --
      real case: T73 (NGC 3628) and T02 (Abell 6 and HFG1). This is
-     detected automatically; nothing to ask Kaveh about or pass as a
+     detected automatically; nothing to ask about or pass as a
      parameter. Its calibration-gap warnings for that telescope are
      already filtered out of the deduplicated list below it (they'd
      otherwise read as a blocking problem when they're actually expected).
 
-3. **Present the summary** to Kaveh: telescopes/targets/binnings/users
+3. **Present the summary** to the user: telescopes/targets/binnings/users
    found, which telescopes are precalibrated (if any), the deduplicated
    calibration gaps, and the dark-scaling notes. If there's a `[BLOCKED]`
    entry, say so plainly and ask whether to proceed anyway (it will fail
@@ -104,7 +103,7 @@ touching Photoshop -- this skill's job ends the moment a TIFF path exists.
    - `lum_binning` (default 1) / `rgb_binning` (default 2) -- only ask if
      the scan shows more than one binning in play and it's not obvious
      which is primary.
-   - `stretch_method` -- ask Kaveh's aggressiveness preference in plain
+   - `stretch_method` -- ask the user's aggressiveness preference in plain
      language and map it to one of the three real values
      `stretch_compose.stretch_and_compose` supports:
      - `"autostretch"` (default) -- shadow-clipped histogram stretch;
@@ -112,7 +111,7 @@ touching Photoshop -- this skill's job ends the moment a TIFF path exists.
      - `"autoghs"` -- lifts more faint signal, background stays grey (no
        black point), noisier.
      - `"autoghs+auto"` -- autoghs then autostretch on top: most faint
-       detail recovered, most noise. Only offer this if Kaveh explicitly
+       detail recovered, most noise. Only offer this if the user explicitly
        wants an aggressive stretch.
 
 Do not invent a fourth option or silently default without asking -- this
@@ -155,7 +154,7 @@ with a full R/G/B set for the primary telescope.
   telescope with a `Color` filter group instead of separate Luminance/
   Red/Green/Blue ones (real case: T02, Abell 6 and HFG1). OSC lights are
   genuine undemosaiced Bayer-mosaic sensor data, debayered automatically
-  as part of building that contributor -- nothing to ask Kaveh about
+  as part of building that contributor -- nothing to ask about
   there either. A target with BOTH a full mono R/G/B set AND `Color` data
   at the same (telescope, binning) raises `NotImplementedError` instead
   of silently combining them (channel-order parity between Siril's
@@ -260,7 +259,7 @@ symmetric:
   Re-run with `--pedestal <value> --force masters --stop-after
   reconciled` -- yes, `--force masters`, even though you're adjusting at
   the "reconciled" checkpoint, because that's genuinely what's stale.
-  Say this out loud to Kaveh before running it (it will rebuild the
+  Say this out loud to the user before running it (it will rebuild the
   masters, not just the reconciliation step) rather than silently doing a
   slower thing than "Adjust" sounds like it should be.
 - **Bare recompute, no parameter change**: `--force reconciled
@@ -309,7 +308,7 @@ Report, plainly:
   non-trivial (worth a mention -- it's a real signal about the stretch).
 
 Then stop. **Do not open Photoshop, do not attempt any framing, cropping,
-or colour-grading** -- that is deliberately Kaveh's manual creative step,
+or colour-grading** -- that is deliberately the user's manual creative step,
 not something this skill automates. The skill's job ends at "here's your
 TIFF."
 

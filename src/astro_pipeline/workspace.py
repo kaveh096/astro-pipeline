@@ -1,6 +1,6 @@
 """Project-folder layout conventions.
 
-Kaveh's own working convention (adopted here rather than inventing a new
+the user's own working convention (adopted here rather than inventing a new
 one): everything for a target lives together under the target's project
 folder, with generated/intermediate data in a subfolder alongside the raw
 delivery folders. So for a project folder like
@@ -47,7 +47,7 @@ def group_dir(project_dir: str | Path, group_name: str, create: bool = True) -> 
     """Working directory for one logical group (e.g. a filter's stack).
 
     `group_name` should be filesystem-safe and descriptive, e.g.
-    "T24-kaveh096-M51-Luminance-bin1".
+    "T24-observer1-M51-Luminance-bin1".
     """
     path = pipeline_dir(project_dir, create=create) / group_name
     if create:

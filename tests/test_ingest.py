@@ -11,11 +11,17 @@ from astro_pipeline.ingest import (
 )
 
 # Real filenames observed in an actual iTelescope T24 delivery (M51, Jan 2025).
-LIGHT_NAME = "raw-T24-kaveh096-M51-20250123-021344-Blue-BIN2-E-300-001.fit"
-BIAS_NAME = "T24-kaveh096-Bias-000-LD20250203-LT171434-BIN1.fit"
-DARK_NAME = "T24-kaveh096-Dark-300-LD20250203-LT155037-BIN1.fit"
+LIGHT_NAME = "raw-T24-observer1-M51-20250123-021344-Blue-BIN2-E-300-001.fit"
+BIAS_NAME = "T24-observer1-Bias-000-LD20250203-LT171434-BIN1.fit"
+DARK_NAME = "T24-observer1-Dark-300-LD20250203-LT155037-BIN1.fit"
 
+from conftest import LUM_USERS, RGB_USER
 from conftest import PROJECT_DIR as REAL_SESSION_DIR
+
+# The other real collaborator on T24's real multi-user Luminance group --
+# whichever of the two real configured usernames isn't RGB_USER (T24's
+# BIN2 RGB and T21's Luminance are both single-user: RGB_USER only).
+COLLABORATOR_USER = next(iter(LUM_USERS - {RGB_USER}), "collaborator1")
 
 
 def touch(tmp_path: Path, name: str) -> Path:
@@ -40,14 +46,14 @@ def test_classify_light_frame(tmp_path: Path) -> None:
 def test_classify_light_frame_west_side_not_hardcoded(tmp_path: Path) -> None:
     """A real delivery (different user, same T24 telescope) proved the 'E'
     token is a meridian-side flag, not a constant -- must accept 'W' too."""
-    name = "raw-T24-jmwill-M51-20250225-030711-Luminance-BIN1-W-300-001.fit"
+    name = "raw-T24-collaborator1-M51-20250225-030711-Luminance-BIN1-W-300-001.fit"
     frame = classify_frame(touch(tmp_path, name))
     assert isinstance(frame, LightFrame)
     assert frame.side == "W"
 
 
 def test_classify_calibrated_provenance_light_frame(tmp_path: Path) -> None:
-    name = "calibrated-T21-kaveh096-M51-20250113-045216-Luminance-BIN1-E-600-001.fit"
+    name = "calibrated-T21-observer1-M51-20250113-045216-Luminance-BIN1-E-600-001.fit"
     frame = classify_frame(touch(tmp_path, name))
     assert isinstance(frame, LightFrame)
     assert frame.provenance == "calibrated"
@@ -105,7 +111,7 @@ def test_classify_t24_style_flat_has_no_filter_token(tmp_path: Path) -> None:
     with filter_name=None (not crash, not guess) -- flat_index() is what
     actually drops it (see test_flat_index_drops_flat_with_no_filter_name).
     """
-    name = "T24-kaveh096-Flat-000-LD20250203-LT171434-BIN1.fit"
+    name = "T24-observer1-Flat-000-LD20250203-LT171434-BIN1.fit"
     frame = classify_frame(touch(tmp_path, name))
     assert isinstance(frame, CalibrationFrame)
     assert frame.frame_type == "Flat"
@@ -136,7 +142,7 @@ def test_flat_index_drops_flat_with_no_filter_name(tmp_path: Path, caplog: pytes
     preference (e.g. resolve_instrument_profile's UnknownInstrumentError).
     A logged reason is required so the drop is discoverable, not silent.
     """
-    touch(tmp_path, "T24-kaveh096-Flat-000-LD20250203-LT171434-BIN1.fit")
+    touch(tmp_path, "T24-observer1-Flat-000-LD20250203-LT171434-BIN1.fit")
 
     report = scan_session(tmp_path)
     assert len(report.calibration) == 1
@@ -186,9 +192,9 @@ def test_classify_unrecognized_filename_no_header_fallback(tmp_path: Path) -> No
 
 
 def test_scan_session_groups_lights_by_telescope_target_filter_binning(tmp_path: Path) -> None:
-    touch(tmp_path, "raw-T24-kaveh096-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
-    touch(tmp_path, "raw-T24-kaveh096-M51-20250123-023017-Luminance-BIN1-E-300-001.fit")
-    touch(tmp_path, "raw-T24-kaveh096-M51-20250123-021344-Blue-BIN2-E-300-001.fit")
+    touch(tmp_path, "raw-T24-observer1-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
+    touch(tmp_path, "raw-T24-observer1-M51-20250123-023017-Luminance-BIN1-E-300-001.fit")
+    touch(tmp_path, "raw-T24-observer1-M51-20250123-021344-Blue-BIN2-E-300-001.fit")
     touch(tmp_path, BIAS_NAME)
 
     report = scan_session(tmp_path)
@@ -196,8 +202,8 @@ def test_scan_session_groups_lights_by_telescope_target_filter_binning(tmp_path:
     assert len(report.calibration) == 1
 
     groups = report.light_groups()
-    lum_key = ("T24", "kaveh096", "M51", "Luminance", 1)
-    blue_key = ("T24", "kaveh096", "M51", "Blue", 2)
+    lum_key = ("T24", "observer1", "M51", "Luminance", 1)
+    blue_key = ("T24", "observer1", "M51", "Blue", 2)
     assert len(groups[lum_key]) == 2
     assert len(groups[blue_key]) == 1
 
@@ -208,13 +214,13 @@ def test_scan_ignores_pipeline_generated_output(tmp_path: Path) -> None:
     staged copies and calibrated output as if they were new raw frames --
     verified real: a re-run counted 26 lights for a 13-light group.
     """
-    touch(tmp_path, "raw-T24-kaveh096-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
+    touch(tmp_path, "raw-T24-observer1-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
 
-    generated = tmp_path / "_pipeline" / "T24-kaveh096-M51-Luminance-bin1" / "lights"
+    generated = tmp_path / "_pipeline" / "T24-observer1-M51-Luminance-bin1" / "lights"
     generated.mkdir(parents=True)
     # A staged copy of the same raw frame, plus a calibrated derivative --
     # both would classify happily if they were not excluded.
-    (generated / "raw-T24-kaveh096-M51-20250115-045740-Luminance-BIN1-E-300-001.fit").write_bytes(b"")
+    (generated / "raw-T24-observer1-M51-20250115-045740-Luminance-BIN1-E-300-001.fit").write_bytes(b"")
     (generated / "pp_lights_00001.fit").write_bytes(b"")
 
     report = scan_session(tmp_path)
@@ -226,20 +232,20 @@ def test_scan_ignores_pipeline_generated_output(tmp_path: Path) -> None:
 
 def test_light_groups_keeps_different_users_separate(tmp_path: Path) -> None:
     """Two collaborators shooting the same target/telescope/filter/binning
-    must land in different groups -- confirmed real (kaveh096 and jmwill
+    must land in different groups -- confirmed real (observer1 and collaborator1
     both imaged M51 on T24), and silently merging them was a real bug."""
-    touch(tmp_path, "raw-T24-kaveh096-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
-    touch(tmp_path, "raw-T24-jmwill-M51-20250226-020311-Luminance-BIN1-E-300-001.fit")
+    touch(tmp_path, "raw-T24-observer1-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
+    touch(tmp_path, "raw-T24-collaborator1-M51-20250226-020311-Luminance-BIN1-E-300-001.fit")
 
     report = scan_session(tmp_path)
     groups = report.light_groups()
 
-    assert len(groups[("T24", "kaveh096", "M51", "Luminance", 1)]) == 1
-    assert len(groups[("T24", "jmwill", "M51", "Luminance", 1)]) == 1
+    assert len(groups[("T24", "observer1", "M51", "Luminance", 1)]) == 1
+    assert len(groups[("T24", "collaborator1", "M51", "Luminance", 1)]) == 1
 
 
 def test_missing_calibration_warnings_flags_missing_flats_and_darks(tmp_path: Path) -> None:
-    touch(tmp_path, "raw-T24-kaveh096-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
+    touch(tmp_path, "raw-T24-observer1-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
     touch(tmp_path, BIAS_NAME)
     touch(tmp_path, DARK_NAME)
     # no flats at all -- matches the real sample session exactly
@@ -251,7 +257,7 @@ def test_missing_calibration_warnings_flags_missing_flats_and_darks(tmp_path: Pa
 
 
 def test_missing_calibration_warnings_flags_missing_bias_and_dark(tmp_path: Path) -> None:
-    touch(tmp_path, "raw-T24-kaveh096-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
+    touch(tmp_path, "raw-T24-observer1-M51-20250115-045740-Luminance-BIN1-E-300-001.fit")
     # no calibration frames at all
 
     report = scan_session(tmp_path)
@@ -277,13 +283,12 @@ def test_scan_real_multi_telescope_session() -> None:
 
     raw_lights = [f for f in report.lights if f.provenance == "raw"]
 
-    # T24 raw lights: 95, from TWO different iTelescope users -- Kaveh
-    # (kaveh096) and a collaborator (jmwill) who independently imaged the
-    # same target on the same telescope with different binning choices for
-    # RGB.
+    # T24 raw lights: 95, from TWO different real iTelescope users who
+    # independently imaged the same target on the same telescope with
+    # different binning choices for RGB (see conftest.LUM_USERS).
     t24_lights = [f for f in raw_lights if f.telescope == "T24"]
     assert len(t24_lights) == 95
-    assert {f.user for f in t24_lights} == {"kaveh096", "jmwill"}
+    assert {f.user for f in t24_lights} == set(LUM_USERS)
 
     # T21 raw lights: only 2 in this delivery, both zip-wrapped and both
     # Luminance -- but at two different exposure lengths (600s and 300s),
@@ -293,7 +298,7 @@ def test_scan_real_multi_telescope_session() -> None:
     t21_lights = [f for f in raw_lights if f.telescope == "T21"]
     assert len(t21_lights) == 2
     assert {f.exptime for f in t21_lights} == {600.0, 300.0}
-    assert all(f.user == "kaveh096" for f in t21_lights)
+    assert all(f.user == RGB_USER for f in t21_lights)
     # Extracted to real files, not the zip path -- calibration.py needs an
     # actual FITS file it can copy/stage into a Siril sequence directory.
     assert all(f.path.suffix.lower() == ".fit" and f.path.exists() for f in t21_lights)
@@ -320,24 +325,24 @@ def test_scan_real_multi_telescope_session() -> None:
     calibrated_merged = report.calibrated_instrument_groups()
     assert sum(len(v) for v in calibrated_merged.values()) == len(calibrated_lights)
 
-    # The two users' data must land in SEPARATE groups, not merged --
-    # confirmed real: without `user` in the grouping key, Kaveh's 13
-    # kaveh096 Luminance/BIN1 subs and jmwill's 8 would have silently
+    # The two real users' data must land in SEPARATE groups, not merged --
+    # confirmed real: without `user` in the grouping key, RGB_USER's 13
+    # Luminance/BIN1 subs and COLLABORATOR_USER's 8 would have silently
     # combined into one group of 21.
-    assert ("T24", "kaveh096", "M51", "Luminance", 1) in groups
-    assert len(groups[("T24", "kaveh096", "M51", "Luminance", 1)]) == 13
-    assert ("T24", "jmwill", "M51", "Luminance", 1) in groups
-    assert len(groups[("T24", "jmwill", "M51", "Luminance", 1)]) == 8
+    assert ("T24", RGB_USER, "M51", "Luminance", 1) in groups
+    assert len(groups[("T24", RGB_USER, "M51", "Luminance", 1)]) == 13
+    assert ("T24", COLLABORATOR_USER, "M51", "Luminance", 1) in groups
+    assert len(groups[("T24", COLLABORATOR_USER, "M51", "Luminance", 1)]) == 8
 
-    assert ("T24", "kaveh096", "M51", "Red", 2) in groups
-    assert ("T24", "kaveh096", "M51", "Green", 2) in groups
-    assert ("T24", "kaveh096", "M51", "Blue", 2) in groups
-    # jmwill shoots RGB at BIN1 (matching L directly -- no drizzle/reproject
-    # reconciliation needed for jmwill's own contributed frames, unlike
-    # Kaveh's BIN2 RGB).
-    assert ("T24", "jmwill", "M51", "Red", 1) in groups
-    assert ("T24", "jmwill", "M51", "Green", 1) in groups
-    assert ("T24", "jmwill", "M51", "Blue", 1) in groups
+    assert ("T24", RGB_USER, "M51", "Red", 2) in groups
+    assert ("T24", RGB_USER, "M51", "Green", 2) in groups
+    assert ("T24", RGB_USER, "M51", "Blue", 2) in groups
+    # The collaborator shoots RGB at BIN1 (matching L directly -- no
+    # drizzle/reproject reconciliation needed for their own contributed
+    # frames, unlike RGB_USER's own BIN2 RGB).
+    assert ("T24", COLLABORATOR_USER, "M51", "Red", 1) in groups
+    assert ("T24", COLLABORATOR_USER, "M51", "Green", 1) in groups
+    assert ("T24", COLLABORATOR_USER, "M51", "Blue", 1) in groups
 
     # T24 has real bias/dark (Calibrations/T24/Fresh) but genuinely no
     # flats anywhere in this delivery -- must surface, not be silent.
@@ -392,12 +397,12 @@ def test_missing_calibration_warnings_real_per_filter_flat_check() -> None:
     assert not any("no flat" in w.lower() and "t21" in w.lower() for w in warnings)
 
     # NOT deduplicated into a set: T24's Luminance BIN1 group is shared by
-    # two users (kaveh096 + jmwill, see light_groups()'s user-keyed
+    # two users (observer1 + collaborator1, see light_groups()'s user-keyed
     # grouping), so its identical-text warning legitimately appears twice.
     t24_flat_warnings = [w for w in warnings if "no flat" in w.lower() and "t24" in w.lower()]
     # T24's real light groups need: Luminance BIN1 (two user groups,
-    # kaveh096 + jmwill, each independently missing a flat), Red/Green/Blue
-    # BIN1 (jmwill) and BIN2 (kaveh096) -- matches this file's own real
+    # observer1 + collaborator1, each independently missing a flat), Red/Green/Blue
+    # BIN1 (collaborator1) and BIN2 (observer1) -- matches this file's own real
     # T24 group assertions in test_scan_real_multi_telescope_session /
     # test_instrument_groups_merges_users_sharing_telescope_and_binning.
     assert len(t24_flat_warnings) == 8
@@ -410,7 +415,7 @@ def test_missing_calibration_warnings_real_per_filter_flat_check() -> None:
 
 @pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
 def test_instrument_groups_merges_users_sharing_telescope_and_binning() -> None:
-    """The unit build_master actually stacks from: Kaveh's and jmwill's
+    """The unit build_master actually stacks from: the two real users'
     T24/BIN1 Luminance subs share a telescope and binning, so they must
     merge into ONE group (13 + 8 = 21) for raw-sub-level combining --
     better outlier rejection than averaging two separately-stacked
@@ -423,9 +428,9 @@ def test_instrument_groups_merges_users_sharing_telescope_and_binning() -> None:
 
     assert ("T24", "M51", "Luminance", 1) in groups
     assert len(groups[("T24", "M51", "Luminance", 1)]) == 21
-    assert {f.user for f in groups[("T24", "M51", "Luminance", 1)]} == {"kaveh096", "jmwill"}
+    assert {f.user for f in groups[("T24", "M51", "Luminance", 1)]} == set(LUM_USERS)
 
     assert ("T24", "M51", "Red", 2) in groups
-    assert {f.user for f in groups[("T24", "M51", "Red", 2)]} == {"kaveh096"}
+    assert {f.user for f in groups[("T24", "M51", "Red", 2)]} == {RGB_USER}
     assert ("T24", "M51", "Red", 1) in groups
-    assert {f.user for f in groups[("T24", "M51", "Red", 1)]} == {"jmwill"}
+    assert {f.user for f in groups[("T24", "M51", "Red", 1)]} == {COLLABORATOR_USER}

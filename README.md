@@ -1,6 +1,6 @@
 # astro-pipeline
 
-An agentic solution to my astro photography pipeline using free CLI and scripting tools.
+An agentic solution to an astrophotography processing pipeline using free CLI and scripting tools.
 
 Automated, checkpointed processing pipeline for LRGB/narrowband astrophotography
 data rented from iTelescope.net: calibration through stacking, pixel-grid

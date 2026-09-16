@@ -40,7 +40,7 @@ so this module tries several regexes rather than assuming one:
 
 Calibration frames are not tied to the capture night of the lights they
 calibrate -- real deliveries have calibration frames dated weeks to months
-away from the lights, grouped by iTelescope/Kaveh into date-ish folders
+away from the lights, grouped by iTelescope/the account holder into date-ish folders
 that cover many light sessions. Calibration validity is scoped to whatever
 collection is delivered/organized together (matched by
 telescope+binning(+exptime for darks)), not to a single capture night.
@@ -77,7 +77,7 @@ _TELESCOPE_DIR_RE = re.compile(r"^T\d+$", re.IGNORECASE)
 #
 # Target allows internal spaces (` `), not just alphanumerics: a real NGC
 # 3628 delivery (Feb 2025) uses literal "NGC 3628" as the target token in
-# the filename (e.g. "calibrated-T73-kaveh096-NGC 3628-20250224-...-Red-
+# the filename (e.g. "calibrated-T73-observer1-NGC 3628-20250224-...-Red-
 # BIN2-E-240-001.fit") -- an earlier alphanumeric-only pattern silently
 # classified every one of that session's 150 real light frames as
 # UnrecognizedFrame (caught via classify_frame's own diagnostic: "Filename

@@ -591,8 +591,8 @@ def combine_same_grid(
     Not fixed here: the pragmatic mitigation is trimming an extra margin
     off the affected edge before stretching (standard practice for
     combined/mosaicked astro images anyway), which was not automated as of
-    this writing -- final framing/cropping is Kaveh's own manual step in
-    Photoshop, so the artifact sits inside the region he crops away
+    this writing -- final framing/cropping is the user's own manual step in
+    Photoshop, so the artifact sits inside the region they crop away
     regardless. Worth automating if this pipeline ever needs to hand off a
     combined multi-contributor frame somewhere the edges matter.
     """

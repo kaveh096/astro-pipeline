@@ -23,8 +23,8 @@ def make_zip(tmp_path: Path, zip_name: str, inner_name: str) -> Path:
 def test_build_index_peeks_inside_zip_without_extracting(tmp_path: Path) -> None:
     make_zip(
         tmp_path,
-        "raw-T21-kaveh096-M51-20250113-045216-Luminance-BIN1-E-600-001.fit.zip",
-        "raw-T21-kaveh096-M51-20250113-045216-Luminance-BIN1-E-600-001.fit",
+        "raw-T21-observer1-M51-20250113-045216-Luminance-BIN1-E-600-001.fit.zip",
+        "raw-T21-observer1-M51-20250113-045216-Luminance-BIN1-E-600-001.fit",
     )
 
     idx = build_index(tmp_path)
@@ -61,7 +61,7 @@ def test_build_index_catalogs_unmatched_files_as_other(tmp_path: Path) -> None:
 
 
 def test_build_index_classifies_jpeg_preview_via_light_pattern(tmp_path: Path) -> None:
-    (tmp_path / "jpeg-T21-kaveh096-M51-20250113-045216-Luminance-BIN1-E-600-001.jpg").write_bytes(b"")
+    (tmp_path / "jpeg-T21-observer1-M51-20250113-045216-Luminance-BIN1-E-600-001.jpg").write_bytes(b"")
 
     idx = build_index(tmp_path)
 
@@ -70,7 +70,7 @@ def test_build_index_classifies_jpeg_preview_via_light_pattern(tmp_path: Path) -
 
 
 def test_tree_index_to_dict_is_json_serializable(tmp_path: Path) -> None:
-    (tmp_path / "T24-kaveh096-Bias-000-LD20250203-LT171434-BIN1.fit").write_bytes(b"")
+    (tmp_path / "T24-observer1-Bias-000-LD20250203-LT171434-BIN1.fit").write_bytes(b"")
     idx = build_index(tmp_path)
 
     # Must not raise -- Path objects need to be stringified.
@@ -79,7 +79,7 @@ def test_tree_index_to_dict_is_json_serializable(tmp_path: Path) -> None:
 
 
 def test_tree_index_save_writes_readable_json(tmp_path: Path) -> None:
-    (tmp_path / "T24-kaveh096-Bias-000-LD20250203-LT171434-BIN1.fit").write_bytes(b"")
+    (tmp_path / "T24-observer1-Bias-000-LD20250203-LT171434-BIN1.fit").write_bytes(b"")
     idx = build_index(tmp_path)
 
     out_path = tmp_path / "index.json"

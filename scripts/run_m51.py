@@ -1,6 +1,10 @@
 """Regenerate the M51 T24 LRGB result into the project's _pipeline/ folder.
 
 Resumable: re-run after an interruption and completed stages are skipped.
+
+A worked, real reference for run_lrgb's calling convention (see
+skill/SKILL.md) -- edit PROJECT_DIR below to point at your own M51
+project folder before running.
 """
 
 import sys
@@ -10,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from astro_pipeline.pipeline import run_lrgb
 
-PROJECT_DIR = Path(r"C:\Users\Kaveh\Desktop\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
+PROJECT_DIR = Path(r"C:\path\to\your\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
 
 # M51: RA 13h29m52.7s, Dec +47:11:43 -- passed explicitly so the run needs
 # no network name resolution.

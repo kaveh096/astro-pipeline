@@ -13,6 +13,9 @@ from astro_pipeline.registration_stacking import (
 )
 from astro_pipeline.siril_driver import find_siril_cli
 
+from conftest import PROJECT_DIR as REAL_SESSION_DIR
+from conftest import RGB_USER
+
 try:
     find_siril_cli()
     SIRIL_AVAILABLE = True
@@ -21,7 +24,6 @@ except FileNotFoundError:
 
 requires_siril = pytest.mark.skipif(not SIRIL_AVAILABLE, reason="Siril not installed on this machine")
 
-REAL_SESSION_DIR = Path(r"C:\Users\Kaveh\Desktop\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
 requires_real_session = pytest.mark.skipif(
     not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine"
 )
@@ -67,7 +69,7 @@ def test_stack_command_with_norm_addscale() -> None:
 def test_register_and_stack_real_luminance_bin1(tmp_path: Path) -> None:
     report = scan_session(REAL_SESSION_DIR)
     groups = report.light_groups()
-    lum_lights = groups[("T24", "kaveh096", "M51", "Luminance", 1)]
+    lum_lights = groups[("T24", RGB_USER, "M51", "Luminance", 1)]
     cal_index = report.calibration_index()
     bias = cal_index[("T24", "Bias", 1, 0.0)]
     dark = cal_index[("T24", "Dark", 1, 300.0)]

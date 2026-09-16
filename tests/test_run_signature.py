@@ -3,7 +3,7 @@ downstream stages.
 
 Verified with SYNTHETIC fixtures (two contributors, then three; then one
 contributor's sub silently replaced) rather than the real T21 transition,
-per plan-rev4.md's own instruction: under Kaveh's colour-only rule, T21
+per plan-rev4.md's own instruction: under the user's colour-only rule, T21
 contributes no RGB data at all, so the real T24/T21 transition changes
 zero COLOUR contributor keys and cannot exercise this path. These tests
 operate directly on run_signature.py's pure comparison functions -- no
@@ -376,7 +376,7 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
     import astro_pipeline.pipeline as pipeline_module
 
     class _FakeLightFrame:
-        def __init__(self, path_name: str, user: str = "kaveh096") -> None:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
             self.path = tmp_path / path_name
             self.user = user
             self.exptime = 300.0
@@ -497,8 +497,8 @@ def test_frame_identity_hash_is_order_independent() -> None:
 
 
 def test_frame_identity_hash_changes_when_a_sub_is_replaced() -> None:
-    original = frame_identity_hash(["raw-T24-kaveh096-M51-Red-20250101-010101-Red-BIN2-E-300-1.fit"])
-    replaced = frame_identity_hash(["raw-T24-kaveh096-M51-Red-20250101-020202-Red-BIN2-E-300-1.fit"])
+    original = frame_identity_hash(["raw-T24-observer1-M51-Red-20250101-010101-Red-BIN2-E-300-1.fit"])
+    replaced = frame_identity_hash(["raw-T24-observer1-M51-Red-20250101-020202-Red-BIN2-E-300-1.fit"])
     assert original != replaced
 
 
@@ -588,7 +588,7 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
     out.mkdir(parents=True, exist_ok=True)
 
     class _FakeLightFrame:
-        def __init__(self, path_name: str, user: str = "kaveh096") -> None:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
             self.path = tmp_path / path_name
             self.user = user
             self.exptime = 300.0

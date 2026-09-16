@@ -301,7 +301,7 @@ def test_save_checkpoints_handles_corrupt_existing_file(tmp_path: Path) -> None:
 @requires(LUM_BG)
 def test_checkpoint_on_real_linear_master(tmp_path: Path) -> None:
     # output_dir=tmp_path, NOT the real project's _pipeline/final -- an
-    # earlier version wrote test previews directly into Kaveh's live project
+    # earlier version wrote test previews directly into the user's live project
     # folder (output_dir=Path(LUM_BG).parent), which meant every test run
     # left checkpoint_real_*.png files mixed in with actual pipeline output.
     result = checkpoint(LUM_BG, "real_lum", output_dir=tmp_path, linear=True)

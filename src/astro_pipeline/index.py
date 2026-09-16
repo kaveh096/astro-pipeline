@@ -7,7 +7,7 @@ JPEG previews, and whatever else is sitting in the tree.
 Nothing is silently dropped. Every file under root ends up in exactly one
 of: lights, calibration, archived_entries (peeked inside a zip without
 extracting), unrecognized, or other_files. The output is meant to be read
-by a human (Kaveh) as much as by later pipeline stages -- it's the
+by a human (the user) as much as by later pipeline stages -- it's the
 "playlist" file, not just internal state.
 """
 

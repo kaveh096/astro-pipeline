@@ -237,3 +237,10 @@ Thumbs.db
 .DS_Store
 .vscode/
 .idea/
+
+# Personal test-data locations (real paths on your own machine) -- see
+# tests/local_paths.py.example for how to configure these.
+tests/local_paths.py
+
+# Generated test golden-data cache
+tests/fixtures/

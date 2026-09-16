@@ -67,7 +67,7 @@ imaged the same target on the same telescope:
 
   RGB combines at the MASTER level, across "contributors" -- one
   contributor per (telescope, binning) that has all three R/G/B present.
-  Two different binnings (Kaveh's own BIN2 RGB vs a collaborator's BIN1
+  Two different binnings (the user's own BIN2 RGB vs a collaborator's BIN1
   RGB, both on T24) cannot be combined at the raw-sub level at all
   (different pixel scale/dimensions -- Siril's registration requires
   matching frames). Each contributor is independently aligned across its
@@ -696,7 +696,7 @@ def discover_luminance_contributors(
 ) -> list[tuple[str, int]]:
     """Every (telescope, binning) with Luminance data for `target`, across
     ALL telescopes -- not scoped to `telescope` -- so a telescope that only
-    ever contributes colour under Kaveh's colour-only rule (T21 today)
+    ever contributes colour under the user's colour-only rule (T21 today)
     still gets its own Luminance master built (Slice 2 will select among
     these; this only discovers them). Mirrors exactly how RGB binning
     discovery already handles "caller-supplied but not necessarily
@@ -752,7 +752,7 @@ def resolve_lights(
 
     A single-contributor case (only one user shot this filter/binning)
     collapses to exactly the old per-user group name, so existing
-    fixtures/tests that assume e.g. "T24-kaveh096-M51-Red-bin2" keep
+    fixtures/tests that assume e.g. "T24-observer1-M51-Red-bin2" keep
     working unchanged.
 
     `calibration_mode` (precalibrated-path plan, 2026-09): RAW_LOCAL (the
@@ -1590,7 +1590,7 @@ def run_lrgb(
     # --- luminance masters: every (telescope, binning) that has Luminance
     # data for this target gets its own master built here -- NOT scoped to
     # the caller's `telescope`, otherwise a telescope that only ever
-    # contributes colour under Kaveh's colour-only rule (T21 today) would
+    # contributes colour under the user's colour-only rule (T21 today) would
     # never get its own Luminance master built under any slice, including
     # this one. Each user sharing a (telescope, binning) is still merged at
     # the raw-sub level (see module docstring) -- that combining logic is
@@ -1675,7 +1675,7 @@ def run_lrgb(
         # Slice 4.1: usable() only knows whether master_luminance.fit
         # exists and reads clean -- it has zero notion of which lights
         # produced it, so a sub silently added/removed/replaced (the
-        # orphaned pre-merge T24-kaveh096-M51-Luminance-bin1 group is real,
+        # orphaned pre-merge T24-observer1-M51-Luminance-bin1 group is real,
         # on-disk proof this gap is not hypothetical) would otherwise never
         # trigger a rebuild. Delete the stale master here so usable()'s own
         # skip-if-present gate inside build_master naturally regenerates it.
@@ -2280,7 +2280,7 @@ def run_lrgb(
     # (target="M51" here reproduces the exact same "M51_lrgb" stem, so
     # tests/test_pipeline.py's byte-identical-output assertions against
     # M51_lrgb.tif are unaffected), and required for the skill (4.4) to
-    # generalize the handoff path to whatever target Kaveh throws at it
+    # generalize the handoff path to whatever target the user throws at it
     # next instead of silently mislabeling every future target's TIFF as
     # M51's.
     result.export_result = export(

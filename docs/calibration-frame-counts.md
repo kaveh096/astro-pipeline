@@ -14,8 +14,8 @@ each frame and stacking rejection can throw them out.
 
 That only works if there are enough light frames for rejection to have
 something to work with. With few subs the defects survive stacking and show
-up as vertical banding in the final image. This matches what Kaveh saw
-processing the same target manually last year.
+up as vertical banding in the final image. This matches what was seen
+processing the same target manually with other tools previously.
 
 ## Rule 1: don't subtract bias from lights when you have matching darks
 

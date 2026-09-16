@@ -1,6 +1,6 @@
 # Astro Pipeline — Tooling Research & Proposed Architecture
 Date: 2026-07-27
-Scope: free/open-source replacement for DeepSkyStacker + manual Photoshop stretch/LRGB combine, for iTelescope-sourced mono LRGB(+NB) data with mixed binning (L=1x1, RGB=2x2, NB sometimes higher). Constraint: pipeline must be checkpointed, not single-button — Kaveh keeps final creative control in Photoshop.
+Scope: free/open-source replacement for DeepSkyStacker + manual Photoshop stretch/LRGB combine, for iTelescope-sourced mono LRGB(+NB) data with mixed binning (L=1x1, RGB=2x2, NB sometimes higher). Constraint: pipeline must be checkpointed, not single-button — the user keeps final creative control in Photoshop.
 
 ## 1. Calibration / registration / stacking (replaces DSS)
 

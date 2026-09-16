@@ -525,7 +525,7 @@ def test_combine_same_grid_stackcnt_weighting_favors_different_contributor_than_
 ) -> None:
     """The actual claim Slice 3.5 exists to satisfy, using the REAL numbers
     measured on the M51 T24 data (see plan-rev4.md / handoff notes):
-    jmwill's BIN1 RGB contributor has MORE raw subs (14+12+12=38) than
+    collaborator1's BIN1 RGB contributor has MORE raw subs (14+12+12=38) than
     kaveh's BIN2 (12+12+12=36), so sub_count weighting favours BIN1 --
     but kaveh's BIN2 has slightly MORE STACKCNT (10+10+9=29 vs
     9+9+9=27, i.e. more subs actually survived quality filtering into the
@@ -534,7 +534,7 @@ def test_combine_same_grid_stackcnt_weighting_favors_different_contributor_than_
     is exactly the case Slice 3.5 exists to get right (STACKCNT, not
     sub_count) -- not a synthetic worst case, the real data's own
     numbers."""
-    bin1_path = tmp_path / "bin1.fit"  # jmwill, more raw subs, less STACKCNT
+    bin1_path = tmp_path / "bin1.fit"  # collaborator1, more raw subs, less STACKCNT
     bin2_path = tmp_path / "bin2.fit"  # kaveh, fewer raw subs, more STACKCNT
     fits.writeto(bin1_path, np.full((4, 4), 100.0, dtype=np.float32))
     fits.writeto(bin2_path, np.full((4, 4), 200.0, dtype=np.float32))

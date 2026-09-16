@@ -32,6 +32,7 @@ from conftest import ABELL6_PROJECT_DIR, requires_abell6_project
 from conftest import IC1396_PROJECT_DIR, requires_ic1396_project
 from conftest import NGC3628_PROJECT_DIR, requires_ngc3628_project
 from conftest import PROJECT_DIR as REAL_SESSION_DIR
+from conftest import RGB_USER
 requires_real_session = pytest.mark.skipif(
     not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine"
 )
@@ -362,7 +363,7 @@ def test_calibrate_lights_real_t24_command_unaffected_by_slice1(tmp_path: Path) 
 
     report = scan_session(REAL_SESSION_DIR)
     groups = report.light_groups()
-    lum_lights = groups[("T24", "kaveh096", "M51", "Luminance", 1)]
+    lum_lights = groups[("T24", RGB_USER, "M51", "Luminance", 1)]
     cal_index = report.calibration_index()
     bias = cal_index[("T24", "Bias", 1, 0.0)]
     dark = cal_index[("T24", "Dark", 1, 300.0)]
@@ -404,7 +405,7 @@ def test_calibrate_lights_real_t68_bias_only_debayer_produces_valid_rgb(tmp_path
     class _FakeLightFrame:
         def __init__(self, path: Path) -> None:
             self.path = path
-            self.user = "kaveh096"
+            self.user = "observer1"
             self.exptime = 240.0
 
     bias_files = sorted((IC1396_PROJECT_DIR / "bias2").glob("Calibration-*-bias.fit"))
@@ -542,7 +543,7 @@ def test_calibrate_real_luminance_bin1_without_flats(tmp_path: Path) -> None:
     """
     report = scan_session(REAL_SESSION_DIR)
     groups = report.light_groups()
-    lum_lights = groups[("T24", "kaveh096", "M51", "Luminance", 1)]
+    lum_lights = groups[("T24", RGB_USER, "M51", "Luminance", 1)]
     assert len(lum_lights) == 13
 
     cal_index = report.calibration_index()
@@ -593,7 +594,7 @@ def test_calibrate_and_stack_produces_no_exact_zero_background(tmp_path: Path) -
 
     report = scan_session(REAL_SESSION_DIR)
     groups = report.light_groups()
-    lum_lights = groups[("T24", "kaveh096", "M51", "Luminance", 1)]
+    lum_lights = groups[("T24", RGB_USER, "M51", "Luminance", 1)]
     cal_index = report.calibration_index()
     bias = cal_index[("T24", "Bias", 1, 0.0)]
     dark = cal_index[("T24", "Dark", 1, 300.0)]

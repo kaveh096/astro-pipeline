@@ -31,9 +31,11 @@ from astro_pipeline.siril_driver import find_siril_cli
 
 from conftest import (
     FINAL_DIR,
+    LUM_USER,
     NGC3628_PROJECT_DIR,
     PIPELINE_DIR,
     PROJECT_DIR as REAL_SESSION_DIR,
+    RGB_USER,
     requires,
     requires_ngc3628_project,
 )
@@ -294,8 +296,8 @@ def test_contributor_fwhm_arcsec_real_data_t24_sharper_than_t21() -> None:
     required, but only by roughly 13%, not 2.4x. That discrepancy is
     real and reported (see the Slice 2 handoff notes), not hidden behind a
     loose assertion range chosen to make a stale number pass."""
-    t24_master = PIPELINE_DIR / "T24-jmwill+kaveh096-M51-Luminance-bin1" / "lights" / "master_luminance.fit"
-    t21_master = PIPELINE_DIR / "T21-kaveh096-M51-Luminance-bin1" / "lights" / "master_luminance.fit"
+    t24_master = PIPELINE_DIR / f"T24-{LUM_USER}-M51-Luminance-bin1" / "lights" / "master_luminance.fit"
+    t21_master = PIPELINE_DIR / f"T21-{RGB_USER}-M51-Luminance-bin1" / "lights" / "master_luminance.fit"
     if not t24_master.exists() or not t21_master.exists():
         pytest.skip("real Luminance masters not built yet -- run scripts/run_m51.py")
 
@@ -529,7 +531,7 @@ class _FakeLightFrame:
     """Just enough of ingest.LightFrame's shape for resolve_lights() to
     read `.user` off it."""
 
-    def __init__(self, user: str = "kaveh096") -> None:
+    def __init__(self, user: str = "observer1") -> None:
         self.user = user
 
 
@@ -641,7 +643,7 @@ def test_build_master_debayer_with_no_real_dark_skips_select_dark_and_requires_b
 
     class _FakeLightFrameWithExptime:
         def __init__(self) -> None:
-            self.user = "kaveh096"
+            self.user = "observer1"
             self.exptime = 240.0
 
     build_master(
@@ -697,7 +699,7 @@ def test_build_master_debayer_with_a_real_dark_present_still_uses_it(tmp_path: P
 
     class _FakeLightFrameWithExptime:
         def __init__(self) -> None:
-            self.user = "kaveh096"
+            self.user = "observer1"
             self.exptime = 240.0
 
     build_master(
@@ -1087,7 +1089,7 @@ def test_run_narrowband_exports_with_palette_named_stem(tmp_path: Path, monkeypa
 
     class _FakeLightFrame:
         def __init__(self) -> None:
-            self.user = "kaveh096"
+            self.user = "observer1"
             self.exptime = 300.0
 
     class _FakeReportSHO:
@@ -1189,7 +1191,7 @@ def test_build_single_filter_master_skips_when_no_lights(tmp_path: Path) -> None
 
 def test_build_single_filter_master_skips_on_too_few_frames(tmp_path: Path) -> None:
     class _FakeLightFrame:
-        user = "kaveh096"
+        user = "observer1"
         exptime = 300.0
 
     class _FakeReportOneLight:
@@ -1219,7 +1221,7 @@ def test_build_single_filter_master_precalibrated_calls_build_master_with_placeh
     import astro_pipeline.pipeline as pipeline_module
 
     class _FakeLightFrame:
-        user = "kaveh096"
+        user = "observer1"
         exptime = 300.0
 
     class _FakeReportPrecalibrated:
@@ -1447,7 +1449,7 @@ def test_run_lrgb_rgb_only_full_run_no_luminance_no_crash(tmp_path: Path, monkey
     import astro_pipeline.pipeline as pipeline_module
 
     class _FakeLightFrame:
-        def __init__(self, path_name: str, user: str = "kaveh096") -> None:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
             self.path = tmp_path / path_name
             self.user = user
             self.exptime = 300.0
@@ -1538,7 +1540,7 @@ def test_run_lrgb_rgb_only_multi_contributor_raises_not_implemented(tmp_path: Pa
     import astro_pipeline.pipeline as pipeline_module
 
     class _FakeLightFrame:
-        def __init__(self, path_name: str, user: str = "kaveh096") -> None:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
             self.path = tmp_path / path_name
             self.user = user
             self.exptime = 300.0
@@ -1603,7 +1605,7 @@ def test_run_lrgb_mixed_osc_and_rgb_same_binning_raises_not_implemented(tmp_path
     import astro_pipeline.pipeline as pipeline_module
 
     class _FakeLightFrame:
-        def __init__(self, path_name: str, user: str = "kaveh096") -> None:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
             self.path = tmp_path / path_name
             self.user = user
             self.exptime = 300.0

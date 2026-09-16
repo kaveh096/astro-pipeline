@@ -1,7 +1,7 @@
 """Materialize a logical frame group (from ingest.py) into its own clean
 directory so each Siril `convert` operates on an isolated, homogeneous
 folder -- decoupled from however the raw delivery happens to be laid out
-on disk (which varies: Kaveh's own descriptive subfolders here, a flat
+on disk (which varies: the user's own descriptive subfolders here, a flat
 dump elsewhere, etc).
 
 Copies rather than symlinks: Windows symlink creation needs elevated

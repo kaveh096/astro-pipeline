@@ -3,7 +3,7 @@
 `usable()` answers "does this stage's output file exist, parse, and look
 non-degenerate" -- and nothing about WHY that file has the content it
 does. That gap is real, not hypothetical: an orphaned
-`T24-kaveh096-M51-Luminance-bin1` group directory sits on disk today
+`T24-observer1-M51-Luminance-bin1` group directory sits on disk today
 (dated 2026-09-05) from before the multi-user Luminance merge (commit
 04eac54) landed -- `usable()` would happily resume from that single-user
 master forever, with zero way to know a second user's data should now be

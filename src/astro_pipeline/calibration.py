@@ -674,7 +674,7 @@ def calibrate_lights(
     # truncated at the first one -- verified real, and not hypothetical: the
     # project folder this pipeline runs against is named
     # "M51 - Whirlpool galaxy - T24 & T21 - Jan 2025", which broke
-    # `-bias=<abs path>` with "C:\Users\Kaveh\Desktop\M51.[any_allowed_
+    # `-bias=<abs path>` with "C:\Users\<you>\Desktop\M51.[any_allowed_
     # extension] not found". Staging also dodges the ampersand in that same
     # folder name.
     #

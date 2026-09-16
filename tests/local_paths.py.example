@@ -1,0 +1,27 @@
+"""Template for tests/local_paths.py (gitignored, never committed) --
+copy this file to `local_paths.py` in this same directory and fill in
+your own real paths to enable this suite's real-data tests.
+
+Every real-data test in this suite is gated by a `pytest.mark.skipif`
+that checks whether its fixture path actually exists, so cloning this
+repo and running the suite with NO local_paths.py configured at all just
+skips those tests -- the large majority of the suite needs nothing here.
+
+DESKTOP_DIR: where your own real, already-processed project folders live
+    (this project's own convention keeps a folder like "M51 - Whirlpool
+    galaxy - T24 & T21 - Jan 2025" under here, with its generated
+    _pipeline/ subfolder inside it).
+ITELESCOPE_DIR: where your own raw iTelescope delivery folders live (the
+    ones this repo's pipeline runs directly against, without a separate
+    Desktop copy).
+LUM_USER / RGB_USER: the real iTelescope account username(s) embedded in
+    your own real FITS filenames (iTelescope bakes your account name
+    into every delivered filename, e.g. "raw-T24-<your-username>-M51-
+    ..."), needed only if you're using this repo's own M51 test fixture
+    convention with a real multi-collaborator group.
+"""
+
+DESKTOP_DIR = r"C:\path\to\your\Desktop"
+ITELESCOPE_DIR = r"D:\path\to\your\iTelescope\raw\data"
+LUM_USER = "your-itelescope-username"
+RGB_USER = "your-itelescope-username"

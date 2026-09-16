@@ -13,6 +13,8 @@ from astro_pipeline.solving import (
     solve,
 )
 
+from conftest import PROJECT_DIR, RGB_USER
+
 try:
     ASTAP_CLI = find_astap_cli()
     ASTAP_AVAILABLE = True
@@ -22,10 +24,9 @@ except FileNotFoundError:
 
 requires_astap = pytest.mark.skipif(not ASTAP_AVAILABLE, reason="ASTAP not installed on this machine")
 
-REAL_LIGHT = Path(
-    r"C:\Users\Kaveh\Desktop\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025"
-    r"\Uncalibrated Lights - Jan 2025\T24 - 20250115"
-    r"\raw-T24-kaveh096-M51-20250115-045740-Luminance-BIN1-E-300-001.fit"
+REAL_LIGHT = (
+    PROJECT_DIR / "Uncalibrated Lights - Jan 2025" / "T24 - 20250115"
+    / f"raw-T24-{RGB_USER}-M51-20250115-045740-Luminance-BIN1-E-300-001.fit"
 )
 requires_real_light = pytest.mark.skipif(
     not REAL_LIGHT.exists(), reason="Real sample light frame not present on this machine"
