@@ -1,31 +1,34 @@
 ---
 name: astro-pipeline-lrgb
-description: Use when the user wants to run, drive, resume, or continue the LRGB astrophotography pipeline in this repo against an iTelescope session folder -- phrases like "run the pipeline", "process <target>", "run the M51 project", "pick up where the pipeline left off", "build the masters for <target>", or any request to turn a folder of raw iTelescope FITS subs into a stretched, colour-calibrated LRGB TIFF. Drives astro_pipeline.pipeline.run_lrgb stage-by-stage (masters -> reconciled -> final), pausing at each checkpoint for a human Proceed/Adjust/Abort decision rather than running to completion unattended. Does not do framing, cropping, or colour-grading -- those stay the user's manual Photoshop step.
-version: 1.0.0
+description: Use when the user wants to run, drive, resume, or continue the astrophotography pipeline in this repo against an iTelescope session folder -- phrases like "run the pipeline", "process <target>", "pick up where the pipeline left off", "build the masters for <target>", denoise/star-removal/darken a finished TIFF, or boost a broadband image with narrowband data. Covers LRGB/RGB-only/OSC composites, pure narrowband (SHO/HOO) composites, narrowband-boost (HaRGB), and optional post-processing (denoise, star removal, black-point export). Drives astro_pipeline.pipeline stage-by-stage, pausing at each checkpoint for a human Proceed/Adjust/Abort decision rather than running to completion unattended. Does not do framing, cropping, or colour-grading -- those stay the user's manual Photoshop step.
+version: 2.0.0
 ---
 
-# Astro Pipeline: LRGB run wrapper
+# Astro Pipeline: run wrapper
 
-Interviews the user about a project folder, then drives `run_lrgb()`
-(`src/astro_pipeline/pipeline.py`) one stage at a time via
-`skill/run_stage.py`, stopping at each of the three real control-flow
-boundaries the pipeline exposes (`stop_after="masters"` /
-`"reconciled"` / `"final"`) to show what actually happened and let a human
-decide whether to proceed, adjust a parameter and re-run, or stop.
+Interviews the user about a project folder, then drives the pipeline
+(`src/astro_pipeline/pipeline.py`) one stage at a time via the `skill/run_*.py`
+scripts, stopping at real control-flow boundaries to show what happened and
+let a human Proceed / Adjust / Abort. This skill adds no pipeline behaviour
+of its own -- it calls the pipeline, reads back `result.notes` /
+`result.checkpoints`, and presents them. If this file disagrees with the
+code, trust the code.
 
-This wraps an already-complete, already-resumable pipeline (Slices 1-3
-built the science; Slice 4.1-4.3 made staged execution and resume safety
-real). This skill adds no new pipeline behaviour of its own -- it calls
-`run_lrgb`, reads back `result.notes` / `result.checkpoints`, and presents
-them. If something here disagrees with what `run_lrgb` actually does,
-trust the code in `src/astro_pipeline/pipeline.py`, not this file.
+**Scope reminder (do not exceed this)**: no flats (deferred, separate pass),
+no automatic override of which telescope's Luminance drives the composite
+(surface the numbers, never silently pick against them), no cross-telescope
+Luminance blending, no touching Photoshop -- every path below ends the
+moment a TIFF path exists. Optional post-processing (denoise/star-removal/
+black-point/narrowband-boost) never overwrites or auto-recombines anything;
+it only ever adds new, separately-named files next to what's already there.
 
-**Scope reminder (do not exceed this)**: no flats (deferred, a separate
-pass), no automatic override of which telescope's Luminance drives the
-composite (Slice 2's whole point is that this stays a human call -- surface
-the numbers, never silently pick against them), no cross-telescope
-Luminance blending (a deliberate scope decision, not yet configurable), and no
-touching Photoshop -- this skill's job ends the moment a TIFF path exists.
+**Which flow does the user want?**
+| Data | Flow |
+|---|---|
+| Mono L + R/G/B, or R/G/B only, or OSC/Bayer colour | Steps 1-5 below (LRGB/RGB-only/OSC, one skill, auto-detected) |
+| Narrowband only (SII/Ha/OIII), false-colour SHO or HOO | "Narrowband (SHO/HOO)" section |
+| Broadband LRGB/RGB already finished, want Ha/OIII/SII blended in for colour pop | "Narrowband-boost (HaRGB)" section |
+| A finished TIFF, want denoise / star removal / a specific black point before Photoshop | "Optional post-processing" section |
 
 ## Repo conventions to reuse, not reinvent
 
@@ -34,11 +37,11 @@ touching Photoshop -- this skill's job ends the moment a TIFF path exists.
 - `scripts/run_m51.py` is a hardcoded reference for the real calling
   convention (`telescope="T24"`, `target="M51"`, explicit RA/Dec in hours/
   degrees -- passed explicitly so plate solving needs no network name
-  resolution). Use it as a sanity check for argument shapes, not as
-  something to invoke directly for a real interactive run.
-- `skill/interview.py` and `skill/run_stage.py` (this skill's own
-  supporting scripts) do the actual work below; read their docstrings if
-  anything here is ambiguous.
+  resolution). Sanity-check argument shapes against it; don't invoke it
+  directly for a real run.
+- `skill/interview.py`, `skill/run_stage.py`, `skill/run_narrowband.py`,
+  `skill/run_narrowband_boost.py`, `skill/run_post_process.py` do the actual
+  work below; read their docstrings if anything here is ambiguous.
 
 ## Step 1 -- Interview
 
@@ -74,11 +77,11 @@ touching Photoshop -- this skill's job ends the moment a TIFF path exists.
      frames at all but DO have iTelescope-side-calibrated (`calibrated-`
      provenance) lights, so `run_lrgb` will use them directly
      (`CalibrationMode.PRECALIBRATED`) instead of locally recalibrating --
-     real case: T73 (NGC 3628) and T02 (Abell 6 and HFG1). This is
-     detected automatically; nothing to ask about or pass as a
-     parameter. Its calibration-gap warnings for that telescope are
-     already filtered out of the deduplicated list below it (they'd
-     otherwise read as a blocking problem when they're actually expected).
+     real case: T73 (NGC 3628) and T02 (Abell 6 and HFG1). Detected
+     automatically; nothing to ask about or pass as a parameter. Its
+     calibration-gap warnings for that telescope are already filtered out
+     of the deduplicated list below it (they'd otherwise read as a
+     blocking problem when they're actually expected).
 
 3. **Present the summary** to the user: telescopes/targets/binnings/users
    found, which telescopes are precalibrated (if any), the deduplicated
@@ -152,10 +155,15 @@ with a full R/G/B set for the primary telescope.
   failed run. `run_lrgb` detects this automatically, no parameter to set.
   The real trigger case so far is a one-shot-colour (OSC) delivery -- a
   telescope with a `Color` filter group instead of separate Luminance/
-  Red/Green/Blue ones (real case: T02, Abell 6 and HFG1). OSC lights are
-  genuine undemosaiced Bayer-mosaic sensor data, debayered automatically
-  as part of building that contributor -- nothing to ask about
-  there either. A target with BOTH a full mono R/G/B set AND `Color` data
+  Red/Green/Blue ones. OSC lights are genuine undemosaiced Bayer-mosaic
+  sensor data, debayered automatically as part of building that
+  contributor -- nothing to ask about there either. Two real cases: T02
+  (Abell 6 and HFG1, PRECALIBRATED, no local frames at all) and T68
+  (IC 1396, RAW_LOCAL -- local bias but NO local dark at all; calibrates
+  bias-only + debayer automatically rather than raising, since darks may
+  legitimately not exist for an OSC delivery -- a real dark at that
+  binning, if one DOES exist, is still used normally). A target with BOTH
+  a full mono R/G/B set AND `Color` data
   at the same (telescope, binning) raises `NotImplementedError` instead
   of silently combining them (channel-order parity between Siril's
   debayer output and the mono path's `rgbcomp` has never been verified) --
@@ -320,6 +328,114 @@ disk in `_pipeline/` is left as-is, and a later re-run of this same skill
 picks up from wherever it actually got to, without redoing completed
 work. No separate cleanup step exists or is needed.
 
+## Narrowband (SHO/HOO)
+
+For a target shot ONLY in narrowband (SII/Ha/OIII, no L/R/G/B/OSC), skip
+Steps 1-5 and run `skill/run_narrowband.py` instead -- a single call, no
+staged checkpoints (there is exactly one colour contributor, no
+reconciliation tier to pause at):
+```
+.venv/Scripts/python.exe skill/run_narrowband.py "<project_dir>" \
+  --telescope <TELESCOPE> --target <TARGET> \
+  --ra-hours <RA> --dec-deg <DEC> \
+  --palette sho   # or hoo
+```
+Ask the user which palette:
+- `sho` (Hubble palette): maps SII->Red, Ha->Green, OIII->Blue. Needs all
+  three filters.
+- `hoo`: maps Ha->Red, OIII->Green, OIII->Blue (bicolour, no SII needed) --
+  offer this if the scan shows no SII data.
+
+Filter-name spelling is normalized automatically (`Ha`/`H-Alpha`/`Halpha`
+-> `Ha`, `OIII`/`O3` -> `OIII`, `SII`/`S2` -> `SII` -- see
+`normalize_narrowband_filter_name()`); nothing to ask the user about
+spelling. There is no SPCC step (no stars carry meaningful colour
+information in narrowband) -- each channel is independently
+background-subtracted and percentile-rescaled instead
+(`equalize_narrowband_channels()`), which is the real substitute for
+colour calibration here. Output: `<target>_sho.tif` / `<target>_hoo.tif`
+plus a faithful preview PNG, same non-destructive/no-Photoshop scope as
+every other output this skill produces.
+
+`--force` rebuilds everything; there is no per-stage force vocabulary like
+`run_stage.py`'s (only one contributor, no reconciliation boundary to
+target). **Known gap**: unlike `run_lrgb`, this path has no
+RunSignature-based staleness tracking yet -- re-running after changing an
+upstream input does not auto-detect and cascade the way `run_lrgb` does;
+if in doubt, pass `--force`.
+
+## Narrowband-boost (HaRGB)
+
+For a target with BOTH a finished LRGB/RGB run AND narrowband data (e.g.
+Ha), to blend the narrowband layer into a broadband channel for extra
+colour pop -- a real, sourced technique (lighten-style blend into Red by
+default), not this skill's own invention. Run AFTER Step 4/5 has already
+produced `rgb_reconciled.fit` (and `lum_bg.fits`, if not RGB-only) under
+`final/` or `final/_intermediate/`:
+```
+.venv/Scripts/python.exe skill/run_narrowband_boost.py "<project_dir>" \
+  --telescope <TELESCOPE> --target <TARGET> \
+  --ra-hours <RA> --dec-deg <DEC> \
+  --boost-filter Ha --boost-channel red --boost-factor 0.4 \
+  [--no-luminance]   # only for an RGB-only target (nothing to recompose with)
+```
+What it does, in order: builds a master for `--boost-filter` at
+`--binning` (default 2, matching the RGB masters), reprojects it onto the
+reconciled RGB's own grid, blends it into `--boost-channel` (default red),
+recombines via `rgbcomp`, and re-composes with the existing Luminance (or
+stretches the boosted RGB alone, `--no-luminance`).
+
+**Real finding, don't skip this step if reimplementing**: raw Siril
+`stack` output has no background subtraction or cross-filter
+normalization -- a real Red master and a real Ha master can land on
+near-identical absolute pixel scales, so a naive `max(Red, Ha*k)` boosts
+ZERO pixels at any realistic `k` (confirmed: 0% at k=0.4 on real M42
+data). The fix actually shipped: the narrowband layer is re-expressed in
+the TARGET channel's own real units first (`rescale_narrowband_to_
+reference()`), and the blend itself is background-preserving
+(`max(channel, channel_median*(1-k) + narrowband*k)` via
+`boost_channel_with_narrowband(..., channel_median=...)`) -- the target
+channel itself is never rescaled, so its real relationship to the other
+two RGB channels stays correct for the downstream `rgbcomp`.
+
+Output: `<target>_lrgb_haboost.tif` (or `_rgb_haboost.tif`), plus the raw
+registered narrowband layer exported standalone
+(`<target>_<filter>_layer.tif`) as a real ingredient for manual Photoshop
+tuning if the automated blend ratio isn't to taste. Non-destructive: never
+touches the original LRGB/RGB TIFF.
+
+## Optional post-processing (denoise / star removal / black point)
+
+After a TIFF already exists (from Step 5, narrowband, or narrowband-boost),
+offer this as a distinct, optional final step before Photoshop -- ask the
+user whether they want it; never run it unprompted. Every output is a NEW
+file in `final/`; the original TIFF/preview is never touched.
+```
+.venv/Scripts/python.exe skill/run_post_process.py "<project_dir>/_pipeline/final" \
+  --target-name "<TARGET>" --black-point <0.0-1.0> \
+  [--nebula]   # star removal first; omit for galaxy targets
+```
+Ask which chain applies:
+- **Galaxy** (default, no `--nebula`): denoise the full composite (stars
+  included -- a galaxy's own star field is not a thing to remove) ->
+  `<target>_denoised_darkened.tif`.
+- **Nebula** (`--nebula`): star removal FIRST on the original composite
+  (not the denoised one -- denoising blurs faint stars and degrades
+  detection, confirmed during this capability's development), then
+  denoise the STARLESS result. Star layer exported standalone, faithful,
+  un-denoised, for optional manual recombination in Photoshop (not
+  auto-recombined -- same scope boundary as everything else this skill
+  declines to automate) -> `<target>_starless.tif`, `<target>_stars.tif`,
+  `<target>_starless_denoised_darkened.tif`.
+
+`--black-point` (0.0-1.0, the low end of the export's linear stretch) has
+no baked-in default on purpose -- a genuine aesthetic choice, ask the
+user rather than picking one. `--denoise-gpu` exists but is known
+unreliable on low-VRAM/older-GPU machines (see "Known gaps" below) --
+default to CPU denoise unless the user specifically wants to try GPU.
+Resumable: if `<target>_starless.fit`/`_stars.fit` already exist under
+`final/_intermediate/`, star removal is skipped and reused.
+
 ## Known gaps, honestly
 
 - `run_stage.py` prints the same log lines twice in a raw terminal capture
@@ -368,3 +484,27 @@ work. No separate cleanup step exists or is needed.
   that path is what `tests/test_pipeline.py`'s
   `test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output`
   actually verifies.
+- **GPU denoise (`--denoise-gpu`) is unreliable on Intel-integrated-GPU
+  laptops**: confirmed real crash investigated end-to-end (event logs,
+  driver dumps, retried after a full reboot) -- root cause is a
+  Haswell-era Intel GPU's DirectML incompatibility (the INTEL-SA-00315
+  security fix disabled DX12 on this hardware class), not an OOM and not
+  fixable by a driver upgrade. Default to CPU denoise; only try
+  `--denoise-gpu` if the user has a genuinely modern discrete GPU.
+- **CPU denoise at full resolution (4096x4096) needs real time and real
+  RAM headroom** -- confirmed to complete successfully but takes 1-2+
+  hours per image on an 8GB machine. Run it as a detached background
+  process, not a foreground blocking call, and monitor by polling the
+  PID rather than assuming a long silence means it died.
+- `run_narrowband.py`/`run_narrowband_boost.py` have real-data-tested unit
+  coverage and a manual, hand-run validation against independently-built
+  masters (M42/T20), but `run_narrowband_boost.py` has NOT yet been run
+  end-to-end as a script against one complete real LRGB project start to
+  finish -- if it's used that way for the first time, treat the run as a
+  fresh validation, not a known-good path.
+- **A real bad-data case, not a code bug**: M42's Green-bin2 registration
+  can fail with Siril's "Found 0 stars in reference" if the frame set
+  contains near-zero-signal frames (cloud/focus/tracking dropouts) --
+  diagnose by checking each frame's pixel std via astropy directly, not by
+  assuming the code is at fault; the fix is excluding the bad frame(s),
+  not touching the pipeline.

@@ -1244,9 +1244,11 @@ def _build_osc_colour_contributor(
     come from the SAME Bayer-mosaic exposure), so there is nothing to
     align. Real case: T02 (Abell 6 and HFG1) -- confirmed genuine
     undemosaiced Bayer CFA data (RGGB), no local Bias/Dark at all, so
-    `calibration_mode` is always PRECALIBRATED for every real OSC target
-    seen so far (see build_master()'s own NotImplementedError guard
-    against debayer=True + RAW_LOCAL).
+    PRECALIBRATED. RAW_LOCAL + debayer is also real and supported (T68 /
+    IC 1396: local bias, no local dark at all -- see build_master()'s
+    bias-only-when-no-dark-exists branch), so `calibration_mode` is not
+    always PRECALIBRATED in general, just for every OSC target seen so
+    far that has no local calibration frames.
 
     Returns None -- logging why, rather than raising -- for the same
     reasons _build_colour_contributor does: no OSC lights found, or too
