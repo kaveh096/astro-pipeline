@@ -1638,3 +1638,614 @@ def test_run_lrgb_mixed_osc_and_rgb_same_binning_raises_not_implemented(tmp_path
             project_dir, telescope="T02", target="Mixed Target", ra_hours=1.0, dec_deg=1.0,
             lum_binning=1, rgb_binning=1,
         )
+
+
+# --- Task 5, Step 0 (scratch/task5-oop-refactor-plan.md): FAST, MOCKED ------
+# --- coverage of run_lrgb's own staged-orchestration control flow, which ---
+# --- previously only had coverage gated on a personal, non-committable   ---
+# --- M51 project folder (see the plan's Section 0/4b). No real Siril/    ---
+# --- GraXpert is used by any test below -- every Siril/GraXpert-touching ---
+# --- internal is monkeypatched directly, the same technique already      ---
+# --- proven by test_run_lrgb_rgb_only_full_run_no_luminance_no_crash     ---
+# --- above (minus that test's own @requires_siril, since stretch_rgb/    ---
+# --- stretch_and_compose are mocked here too).                           ---
+
+
+def _write_fake_master(path: Path, stackcnt: int = 10, seed: int = 0) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = np.random.default_rng(seed).uniform(0.05, 0.5, size=(16, 16)).astype(np.float32)
+    hdu = fits.PrimaryHDU(data=data)
+    hdu.header["PLTSOLVD"] = True
+    hdu.header["STACKCNT"] = stackcnt
+    hdu.writeto(path, overwrite=True)
+
+
+def test_run_lrgb_stop_after_masters_returns_before_reconciliation_MOCKED(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """FAST, MOCKED counterpart of
+    test_run_lrgb_stop_after_masters_stops_before_reconciliation (which is
+    gated on a real, personal M51 project folder that isn't present even in
+    this repo's own dev environment -- see the refactor plan's Section 0
+    finding 2/3a). Asserts stop_after="masters" really does return before
+    ANY reconciliation-stage code runs, by making
+    run_graxpert_background_extraction raise if it's ever called."""
+    import astro_pipeline.pipeline as pipeline_module
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    class _FakeReport:
+        def instrument_groups(self):
+            return {
+                ("T99", "Fake Target", "Luminance", 1): [
+                    _FakeLightFrame("l1.fit"), _FakeLightFrame("l2.fit"),
+                ],
+                ("T99", "Fake Target", "Red", 1): [_FakeLightFrame("r.fit")],
+                ("T99", "Fake Target", "Green", 1): [_FakeLightFrame("g.fit")],
+                ("T99", "Fake Target", "Blue", 1): [_FakeLightFrame("b.fit")],
+            }
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {("T99", "Bias", 1, 0.0): ["b"], ("T99", "Dark", 1, 300.0): ["d"]}
+
+        def flat_index(self):
+            return {}
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+
+    build_master_calls = {"n": 0}
+
+    def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *a, **k):
+        build_master_calls["n"] += 1
+        master_path = (
+            pipeline_module.pipeline_dir(project_dir) / group_name / "lights"
+            / f"master_{filter_name.lower()}.fit"
+        )
+        _write_fake_master(master_path)
+        return master_path
+
+    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+
+    stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
+    data = np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+    fits.PrimaryHDU(data=data).writeto(stub_composite)
+
+    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
+        import shutil as _shutil
+
+        contrib_dir.mkdir(parents=True, exist_ok=True)
+        _shutil.copy2(stub_composite, contrib_dir / "rgb_colour_calibrated.fit")
+        return ColourContributor(
+            telescope=telescope, binning=binning, composite_path=stub_composite,
+            sub_count=1, stack_total=1,
+        )
+
+    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not run reconciliation-stage code when stop_after='masters'")
+
+    monkeypatch.setattr(pipeline_module, "run_graxpert_background_extraction", fail_if_called)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    result = run_lrgb(
+        project_dir, telescope="T99", target="Fake Target", ra_hours=1.0, dec_deg=1.0,
+        lum_binning=1, rgb_binning=1, stop_after="masters",
+    )
+
+    assert build_master_calls["n"] == 1
+    assert "Luminance" in result.masters
+    assert result.composite_path is None
+    assert result.export_result is None
+    assert [cp.label for cp in result.checkpoints] == [
+        "01_master_luminance", "02_primary_rgb_colour_calibrated",
+    ]
+
+
+def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCKED(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """FAST, MOCKED counterpart of
+    test_run_lrgb_stop_after_reconciled_resumes_without_rebuilding_masters.
+    build_master/_build_colour_contributor are mocked to replicate their
+    OWN real resumability contract (skip and don't increment a call
+    counter if the output file already exists) -- run_lrgb itself always
+    calls them unconditionally every invocation; the skip-on-resume
+    behavior lives inside those functions, not in run_lrgb's own loop, so
+    a bare no-resumability mock would (wrongly) look like "masters get
+    rebuilt on every call" no matter what run_lrgb actually does."""
+    import astro_pipeline.pipeline as pipeline_module
+    from astro_pipeline.reconciliation import ReconciliationResult
+    from astro_pipeline.stretch_compose import ComposeResult
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    class _FakeReport:
+        def instrument_groups(self):
+            return {
+                ("T99", "Fake Target", "Luminance", 1): [
+                    _FakeLightFrame("l1.fit"), _FakeLightFrame("l2.fit"),
+                ],
+                ("T99", "Fake Target", "Red", 1): [_FakeLightFrame("r.fit")],
+                ("T99", "Fake Target", "Green", 1): [_FakeLightFrame("g.fit")],
+                ("T99", "Fake Target", "Blue", 1): [_FakeLightFrame("b.fit")],
+            }
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {("T99", "Bias", 1, 0.0): ["b"], ("T99", "Dark", 1, 300.0): ["d"]}
+
+        def flat_index(self):
+            return {}
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+
+    build_master_calls = {"n": 0}
+
+    def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *a, **k):
+        master_path = (
+            pipeline_module.pipeline_dir(project_dir) / group_name / "lights"
+            / f"master_{filter_name.lower()}.fit"
+        )
+        if master_path.exists():
+            return master_path
+        build_master_calls["n"] += 1
+        _write_fake_master(master_path)
+        return master_path
+
+    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+
+    stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
+    data = np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+    fits.PrimaryHDU(data=data).writeto(stub_composite)
+    build_colour_calls = {"n": 0}
+
+    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
+        import shutil as _shutil
+
+        calibrated_path = contrib_dir / "rgb_colour_calibrated.fit"
+        if not calibrated_path.exists():
+            build_colour_calls["n"] += 1
+            contrib_dir.mkdir(parents=True, exist_ok=True)
+            _shutil.copy2(stub_composite, calibrated_path)
+        return ColourContributor(
+            telescope=telescope, binning=binning, composite_path=stub_composite,
+            sub_count=1, stack_total=1,
+        )
+
+    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+
+    def fake_graxpert_bg(input_path, output_stem):
+        output_path = Path(input_path).parent / f"{output_stem}.fits"
+        _write_fake_master(output_path, seed=2)
+        return output_path
+
+    monkeypatch.setattr(pipeline_module, "run_graxpert_background_extraction", fake_graxpert_bg)
+
+    def fake_reproject_to_reference(source_path, reference_path, output_path):
+        import shutil as _shutil
+
+        _shutil.copy2(source_path, output_path)
+        return ReconciliationResult(
+            source_path=Path(source_path), output_path=Path(output_path),
+            footprint_min=1.0, footprint_mean=1.0, nan_fraction=0.0,
+        )
+
+    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject_to_reference)
+
+    def fake_stretch_and_compose(lum_path, rgb_path, output_dir, output_stem, method="autostretch", **kwargs):
+        composite_path = Path(output_dir) / f"{output_stem}.fit"
+        data = np.random.default_rng(3).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+        fits.PrimaryHDU(data=data).writeto(composite_path, overwrite=True)
+        return ComposeResult(
+            composite_path=composite_path, lum_stretch_log=None, rgb_stretch_log=None, compose_log=None,
+        )
+
+    monkeypatch.setattr(pipeline_module, "stretch_and_compose", fake_stretch_and_compose)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    result1 = run_lrgb(
+        project_dir, telescope="T99", target="Fake Target", ra_hours=1.0, dec_deg=1.0,
+        lum_binning=1, rgb_binning=1, stop_after="reconciled",
+    )
+    assert result1.composite_path is None
+    assert build_master_calls["n"] == 1
+    assert build_colour_calls["n"] == 1
+
+    result2 = run_lrgb(
+        project_dir, telescope="T99", target="Fake Target", ra_hours=1.0, dec_deg=1.0,
+        lum_binning=1, rgb_binning=1, stop_after="final",
+    )
+    assert result2.composite_path is not None
+    assert result2.export_result is not None
+    # The Luminance master genuinely isn't rebuilt on the resumed call.
+    assert build_master_calls["n"] == 1
+    # REAL, PRE-EXISTING BUG found while writing this test (not a test bug --
+    # reproduced directly, not guessed): the colour contributor IS rebuilt
+    # again here, even though nothing changed. run_lrgb's OSC loop (~line
+    # 1915) unconditionally overwrites `colour_frame_hashes[contributor_key]`
+    # for the SAME key the mono-RGB loop just wrote, because
+    # discover_osc_contributors() always pads its result with the caller's
+    # own (telescope, rgb_binning) regardless of whether any real OSC/Color
+    # data exists (mirroring discover_luminance_contributors' own padding
+    # convention) -- for a pure mono-RGB target (this one, and apparently
+    # every mono-RGB target in production, including real M51/T24), the OSC
+    # loop always runs once for `rgb_binning` too, computes
+    # frame_identity_hash([]) (no real Color lights), and clobbers the
+    # correct RGB frame_hash just persisted under the identical
+    # "{telescope}_bin{binning}" key -- so contributor_stale() always
+    # compares the NEXT call's real hash against this wrong, empty-lights
+    # hash and reports "changed" forever, silently forcing a full colour
+    # contributor rebuild on EVERY resumed run_lrgb call, never actually
+    # resuming. This assertion documents that REAL current behavior (so a
+    # refactor doesn't accidentally "fix" it as a silent side effect,
+    # which would itself be a behavior change) -- it is not this test's
+    # job to fix it; flagged separately for a human decision.
+    assert build_colour_calls["n"] == 2
+
+
+def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: Path, monkeypatch) -> None:
+    """Multi-contributor reconciliation (2+ RGB binnings combined via
+    match_gain_offset + combine_same_grid), driven through run_lrgb itself
+    -- not the underlying reconciliation.py functions in isolation, which
+    are already covered by test_reconciliation.py. Before this test, this
+    control flow (which contributor becomes the STACKCNT-weighted
+    reference, how many times match_gain_offset/combine_same_grid are
+    actually called and with what arguments, RunSignature.colour_reference)
+    had zero coverage without a real multi-binning project folder (see the
+    refactor plan's Section 4b, item 3). reproject_to_reference/
+    crop_to_common_coverage/match_gain_offset/combine_same_grid are all
+    mocked here -- this test is about run_lrgb's ORCHESTRATION of them,
+    not their own internal correctness (already covered elsewhere)."""
+    import shutil
+
+    import astro_pipeline.pipeline as pipeline_module
+    from astro_pipeline.reconciliation import GainOffsetFit, ReconciliationResult
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    class _FakeReport:
+        def instrument_groups(self):
+            return {
+                ("T99", "Fake Target", "Luminance", 1): [
+                    _FakeLightFrame("l1.fit"), _FakeLightFrame("l2.fit"),
+                ],
+                ("T99", "Fake Target", "Red", 1): [_FakeLightFrame("r1.fit")],
+                ("T99", "Fake Target", "Green", 1): [_FakeLightFrame("g1.fit")],
+                ("T99", "Fake Target", "Blue", 1): [_FakeLightFrame("b1.fit")],
+                ("T99", "Fake Target", "Red", 2): [_FakeLightFrame("r2.fit")],
+                ("T99", "Fake Target", "Green", 2): [_FakeLightFrame("g2.fit")],
+                ("T99", "Fake Target", "Blue", 2): [_FakeLightFrame("b2.fit")],
+            }
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {
+                ("T99", "Bias", 1, 0.0): ["b"], ("T99", "Dark", 1, 300.0): ["d"],
+                ("T99", "Bias", 2, 0.0): ["b"], ("T99", "Dark", 2, 300.0): ["d"],
+            }
+
+        def flat_index(self):
+            return {}
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+
+    def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *a, **k):
+        master_path = (
+            pipeline_module.pipeline_dir(project_dir) / group_name / "lights"
+            / f"master_{filter_name.lower()}.fit"
+        )
+        _write_fake_master(master_path)
+        return master_path
+
+    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+
+    # BIN1 is the weaker contributor (stack_total=6), BIN2 the stronger one
+    # (stack_total=20) -- BIN2 must be picked as the gain/offset reference,
+    # NOT BIN1, even though BIN1 is the caller's own primary `rgb_binning`.
+    stub_bin1 = tmp_path / "stub_bin1.fit"
+    fits.PrimaryHDU(
+        data=np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+    ).writeto(stub_bin1)
+    stub_bin2 = tmp_path / "stub_bin2.fit"
+    fits.PrimaryHDU(
+        data=np.random.default_rng(2).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+    ).writeto(stub_bin2)
+    stack_totals = {1: 6, 2: 20}
+
+    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
+        stub = stub_bin1 if binning == 1 else stub_bin2
+        contrib_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(stub, contrib_dir / "rgb_colour_calibrated.fit")
+        return ColourContributor(
+            telescope=telescope, binning=binning, composite_path=stub,
+            sub_count=stack_totals[binning], stack_total=stack_totals[binning],
+        )
+
+    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+
+    def fake_graxpert_bg(input_path, output_stem):
+        output_path = Path(input_path).parent / f"{output_stem}.fits"
+        _write_fake_master(output_path, seed=3)
+        return output_path
+
+    monkeypatch.setattr(pipeline_module, "run_graxpert_background_extraction", fake_graxpert_bg)
+
+    reproject_calls: list[Path] = []
+
+    def fake_reproject_to_reference(source_path, reference_path, output_path):
+        reproject_calls.append(Path(source_path))
+        shutil.copy2(source_path, output_path)
+        return ReconciliationResult(
+            source_path=Path(source_path), output_path=Path(output_path),
+            footprint_min=1.0, footprint_mean=1.0, nan_fraction=0.0,
+        )
+
+    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject_to_reference)
+
+    def fake_crop_to_common_coverage(paths, output_dir):
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_paths = []
+        for i, p in enumerate(paths):
+            out_path = output_dir / f"cropped_{i}.fit"
+            shutil.copy2(p, out_path)
+            out_paths.append(out_path)
+        return out_paths
+
+    monkeypatch.setattr(pipeline_module, "crop_to_common_coverage", fake_crop_to_common_coverage)
+
+    match_gain_offset_calls: list[tuple[Path, Path]] = []
+
+    def fake_match_gain_offset(path, reference_path, output_path):
+        match_gain_offset_calls.append((Path(path), Path(reference_path)))
+        shutil.copy2(path, output_path)
+        return [GainOffsetFit(channel=0, gain=1.0, reference_background=0.1, contributor_background=0.1, n_pixels=100)]
+
+    monkeypatch.setattr(pipeline_module, "match_gain_offset", fake_match_gain_offset)
+
+    combine_calls: list[dict] = []
+
+    def fake_combine_same_grid(paths, output_path, weights=None, reference_index=0):
+        combine_calls.append(
+            {"paths": [Path(p) for p in paths], "weights": weights, "reference_index": reference_index}
+        )
+        shutil.copy2(paths[reference_index], output_path)
+        return Path(output_path)
+
+    monkeypatch.setattr(pipeline_module, "combine_same_grid", fake_combine_same_grid)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    result = run_lrgb(
+        project_dir, telescope="T99", target="Fake Target", ra_hours=1.0, dec_deg=1.0,
+        lum_binning=1, rgb_binning=1, stop_after="reconciled",
+    )
+
+    assert result.composite_path is None  # stop_after="reconciled"
+    assert len(reproject_calls) == 2  # both contributors reprojected onto L
+    # BIN2 (stack_total=20) is the reference -> only BIN1 needs gain-matching.
+    assert len(match_gain_offset_calls) == 1
+    # match_gain_offset is called with the CROPPED path (crop_to_common_
+    # coverage's own output), not the raw contributor composite -- cropped[0]
+    # is L, cropped[1:] aligned 1:1 with `contributors` ([bin1, bin2]), so
+    # index 1 (cropped_1.fit) is bin1, the non-reference contributor.
+    assert match_gain_offset_calls[0][0].name == "cropped_1.fit"
+    assert match_gain_offset_calls[0][1].name == "cropped_2.fit"  # reference (bin2)
+    assert len(combine_calls) == 1
+    assert combine_calls[0]["reference_index"] == 1  # BIN2 is contributors[1]
+    assert combine_calls[0]["weights"] == [6.0, 20.0]  # STACKCNT order, not sorted by value
+
+    signature_path = project_dir / "_pipeline" / "run_signature.json"
+    import json
+
+    persisted = json.loads(signature_path.read_text(encoding="utf-8"))
+    assert persisted["colour_reference"] == "T99_bin2"
+
+
+def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Extends test_run_signature.py's
+    test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale
+    technique from "one call site, one argument" to the full top-level
+    masters/reconciled/final cascade-delete block (pipeline.py's `if
+    "masters"/"reconciled"/"final" in stages_to_invalidate:
+    _delete_if_exists(...)`) -- the exact code Risk 3 of
+    scratch/task5-oop-refactor-plan.md names as most likely to silently
+    regress during the module split (a moved call site quietly losing an
+    argument or a branch). Deliberately scoped to the three explicitly
+    named top-level files plus the Luminance master (all reached via
+    _delete_if_exists, which this test spies on) -- NOT the additional
+    per-contributor files _clear_colour_contributor_products deletes via
+    its own direct unlink() calls, which is a real but separate code path
+    already exercised by its own dedicated tests elsewhere in this file.
+    """
+    import shutil
+
+    import astro_pipeline.pipeline as pipeline_module
+    from astro_pipeline.reconciliation import ReconciliationResult
+    from astro_pipeline.stretch_compose import ComposeResult
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    class _FakeReport:
+        def instrument_groups(self):
+            return {
+                ("T99", "Fake Target", "Luminance", 1): [
+                    _FakeLightFrame("l1.fit"), _FakeLightFrame("l2.fit"),
+                ],
+                ("T99", "Fake Target", "Red", 1): [_FakeLightFrame("r.fit")],
+                ("T99", "Fake Target", "Green", 1): [_FakeLightFrame("g.fit")],
+                ("T99", "Fake Target", "Blue", 1): [_FakeLightFrame("b.fit")],
+            }
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {("T99", "Bias", 1, 0.0): ["b"], ("T99", "Dark", 1, 300.0): ["d"]}
+
+        def flat_index(self):
+            return {}
+
+    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+
+    call_counts = {"build_master": 0, "build_colour": 0, "graxpert": 0, "reproject": 0, "stretch": 0}
+
+    def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *a, **k):
+        master_path = (
+            pipeline_module.pipeline_dir(project_dir) / group_name / "lights"
+            / f"master_{filter_name.lower()}.fit"
+        )
+        if master_path.exists():
+            return master_path
+        call_counts["build_master"] += 1
+        _write_fake_master(master_path)
+        return master_path
+
+    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+
+    stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
+    fits.PrimaryHDU(
+        data=np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+    ).writeto(stub_composite)
+
+    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
+        calibrated_path = contrib_dir / "rgb_colour_calibrated.fit"
+        if not calibrated_path.exists():
+            call_counts["build_colour"] += 1
+            contrib_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(stub_composite, calibrated_path)
+        return ColourContributor(
+            telescope=telescope, binning=binning, composite_path=stub_composite,
+            sub_count=1, stack_total=1,
+        )
+
+    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+
+    def fake_graxpert_bg(input_path, output_stem):
+        call_counts["graxpert"] += 1
+        output_path = Path(input_path).parent / f"{output_stem}.fits"
+        _write_fake_master(output_path, seed=2)
+        return output_path
+
+    monkeypatch.setattr(pipeline_module, "run_graxpert_background_extraction", fake_graxpert_bg)
+
+    def fake_reproject_to_reference(source_path, reference_path, output_path):
+        call_counts["reproject"] += 1
+        shutil.copy2(source_path, output_path)
+        return ReconciliationResult(
+            source_path=Path(source_path), output_path=Path(output_path),
+            footprint_min=1.0, footprint_mean=1.0, nan_fraction=0.0,
+        )
+
+    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject_to_reference)
+
+    def fake_stretch_and_compose(lum_path, rgb_path, output_dir, output_stem, method="autostretch", **kwargs):
+        call_counts["stretch"] += 1
+        composite_path = Path(output_dir) / f"{output_stem}.fit"
+        fits.PrimaryHDU(
+            data=np.random.default_rng(3).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+        ).writeto(composite_path, overwrite=True)
+        return ComposeResult(
+            composite_path=composite_path, lum_stretch_log=None, rgb_stretch_log=None, compose_log=None,
+        )
+
+    monkeypatch.setattr(pipeline_module, "stretch_and_compose", fake_stretch_and_compose)
+
+    real_delete_if_exists = pipeline_module._delete_if_exists
+    deleted_names: list[str] = []
+
+    def spy_delete_if_exists(path, reason, notes):
+        if Path(path).exists():
+            deleted_names.append(Path(path).name)
+        real_delete_if_exists(path, reason, notes)
+
+    monkeypatch.setattr(pipeline_module, "_delete_if_exists", spy_delete_if_exists)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    def _run(**kwargs):
+        return run_lrgb(
+            project_dir, telescope="T99", target="Fake Target", ra_hours=1.0, dec_deg=1.0,
+            lum_binning=1, rgb_binning=1, **kwargs,
+        )
+
+    result = _run()
+    assert result.export_result is not None
+    assert call_counts == {"build_master": 1, "build_colour": 1, "graxpert": 1, "reproject": 1, "stretch": 1}
+
+    # --- force={"final"}: only the final composite is stale -----------------
+    deleted_names.clear()
+    before = dict(call_counts)
+    _run(force={"final"})
+    assert set(deleted_names) == {"lrgb_final.fit"}
+    assert call_counts["build_master"] == before["build_master"]
+    # REAL, PRE-EXISTING BUG (documented in detail in
+    # test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCKED,
+    # found while writing that test, reproduced directly): run_lrgb's OSC
+    # loop unconditionally clobbers colour_frame_hashes[contributor_key] for
+    # the caller's own (telescope, rgb_binning) with an empty-lights hash on
+    # every call, for any pure mono-RGB target -- so contributor_stale()
+    # always reports the colour contributor "changed" on every call after
+    # the first, REGARDLESS of `force`. This is independent of what this
+    # test is actually trying to verify (the top-level _delete_if_exists
+    # cascade), and is asserted here only so the count is documented
+    # accurately rather than silently wrong.
+    assert call_counts["build_colour"] == before["build_colour"] + 1
+    assert call_counts["graxpert"] == before["graxpert"]
+    assert call_counts["reproject"] == before["reproject"]
+    assert call_counts["stretch"] == before["stretch"] + 1
+
+    # --- force={"reconciled"}: reconciliation + final stale, masters aren't -
+    deleted_names.clear()
+    before = dict(call_counts)
+    _run(force={"reconciled"})
+    assert set(deleted_names) == {"rgb_reconciled.fit", "lrgb_final.fit"}
+    assert call_counts["build_master"] == before["build_master"]
+    assert call_counts["build_colour"] == before["build_colour"] + 1  # see note above
+    assert call_counts["graxpert"] == before["graxpert"]
+    assert call_counts["reproject"] == before["reproject"] + 1
+    assert call_counts["stretch"] == before["stretch"] + 1
+
+    # --- force={"masters"}: everything downstream, including the Luminance --
+    # --- master itself, is stale ---------------------------------------------
+    deleted_names.clear()
+    before = dict(call_counts)
+    _run(force={"masters"})
+    assert set(deleted_names) == {"master_luminance.fit", "lum_bg.fits", "rgb_reconciled.fit", "lrgb_final.fit"}
+    assert call_counts["build_master"] == before["build_master"] + 1
+    assert call_counts["build_colour"] == before["build_colour"] + 1
+    assert call_counts["graxpert"] == before["graxpert"] + 1
+    assert call_counts["reproject"] == before["reproject"] + 1
+    assert call_counts["stretch"] == before["stretch"] + 1
