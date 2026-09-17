@@ -162,7 +162,7 @@ from .run_signature import (
 )
 from .siril_driver import run_script
 from .stretch_compose import stretch_and_compose, stretch_rgb
-from .workspace import pipeline_dir
+from .workspace import contributor_dir, pipeline_dir
 
 @dataclass
 class PipelineResult:
@@ -326,27 +326,6 @@ class ColourContributor:
     def key(self) -> str:
         """Stable identity string for filenames/logging, e.g. 'T24_bin1'."""
         return f"{self.telescope}_bin{self.binning}"
-
-
-def contributor_dir(final: Path, telescope: str, binning: int, rgb_binning: int) -> Path:
-    """Where one RGB contributor's per-binning files live (Slice 3.3).
-
-    The PRIMARY contributor (`binning == rgb_binning`) keeps the legacy
-    top-level `final` directory itself -- e.g. final/rgb_native.fit --
-    kept backward compatible with existing fixtures/tests and so this
-    naming fix doesn't trigger the hours-of-recompute a full rename of the
-    primary's paths would (see usable()'s resume gating). Any OTHER
-    binning gets its own telescope-explicit subdirectory:
-    `contrib_<telescope>_bin<n>`, not just `contrib_bin<n>` -- the old,
-    telescope-blind name that would collide the moment a second telescope
-    contributes the same non-primary binning. A pure function of
-    (telescope, binning, rgb_binning), not of loop position, so it is
-    directly testable and stable across however run_lrgb's discovery
-    order changes (see test_pipeline.py).
-    """
-    if binning == rgb_binning:
-        return final
-    return final / f"contrib_{telescope}_bin{binning}"
 
 
 def _build_colour_contributor(

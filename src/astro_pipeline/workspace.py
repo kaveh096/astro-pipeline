@@ -60,3 +60,24 @@ def group_name_for(telescope: str, user: str, target: str, filter_name: str, bin
     IngestReport.light_groups()'s key so a directory maps 1:1 to a group.
     """
     return f"{telescope}-{user}-{target}-{filter_name}-bin{binning}"
+
+
+def contributor_dir(final: Path, telescope: str, binning: int, rgb_binning: int) -> Path:
+    """Where one RGB contributor's per-binning files live (Slice 3.3).
+
+    The PRIMARY contributor (`binning == rgb_binning`) keeps the legacy
+    top-level `final` directory itself -- e.g. final/rgb_native.fit --
+    kept backward compatible with existing fixtures/tests and so this
+    naming fix doesn't trigger the hours-of-recompute a full rename of the
+    primary's paths would (see usable()'s resume gating). Any OTHER
+    binning gets its own telescope-explicit subdirectory:
+    `contrib_<telescope>_bin<n>`, not just `contrib_bin<n>` -- the old,
+    telescope-blind name that would collide the moment a second telescope
+    contributes the same non-primary binning. A pure function of
+    (telescope, binning, rgb_binning), not of loop position, so it is
+    directly testable and stable across however run_lrgb's discovery
+    order changes (see test_pipeline.py).
+    """
+    if binning == rgb_binning:
+        return final
+    return final / f"contrib_{telescope}_bin{binning}"
