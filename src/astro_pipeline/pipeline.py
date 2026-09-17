@@ -125,6 +125,7 @@ from .calibration import (
     stage_precalibrated_lights,
 )
 from .export_image import ExportResult, export
+from .filter_constants import LUMINANCE_FILTER, OSC_FILTER, RGB_FILTERS
 from .ingest import CalibrationFrame, scan_session
 from .checkpoints import Checkpoint, checkpoint, save_checkpoints, _pixel_scale_arcsec
 from .logging_utils import log as _log
@@ -149,18 +150,6 @@ from .siril_driver import run_script
 from .solving import solve
 from .stretch_compose import stretch_and_compose, stretch_rgb
 from .workspace import group_name_for, pipeline_dir
-
-RGB_FILTERS = ("Red", "Green", "Blue")
-LUMINANCE_FILTER = "Luminance"
-# One-shot-colour (OSC) filter identity (RGB-only/OSC plan, 2026-09). A
-# genuinely different build shape from RGB_FILTERS -- one already-Bayer-
-# mosaic filter debayered into a 3-channel composite directly, not three
-# separate mono masters combined via rgbcomp. Deliberately NOT folded
-# into RGB_FILTERS -- mixing the two build shapes into one constant would
-# blur them. Only "Color" is special-cased; any other unrecognized filter
-# keeps falling through to the existing "missing R/G/B, skip this
-# contributor" behaviour, not silently treated as OSC.
-OSC_FILTER = "Color"
 
 # Narrowband palette mappings (capability A, 2026-09): each maps to a
 # (red, green, blue) filter-name triplet, reusing the exact same
