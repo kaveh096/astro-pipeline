@@ -440,7 +440,7 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
         # about has run -- no Siril/register/solve needed for this test.
         raise RuntimeError("stop-after-build-master-call-site")
 
-    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
 
     try:
         pipeline_module.run_lrgb(
@@ -558,7 +558,7 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
     """Same shape as the Luminance-loop test above, aimed at the colour
     loop's own `old_signature.contributor_stale("colour", ...)` call site.
     A minimal Luminance contributor is allowed to build successfully
-    (via a stubbed build_master returning a real, tiny, readable FITS
+    (via a stubbed build_group_master returning a real, tiny, readable FITS
     file, so pipeline.py's own `fits.getheader(...).get("STACKCNT", ...)`
     call right after it doesn't blow up), so control actually reaches the
     colour loop; `_build_colour_contributor` is then stubbed to stop
@@ -651,11 +651,11 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
 
     # A real, tiny, readable FITS file so the Luminance loop's own
     # `fits.getheader(lum_master_path).get("STACKCNT", ...)` call (right
-    # after build_master returns) doesn't fail -- this test's target is
-    # the COLOUR call site, so the Luminance path just needs to complete.
+    # after build_group_master returns) doesn't fail -- this test's target
+    # is the COLOUR call site, so the Luminance path just needs to complete.
     stub_master = tmp_path / "stub_master.fit"
     fits_module.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
-    monkeypatch.setattr(pipeline_module, "build_master", lambda *a, **k: stub_master)
+    monkeypatch.setattr(pipeline_module, "build_group_master", lambda *a, **k: stub_master)
 
     def fake_build_colour_contributor(*args, **kwargs):
         raise RuntimeError("stop-after-colour-call-site")

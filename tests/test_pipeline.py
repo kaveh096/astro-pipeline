@@ -12,7 +12,7 @@ from astro_pipeline.pipeline import (
     ColourContributor,
     _build_colour_contributor,
     _NarrowbandNormalizingReport,
-    build_master,
+    build_group_master,
     build_single_filter_master,
     contributor_dir,
     contributor_fwhm_arcsec,
@@ -551,7 +551,7 @@ class _FakeReportOneLightPerFilter:
     Siril to form a sequence (MIN_SEQUENCE_FRAMES=2), a real failure mode
     found on T72's single-frame NGC 3628 Luminance group (first real
     precalibrated-path run). Must be caught and skipped-and-logged BEFORE
-    build_master()/register_and_stack() would crash on it."""
+    build_group_master()/register_and_stack() would crash on it."""
 
     def instrument_groups(self):
         return {
@@ -576,7 +576,7 @@ def test_build_colour_contributor_skips_on_too_few_frames_for_a_sequence(tmp_pat
 
 def test_build_colour_contributor_skips_on_missing_green_not_just_red(tmp_path: Path) -> None:
     """resolve_lights() for Red returns a non-empty list here, so the
-    function would proceed to build_master() for Red -- which needs real
+    function would proceed to build_group_master() for Red -- which needs real
     calibration frames/Siril and isn't appropriate for this fast unit
     test. So this only checks that the missing-filter detection itself
     (in RGB_FILTERS order) would name Green, not Red, by inspecting
@@ -607,7 +607,7 @@ def test_build_master_debayer_with_no_real_dark_skips_select_dark_and_requires_b
     called (it would raise CalibrationFramesMissingError for this exact
     case -- correct for a mono telescope, wrong here), and run_calibration
     must receive dark_frames=[] and require_dark=False."""
-    import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.master_builder as master_builder_module
 
     captured = {}
 
@@ -624,8 +624,8 @@ def test_build_master_debayer_with_no_real_dark_skips_select_dark_and_requires_b
     def fail_if_called(*args, **kwargs):
         raise AssertionError("select_dark() must not be called when no dark exists for a debayer group")
 
-    monkeypatch.setattr(pipeline_module, "run_calibration", fake_run_calibration)
-    monkeypatch.setattr(pipeline_module, "select_dark", fail_if_called)
+    monkeypatch.setattr(master_builder_module, "run_calibration", fake_run_calibration)
+    monkeypatch.setattr(master_builder_module, "select_dark", fail_if_called)
 
     stub_master = tmp_path / "stub_master.fit"
     fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
@@ -634,9 +634,9 @@ def test_build_master_debayer_with_no_real_dark_skips_select_dark_and_requires_b
         master_path = stub_master
 
     monkeypatch.setattr(
-        pipeline_module, "register_and_stack", lambda *a, **k: _FakeStackResult()
+        master_builder_module, "register_and_stack", lambda *a, **k: _FakeStackResult()
     )
-    monkeypatch.setattr(pipeline_module, "solve", lambda *a, **k: None)
+    monkeypatch.setattr(master_builder_module, "solve", lambda *a, **k: None)
 
     cal_index = {("T68", "Bias", 1, 0.0): [_FakeLightFrame()]}  # no "Dark" key at all
 
@@ -645,7 +645,7 @@ def test_build_master_debayer_with_no_real_dark_skips_select_dark_and_requires_b
             self.user = "observer1"
             self.exptime = 240.0
 
-    build_master(
+    build_group_master(
         tmp_path, [_FakeLightFrameWithExptime(), _FakeLightFrameWithExptime()], cal_index, "group", "Color",
         "T68", 1, 5.588, -5.391, [],
         flat_frames=[], flat_policy=FlatPolicy.SKIP_IF_MISSING,
@@ -662,7 +662,7 @@ def test_build_master_debayer_with_a_real_dark_present_still_uses_it(tmp_path: P
     debayer=True, it must still be used normally (select_dark() called,
     require_dark stays True) -- a future OSC delivery might have real
     darks; this must not silently ignore data that exists."""
-    import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.master_builder as master_builder_module
     from astro_pipeline.calibration import DarkSelection
 
     captured = {}
@@ -679,8 +679,8 @@ def test_build_master_debayer_with_a_real_dark_present_still_uses_it(tmp_path: P
 
         return _FakeCalResult()
 
-    monkeypatch.setattr(pipeline_module, "select_dark", fake_select_dark)
-    monkeypatch.setattr(pipeline_module, "run_calibration", fake_run_calibration)
+    monkeypatch.setattr(master_builder_module, "select_dark", fake_select_dark)
+    monkeypatch.setattr(master_builder_module, "run_calibration", fake_run_calibration)
 
     stub_master = tmp_path / "stub_master.fit"
     fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
@@ -688,8 +688,8 @@ def test_build_master_debayer_with_a_real_dark_present_still_uses_it(tmp_path: P
     class _FakeStackResult:
         master_path = stub_master
 
-    monkeypatch.setattr(pipeline_module, "register_and_stack", lambda *a, **k: _FakeStackResult())
-    monkeypatch.setattr(pipeline_module, "solve", lambda *a, **k: None)
+    monkeypatch.setattr(master_builder_module, "register_and_stack", lambda *a, **k: _FakeStackResult())
+    monkeypatch.setattr(master_builder_module, "solve", lambda *a, **k: None)
 
     cal_index = {
         ("T68", "Bias", 1, 0.0): [_FakeLightFrame()],
@@ -701,7 +701,7 @@ def test_build_master_debayer_with_a_real_dark_present_still_uses_it(tmp_path: P
             self.user = "observer1"
             self.exptime = 240.0
 
-    build_master(
+    build_group_master(
         tmp_path, [_FakeLightFrameWithExptime(), _FakeLightFrameWithExptime()], cal_index, "group", "Color",
         "T68", 1, 5.588, -5.391, [],
         flat_frames=[], flat_policy=FlatPolicy.SKIP_IF_MISSING,
@@ -755,7 +755,7 @@ def test_build_colour_contributor_hoo_duplicates_repeated_filter_and_adds_nosum(
         # One real, tiny, readable FITS master per unique filter.
         return _write_stub_master(tmp_path / f"master_{filter_name}.fit", fill=0.3)
 
-    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
 
     def fake_reproject(source, reference, out_path):
         _write_stub_master(out_path, fill=0.3)
@@ -820,7 +820,7 @@ def test_build_colour_contributor_rgb_default_produces_no_nosum(tmp_path: Path, 
     def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *args, **kwargs):
         return _write_stub_master(tmp_path / f"master_{filter_name}.fit", fill=0.3)
 
-    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
 
     def fake_reproject(source, reference, out_path):
         _write_stub_master(out_path, fill=0.3)
@@ -1149,7 +1149,7 @@ def test_run_narrowband_exports_with_palette_named_stem(tmp_path: Path, monkeypa
 
         return _R()
 
-    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
     monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject)
     monkeypatch.setattr(pipeline_module, "crop_to_common_coverage", lambda paths, out_dir: None)
     monkeypatch.setattr(pipeline_module, "run_script", fake_run_script)
@@ -1217,7 +1217,7 @@ def test_build_single_filter_master_skips_on_too_few_frames(tmp_path: Path) -> N
 def test_build_single_filter_master_precalibrated_calls_build_master_with_placeholders(
     tmp_path: Path, monkeypatch
 ) -> None:
-    import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.master_builder as master_builder_module
 
     class _FakeLightFrame:
         user = "observer1"
@@ -1241,7 +1241,7 @@ def test_build_single_filter_master_precalibrated_calls_build_master_with_placeh
         captured["calibration_mode"] = kwargs.get("calibration_mode")
         return tmp_path / "master_ha.fit"
 
-    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+    monkeypatch.setattr(master_builder_module, "build_group_master", fake_build_master)
 
     notes: list[str] = []
     result = build_single_filter_master(
@@ -1710,7 +1710,7 @@ def test_run_lrgb_stop_after_masters_returns_before_reconciliation_MOCKED(
         _write_fake_master(master_path)
         return master_path
 
-    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
 
     stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
     data = np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
@@ -1807,7 +1807,7 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
         _write_fake_master(master_path)
         return master_path
 
-    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
 
     stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
     data = np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
@@ -1950,7 +1950,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
         _write_fake_master(master_path)
         return master_path
 
-    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
 
     # BIN1 is the weaker contributor (stack_total=6), BIN2 the stronger one
     # (stack_total=20) -- BIN2 must be picked as the gain/offset reference,
@@ -2121,7 +2121,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
         _write_fake_master(master_path)
         return master_path
 
-    monkeypatch.setattr(pipeline_module, "build_master", fake_build_master)
+    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
 
     stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
     fits.PrimaryHDU(
