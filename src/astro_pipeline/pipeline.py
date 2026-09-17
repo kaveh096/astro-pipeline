@@ -129,6 +129,7 @@ from .filter_constants import LUMINANCE_FILTER, OSC_FILTER, RGB_FILTERS
 from .ingest import CalibrationFrame, scan_session
 from .checkpoints import Checkpoint, checkpoint, save_checkpoints, _pixel_scale_arcsec
 from .logging_utils import log as _log
+from .resume_guard import usable
 from .reconciliation import (
     combine_same_grid,
     crop_to_common_coverage,
@@ -329,36 +330,6 @@ class PipelineResult:
     export_result: ExportResult | None = None
     checkpoints: list[Checkpoint] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-
-
-def usable(path: Path, notes: list[str] | None = None) -> bool:
-    """Is an existing stage output actually fit to resume from?
-
-    Resumability that only checks os.path.exists trusts whatever is on disk,
-    and that bit hard: a run interrupted mid-flight left a 100%-NaN
-    background-extraction output behind, and the next run skipped the stage
-    ("already done") and happily fed the garbage forward through three more
-    stages. The guard that would have caught it lived inside the function
-    that was skipped.
-
-    So a skip must be earned: the file has to exist, parse, and contain
-    real data.
-    """
-    path = Path(path)
-    if not path.exists() or path.stat().st_size == 0:
-        return False
-    try:
-        data = fits.getdata(path, memmap=False)
-    except Exception as exc:
-        if notes is not None:
-            _log(f"[stale] {path.name} could not be read ({exc}); will regenerate", notes)
-        return False
-    nan_fraction = float(np.isnan(data).sum()) / data.size
-    if nan_fraction > 0.5:
-        if notes is not None:
-            _log(f"[stale] {path.name} is {nan_fraction:.0%} NaN; will regenerate", notes)
-        return False
-    return True
 
 
 def build_master(
