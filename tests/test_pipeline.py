@@ -1877,28 +1877,18 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
     assert result2.export_result is not None
     # The Luminance master genuinely isn't rebuilt on the resumed call.
     assert build_master_calls["n"] == 1
-    # REAL, PRE-EXISTING BUG found while writing this test (not a test bug --
-    # reproduced directly, not guessed): the colour contributor IS rebuilt
-    # again here, even though nothing changed. run_lrgb's OSC loop (~line
-    # 1915) unconditionally overwrites `colour_frame_hashes[contributor_key]`
-    # for the SAME key the mono-RGB loop just wrote, because
+    # The colour contributor genuinely isn't rebuilt on the resumed call
+    # either. (Previously asserted `== 2` here, documenting a real,
+    # pre-existing bug found while writing this test: run_lrgb's OSC loop
+    # unconditionally overwrote colour_frame_hashes[contributor_key] for
+    # the same key the mono-RGB loop just wrote, because
     # discover_osc_contributors() always pads its result with the caller's
-    # own (telescope, rgb_binning) regardless of whether any real OSC/Color
-    # data exists (mirroring discover_luminance_contributors' own padding
-    # convention) -- for a pure mono-RGB target (this one, and apparently
-    # every mono-RGB target in production, including real M51/T24), the OSC
-    # loop always runs once for `rgb_binning` too, computes
-    # frame_identity_hash([]) (no real Color lights), and clobbers the
-    # correct RGB frame_hash just persisted under the identical
-    # "{telescope}_bin{binning}" key -- so contributor_stale() always
-    # compares the NEXT call's real hash against this wrong, empty-lights
-    # hash and reports "changed" forever, silently forcing a full colour
-    # contributor rebuild on EVERY resumed run_lrgb call, never actually
-    # resuming. This assertion documents that REAL current behavior (so a
-    # refactor doesn't accidentally "fix" it as a silent side effect,
-    # which would itself be a behavior change) -- it is not this test's
-    # job to fix it; flagged separately for a human decision.
-    assert build_colour_calls["n"] == 2
+    # own (telescope, rgb_binning) even with zero real Color/OSC data --
+    # poisoning contributor_stale()'s comparison and forcing a full
+    # rebuild on every resumed call, for any mono-RGB target. Fixed
+    # 2026-09-16 in run_lrgb's OSC loop by skipping binnings with no real
+    # OSC data -- see the fix's own comment in pipeline.py.)
+    assert build_colour_calls["n"] == 1
 
 
 def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: Path, monkeypatch) -> None:
@@ -2211,18 +2201,11 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
     _run(force={"final"})
     assert set(deleted_names) == {"lrgb_final.fit"}
     assert call_counts["build_master"] == before["build_master"]
-    # REAL, PRE-EXISTING BUG (documented in detail in
-    # test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCKED,
-    # found while writing that test, reproduced directly): run_lrgb's OSC
-    # loop unconditionally clobbers colour_frame_hashes[contributor_key] for
-    # the caller's own (telescope, rgb_binning) with an empty-lights hash on
-    # every call, for any pure mono-RGB target -- so contributor_stale()
-    # always reports the colour contributor "changed" on every call after
-    # the first, REGARDLESS of `force`. This is independent of what this
-    # test is actually trying to verify (the top-level _delete_if_exists
-    # cascade), and is asserted here only so the count is documented
-    # accurately rather than silently wrong.
-    assert call_counts["build_colour"] == before["build_colour"] + 1
+    # Colour is genuinely untouched by force={"final"}. (Previously
+    # asserted `+ 1` here, documenting the same pre-existing OSC-loop bug
+    # described in test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCKED
+    # -- fixed 2026-09-16.)
+    assert call_counts["build_colour"] == before["build_colour"]
     assert call_counts["graxpert"] == before["graxpert"]
     assert call_counts["reproject"] == before["reproject"]
     assert call_counts["stretch"] == before["stretch"] + 1
@@ -2233,7 +2216,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
     _run(force={"reconciled"})
     assert set(deleted_names) == {"rgb_reconciled.fit", "lrgb_final.fit"}
     assert call_counts["build_master"] == before["build_master"]
-    assert call_counts["build_colour"] == before["build_colour"] + 1  # see note above
+    assert call_counts["build_colour"] == before["build_colour"]  # bug fixed 2026-09-16, see note above
     assert call_counts["graxpert"] == before["graxpert"]
     assert call_counts["reproject"] == before["reproject"] + 1
     assert call_counts["stretch"] == before["stretch"] + 1

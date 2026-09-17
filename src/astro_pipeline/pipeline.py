@@ -1912,7 +1912,26 @@ def run_lrgb(
     # built alongside the mono-RGB ones above into the SAME `contributors`
     # list -- the mixed-shape guard earlier already ruled out any binning
     # collision between the two discovery results.
+    #
+    # REAL BUG, fixed 2026-09-16 (found while writing Task 5's Step-0 safety
+    # net tests): `osc_binnings` is the PADDED list from discover_osc_
+    # contributors(), which -- like discover_luminance_contributors() --
+    # always includes the caller's own (telescope, rgb_binning) even with
+    # ZERO real Color/OSC data for this target. Iterating that padded list
+    # unconditionally meant every pure mono-RGB target (M51, NGC 3628,
+    # Abell 31, ...) ran this loop once for its own rgb_binning too, which
+    # clobbered `colour_frame_hashes[contributor_key]` (the SAME key the
+    # mono-RGB loop above just wrote) with an empty-lights OSC hash --
+    # poisoning contributor_stale()'s comparison on every subsequent call
+    # and forcing a full colour-contributor rebuild (raw masters through
+    # SPCC) on EVERY resume, forever, for any target with no real OSC data.
+    # Only iterate binnings with REAL Color data (`_real_osc_binnings`,
+    # already computed above for the mixed-shape guard) -- a real OSC-only
+    # telescope (T02, T68) is unaffected, since its real binning(s) are
+    # already members of that set.
     for binning in osc_binnings:
+        if binning not in _real_osc_binnings:
+            continue
         contributor_key = f"{telescope}_bin{binning}"
         contrib_dir = contributor_dir(final, telescope, binning, rgb_binning)
         frame_hash = _osc_contributor_frame_hash(report, telescope, target, binning, colour_calibration_mode)
