@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
-from astro_pipeline.background_color import UnknownInstrumentError
+from astro_pipeline.background_color import UnknownInstrumentError, resolve_instrument_profile
 from astro_pipeline.calibration import CalibrationMode, FlatPolicy
 from astro_pipeline.ingest import scan_session
 from astro_pipeline.pipeline import (
@@ -21,7 +21,6 @@ from astro_pipeline.pipeline import (
     infer_calibration_mode,
     infer_flat_policy,
     normalize_narrowband_filter_name,
-    resolve_instrument_profile,
     resolve_lights,
     run_lrgb,
     run_narrowband,

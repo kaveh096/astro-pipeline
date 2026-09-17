@@ -113,6 +113,8 @@ from .background_color import (
     OSC_INSTRUMENT_PROFILES,
     OSCInstrumentProfile,
     UnknownInstrumentError,
+    resolve_instrument_profile,
+    resolve_osc_instrument_profile,
     run_graxpert_background_extraction,
     run_spcc,
 )
@@ -596,47 +598,6 @@ class ColourContributor:
     def key(self) -> str:
         """Stable identity string for filenames/logging, e.g. 'T24_bin1'."""
         return f"{self.telescope}_bin{self.binning}"
-
-
-def resolve_instrument_profile(telescope: str):
-    """SPCC's InstrumentProfile for `telescope`, or raise -- never guess.
-
-    Factored out of _build_colour_contributor as its own function (Slice
-    3.1) so this safety check is directly unit-testable without invoking
-    the full calibrate/stack/solve/rgbcomp/GraXpert chain that runs before
-    it in the real pipeline. Previously
-    `INSTRUMENT_PROFILES.get(telescope, T24_PROFILE)` silently mis-
-    profiled ANY unrecognized telescope as T24's KAF16803/Astrodon
-    sensor+filters -- SPCC models the actual spectral response of the
-    optical train that produced the data, so a wrong profile doesn't fail
-    loudly, it just produces a plausible-looking, physically wrong colour
-    solution. Raises UnknownInstrumentError instead.
-    """
-    profile = INSTRUMENT_PROFILES.get(telescope)
-    if profile is None:
-        raise UnknownInstrumentError(
-            f"No SPCC InstrumentProfile registered for telescope {telescope!r} "
-            f"(known: {sorted(INSTRUMENT_PROFILES)}) -- refusing to guess a "
-            "sensor/filter profile for colour calibration. Register an "
-            f"InstrumentProfile for {telescope!r} in INSTRUMENT_PROFILES first."
-        )
-    return profile
-
-
-def resolve_osc_instrument_profile(telescope: str) -> OSCInstrumentProfile:
-    """OSCInstrumentProfile equivalent of resolve_instrument_profile()
-    (RGB-only/OSC plan, 2026-09) -- same never-guess policy: raise
-    UnknownInstrumentError for any unregistered telescope rather than
-    silently mis-profiling OSC data with the wrong sensor."""
-    profile = OSC_INSTRUMENT_PROFILES.get(telescope)
-    if profile is None:
-        raise UnknownInstrumentError(
-            f"No OSC SPCC InstrumentProfile registered for telescope {telescope!r} "
-            f"(known: {sorted(OSC_INSTRUMENT_PROFILES)}) -- refusing to guess an OSC "
-            f"sensor for colour calibration. Register an OSCInstrumentProfile for "
-            f"{telescope!r} in OSC_INSTRUMENT_PROFILES first."
-        )
-    return profile
 
 
 def contributor_dir(final: Path, telescope: str, binning: int, rgb_binning: int) -> Path:
