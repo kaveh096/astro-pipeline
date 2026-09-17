@@ -77,6 +77,7 @@ import numpy as np
 from astropy.io import fits
 
 from .ingest import CalibrationFrame, LightFrame
+from .logging_utils import log as _log
 from .siril_driver import SirilError, SirilResult, run_script
 from .staging import stage_frames
 
@@ -111,12 +112,6 @@ class CalibrationFramesMissingError(RuntimeError):
     or dark correction is not a reasonable degraded mode the way skipping
     flats can be.
     """
-
-
-def _log(message: str, notes: list[str] | None) -> None:
-    print(message, flush=True)
-    if notes is not None:
-        notes.append(message)
 
 
 @dataclass

@@ -127,6 +127,7 @@ from .calibration import (
 from .export_image import ExportResult, export
 from .ingest import CalibrationFrame, scan_session
 from .checkpoints import Checkpoint, checkpoint, save_checkpoints, _pixel_scale_arcsec
+from .logging_utils import log as _log
 from .reconciliation import (
     combine_same_grid,
     crop_to_common_coverage,
@@ -339,11 +340,6 @@ class PipelineResult:
     export_result: ExportResult | None = None
     checkpoints: list[Checkpoint] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-
-
-def _log(message: str, notes: list[str]) -> None:
-    print(message, flush=True)
-    notes.append(message)
 
 
 def usable(path: Path, notes: list[str] | None = None) -> bool:
