@@ -657,10 +657,12 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
     fits_module.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
     monkeypatch.setattr(pipeline_module, "build_group_master", lambda *a, **k: stub_master)
 
-    def fake_build_colour_contributor(*args, **kwargs):
+    def fake_build_rgb(self, *args, **kwargs):
         raise RuntimeError("stop-after-colour-call-site")
 
-    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+    from astro_pipeline.colour_contributor import ColourContributorBuilder
+
+    monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
 
     try:
         pipeline_module.run_lrgb(

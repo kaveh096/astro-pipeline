@@ -7,10 +7,9 @@ from astropy.io import fits
 from astro_pipeline.background_color import UnknownInstrumentError, resolve_instrument_profile
 from astro_pipeline.calibration import CalibrationMode, FlatPolicy
 from astro_pipeline.ingest import scan_session
+from astro_pipeline.colour_contributor import ColourContributor, ColourContributorBuilder
 from astro_pipeline.pipeline import (
     NARROWBAND_PALETTES,
-    ColourContributor,
-    _build_colour_contributor,
     _NarrowbandNormalizingReport,
     build_group_master,
     build_single_filter_master,
@@ -517,10 +516,11 @@ class _FakeReportNoLights:
 
 def test_build_colour_contributor_partial_rgb_logs_and_skips(tmp_path: Path) -> None:
     notes: list[str] = []
-    result = _build_colour_contributor(
+    builder = ColourContributorBuilder(
         tmp_path, tmp_path / "contrib", _FakeReportNoLights(), "T24", "M51", 2,
         13.4980, 47.1953, notes,
     )
+    result = builder.build_rgb()
     assert result is None
     assert any("skip" in n.lower() and "Red" in n for n in notes)
     assert any("Red/Green/Blue" in n for n in notes)
@@ -566,10 +566,11 @@ class _FakeReportOneLightPerFilter:
 
 def test_build_colour_contributor_skips_on_too_few_frames_for_a_sequence(tmp_path: Path) -> None:
     notes: list[str] = []
-    result = _build_colour_contributor(
+    builder = ColourContributorBuilder(
         tmp_path, tmp_path / "contrib", _FakeReportOneLightPerFilter(), "T24", "M51", 2,
         13.4980, 47.1953, notes,
     )
+    result = builder.build_rgb()
     assert result is None
     assert any("skip" in n.lower() and "at least 2" in n for n in notes)
 
@@ -747,7 +748,7 @@ def test_build_colour_contributor_hoo_duplicates_repeated_filter_and_adds_nosum(
     to oiii_2.fit rather than colliding), and the rgbcomp command must
     include -nosum (only added because of the real repeat), while never
     running SPCC (run_colour_calibration=False)."""
-    import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.colour_contributor as colour_contributor_module
 
     contrib_dir = tmp_path / "contrib"
 
@@ -755,7 +756,7 @@ def test_build_colour_contributor_hoo_duplicates_repeated_filter_and_adds_nosum(
         # One real, tiny, readable FITS master per unique filter.
         return _write_stub_master(tmp_path / f"master_{filter_name}.fit", fill=0.3)
 
-    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
+    monkeypatch.setattr(colour_contributor_module, "build_group_master", fake_build_master)
 
     def fake_reproject(source, reference, out_path):
         _write_stub_master(out_path, fill=0.3)
@@ -765,8 +766,8 @@ def test_build_colour_contributor_hoo_duplicates_repeated_filter_and_adds_nosum(
 
         return _FakeReconResult()
 
-    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject)
-    monkeypatch.setattr(pipeline_module, "crop_to_common_coverage", lambda paths, out_dir: None)
+    monkeypatch.setattr(colour_contributor_module, "reproject_to_reference", fake_reproject)
+    monkeypatch.setattr(colour_contributor_module, "crop_to_common_coverage", lambda paths, out_dir: None)
 
     captured_rgbcomp_command = {}
 
@@ -779,15 +780,16 @@ def test_build_colour_contributor_hoo_duplicates_repeated_filter_and_adds_nosum(
 
         return _FakeResult()
 
-    monkeypatch.setattr(pipeline_module, "run_script", fake_run_script)
+    monkeypatch.setattr(colour_contributor_module, "run_script", fake_run_script)
     monkeypatch.setattr(
-        pipeline_module, "run_graxpert_background_extraction",
+        colour_contributor_module, "run_graxpert_background_extraction",
         lambda fits_path, output_stem: _write_stub_master(Path(fits_path).parent / f"{output_stem}.fits", fill=0.3),
     )
 
-    result = _build_colour_contributor(
-        tmp_path, contrib_dir, _FakeReportNarrowband(), "T20", "M42", 2,
-        5.588, -5.391, [],
+    builder = ColourContributorBuilder(
+        tmp_path, contrib_dir, _FakeReportNarrowband(), "T20", "M42", 2, 5.588, -5.391, [],
+    )
+    result = builder.build_rgb(
         filters=("Ha", "OIII", "OIII"),
         run_colour_calibration=False,
     )
@@ -813,14 +815,14 @@ def test_build_colour_contributor_rgb_default_produces_no_nosum(tmp_path: Path, 
     """Regression guard: the default (no repeated filter) RGB path must
     NEVER get -nosum appended -- verifies has_repeated_filter is actually
     False for the unchanged default case, not just narrowband."""
-    import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.colour_contributor as colour_contributor_module
 
     contrib_dir = tmp_path / "contrib_rgb"
 
     def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *args, **kwargs):
         return _write_stub_master(tmp_path / f"master_{filter_name}.fit", fill=0.3)
 
-    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
+    monkeypatch.setattr(colour_contributor_module, "build_group_master", fake_build_master)
 
     def fake_reproject(source, reference, out_path):
         _write_stub_master(out_path, fill=0.3)
@@ -830,8 +832,8 @@ def test_build_colour_contributor_rgb_default_produces_no_nosum(tmp_path: Path, 
 
         return _FakeReconResult()
 
-    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject)
-    monkeypatch.setattr(pipeline_module, "crop_to_common_coverage", lambda paths, out_dir: None)
+    monkeypatch.setattr(colour_contributor_module, "reproject_to_reference", fake_reproject)
+    monkeypatch.setattr(colour_contributor_module, "crop_to_common_coverage", lambda paths, out_dir: None)
 
     captured = {}
 
@@ -844,9 +846,9 @@ def test_build_colour_contributor_rgb_default_produces_no_nosum(tmp_path: Path, 
 
         return _FakeResult()
 
-    monkeypatch.setattr(pipeline_module, "run_script", fake_run_script)
+    monkeypatch.setattr(colour_contributor_module, "run_script", fake_run_script)
     monkeypatch.setattr(
-        pipeline_module, "run_graxpert_background_extraction",
+        colour_contributor_module, "run_graxpert_background_extraction",
         lambda fits_path, output_stem: _write_stub_master(Path(fits_path).parent / f"{output_stem}.fits", fill=0.3),
     )
 
@@ -864,11 +866,10 @@ def test_build_colour_contributor_rgb_default_produces_no_nosum(tmp_path: Path, 
         def flat_index(self):
             return {}
 
-    result = _build_colour_contributor(
-        tmp_path, contrib_dir, _FakeReportRGB(), "T24", "M51", 2,
-        13.4980, 47.1953, [],
-        run_colour_calibration=False,
+    builder = ColourContributorBuilder(
+        tmp_path, contrib_dir, _FakeReportRGB(), "T24", "M51", 2, 13.4980, 47.1953, [],
     )
+    result = builder.build_rgb(run_colour_calibration=False)
 
     assert result is not None
     assert captured["command"] == "rgbcomp red green blue -out=rgb_native"
@@ -1080,6 +1081,7 @@ def test_run_narrowband_exports_with_palette_named_stem(tmp_path: Path, monkeypa
     """End-to-end mocked run: confirms the real call sequence (contributor
     build -> equalization -> stretch -> export) reaches export() with the
     palette-named stem, not '_lrgb'/'_rgb'."""
+    import astro_pipeline.colour_contributor as colour_contributor_module
     import astro_pipeline.pipeline as pipeline_module
     from astro_pipeline.workspace import pipeline_dir
 
@@ -1149,11 +1151,11 @@ def test_run_narrowband_exports_with_palette_named_stem(tmp_path: Path, monkeypa
 
         return _R()
 
-    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
-    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject)
-    monkeypatch.setattr(pipeline_module, "crop_to_common_coverage", lambda paths, out_dir: None)
-    monkeypatch.setattr(pipeline_module, "run_script", fake_run_script)
-    monkeypatch.setattr(pipeline_module, "run_graxpert_background_extraction", fake_bg_extraction)
+    monkeypatch.setattr(colour_contributor_module, "build_group_master", fake_build_master)
+    monkeypatch.setattr(colour_contributor_module, "reproject_to_reference", fake_reproject)
+    monkeypatch.setattr(colour_contributor_module, "crop_to_common_coverage", lambda paths, out_dir: None)
+    monkeypatch.setattr(colour_contributor_module, "run_script", fake_run_script)
+    monkeypatch.setattr(colour_contributor_module, "run_graxpert_background_extraction", fake_bg_extraction)
     monkeypatch.setattr(pipeline_module, "stretch_rgb", fake_stretch_rgb)
 
     result = run_narrowband(project_dir, "T20", "M42", 5.588, -5.391, palette="sho", binning=2)
@@ -1485,21 +1487,21 @@ def test_run_lrgb_rgb_only_full_run_no_luminance_no_crash(tmp_path: Path, monkey
     data = np.random.default_rng(0).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
     fits.PrimaryHDU(data=data).writeto(stub_composite)
 
-    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
-        # Real _build_colour_contributor writes rgb_colour_calibrated.fit
-        # into contrib_dir before returning -- checkpoint 02's emission is
-        # gated on that file existing on disk (primary_calibrated.exists()),
-        # so the mock must reproduce that side effect, not just the return
-        # value.
-        contrib_dir.mkdir(parents=True, exist_ok=True)
+    def fake_build_rgb(self, *a, **k):
+        # Real ColourContributorBuilder.build_rgb writes
+        # rgb_colour_calibrated.fit into contrib_dir before returning --
+        # checkpoint 02's emission is gated on that file existing on disk
+        # (primary_calibrated.exists()), so the mock must reproduce that
+        # side effect, not just the return value.
+        self.contrib_dir.mkdir(parents=True, exist_ok=True)
         import shutil as _shutil
-        _shutil.copy2(stub_composite, contrib_dir / "rgb_colour_calibrated.fit")
+        _shutil.copy2(stub_composite, self.contrib_dir / "rgb_colour_calibrated.fit")
         return ColourContributor(
-            telescope=telescope, binning=binning, composite_path=stub_composite,
+            telescope=self.telescope, binning=self.binning, composite_path=stub_composite,
             sub_count=7, stack_total=6,
         )
 
-    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+    monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -1571,13 +1573,13 @@ def test_run_lrgb_rgb_only_multi_contributor_raises_not_implemented(tmp_path: Pa
     data = np.zeros((3, 4, 4), dtype=np.float32)
     fits.PrimaryHDU(data=data).writeto(stub_composite)
 
-    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
+    def fake_build_rgb(self, *a, **k):
         return ColourContributor(
-            telescope=telescope, binning=binning, composite_path=stub_composite,
+            telescope=self.telescope, binning=self.binning, composite_path=stub_composite,
             sub_count=1, stack_total=1,
         )
 
-    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+    monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -1716,17 +1718,17 @@ def test_run_lrgb_stop_after_masters_returns_before_reconciliation_MOCKED(
     data = np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
     fits.PrimaryHDU(data=data).writeto(stub_composite)
 
-    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
+    def fake_build_rgb(self, *a, **k):
         import shutil as _shutil
 
-        contrib_dir.mkdir(parents=True, exist_ok=True)
-        _shutil.copy2(stub_composite, contrib_dir / "rgb_colour_calibrated.fit")
+        self.contrib_dir.mkdir(parents=True, exist_ok=True)
+        _shutil.copy2(stub_composite, self.contrib_dir / "rgb_colour_calibrated.fit")
         return ColourContributor(
-            telescope=telescope, binning=binning, composite_path=stub_composite,
+            telescope=self.telescope, binning=self.binning, composite_path=stub_composite,
             sub_count=1, stack_total=1,
         )
 
-    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+    monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
 
     def fail_if_called(*a, **k):
         raise AssertionError("must not run reconciliation-stage code when stop_after='masters'")
@@ -1814,20 +1816,20 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
     fits.PrimaryHDU(data=data).writeto(stub_composite)
     build_colour_calls = {"n": 0}
 
-    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
+    def fake_build_rgb(self, *a, **k):
         import shutil as _shutil
 
-        calibrated_path = contrib_dir / "rgb_colour_calibrated.fit"
+        calibrated_path = self.contrib_dir / "rgb_colour_calibrated.fit"
         if not calibrated_path.exists():
             build_colour_calls["n"] += 1
-            contrib_dir.mkdir(parents=True, exist_ok=True)
+            self.contrib_dir.mkdir(parents=True, exist_ok=True)
             _shutil.copy2(stub_composite, calibrated_path)
         return ColourContributor(
-            telescope=telescope, binning=binning, composite_path=stub_composite,
+            telescope=self.telescope, binning=self.binning, composite_path=stub_composite,
             sub_count=1, stack_total=1,
         )
 
-    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+    monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
 
     def fake_graxpert_bg(input_path, output_stem):
         output_path = Path(input_path).parent / f"{output_stem}.fits"
@@ -1965,16 +1967,17 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
     ).writeto(stub_bin2)
     stack_totals = {1: 6, 2: 20}
 
-    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
+    def fake_build_rgb(self, *a, **k):
+        binning = self.binning
         stub = stub_bin1 if binning == 1 else stub_bin2
-        contrib_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(stub, contrib_dir / "rgb_colour_calibrated.fit")
+        self.contrib_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(stub, self.contrib_dir / "rgb_colour_calibrated.fit")
         return ColourContributor(
-            telescope=telescope, binning=binning, composite_path=stub,
+            telescope=self.telescope, binning=binning, composite_path=stub,
             sub_count=stack_totals[binning], stack_total=stack_totals[binning],
         )
 
-    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+    monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
 
     def fake_graxpert_bg(input_path, output_stem):
         output_path = Path(input_path).parent / f"{output_stem}.fits"
@@ -2128,18 +2131,18 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
         data=np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
     ).writeto(stub_composite)
 
-    def fake_build_colour_contributor(project_dir, contrib_dir, report, telescope, target, binning, *a, **k):
-        calibrated_path = contrib_dir / "rgb_colour_calibrated.fit"
+    def fake_build_rgb(self, *a, **k):
+        calibrated_path = self.contrib_dir / "rgb_colour_calibrated.fit"
         if not calibrated_path.exists():
             call_counts["build_colour"] += 1
-            contrib_dir.mkdir(parents=True, exist_ok=True)
+            self.contrib_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(stub_composite, calibrated_path)
         return ColourContributor(
-            telescope=telescope, binning=binning, composite_path=stub_composite,
+            telescope=self.telescope, binning=self.binning, composite_path=stub_composite,
             sub_count=1, stack_total=1,
         )
 
-    monkeypatch.setattr(pipeline_module, "_build_colour_contributor", fake_build_colour_contributor)
+    monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
 
     def fake_graxpert_bg(input_path, output_stem):
         call_counts["graxpert"] += 1
