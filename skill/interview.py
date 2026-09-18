@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from astro_pipeline.calibration import CalibrationFramesMissingError, CalibrationMode, select_dark  # noqa: E402
 from astro_pipeline.ingest import CALIBRATION_WARNING_RES, IngestReport, scan_session, warning_telescope  # noqa: E402
-from astro_pipeline.pipeline import infer_calibration_mode  # noqa: E402
+from astro_pipeline.calibration_policy import infer_calibration_mode  # noqa: E402
 
 # The three fixed templates IngestReport.missing_calibration_warnings()
 # emits today (ingest.py, CALIBRATION_WARNING_RES -- moved there from this

@@ -6,21 +6,24 @@ from astropy.io import fits
 
 from astro_pipeline.background_color import UnknownInstrumentError, resolve_instrument_profile
 from astro_pipeline.calibration import CalibrationMode, FlatPolicy
+from astro_pipeline.calibration_policy import infer_calibration_mode, infer_flat_policy
 from astro_pipeline.ingest import scan_session
 from astro_pipeline.colour_contributor import ColourContributor, ColourContributorBuilder
+from astro_pipeline.lrgb_orchestrator import run_lrgb
 from astro_pipeline.luminance_selection import discover_luminance_contributors, select_luminance_source
-from astro_pipeline.master_builder import build_group_master, contributor_fwhm_arcsec, resolve_lights
-from astro_pipeline.pipeline import (
+from astro_pipeline.master_builder import (
+    build_group_master,
+    build_single_filter_master,
+    contributor_fwhm_arcsec,
+    resolve_lights,
+)
+from astro_pipeline.narrowband_filters import (
     NARROWBAND_PALETTES,
     _NarrowbandNormalizingReport,
-    build_single_filter_master,
     equalize_narrowband_channels,
-    infer_calibration_mode,
-    infer_flat_policy,
     normalize_narrowband_filter_name,
-    run_lrgb,
-    run_narrowband,
 )
+from astro_pipeline.narrowband_orchestrator import run_narrowband
 from astro_pipeline.siril_driver import find_siril_cli
 from astro_pipeline.workspace import contributor_dir, pipeline_dir
 

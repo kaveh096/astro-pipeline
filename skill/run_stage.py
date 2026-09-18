@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from astro_pipeline.calibration import DEFAULT_PEDESTAL  # noqa: E402
-from astro_pipeline.pipeline import run_lrgb  # noqa: E402
+from astro_pipeline.lrgb_orchestrator import run_lrgb  # noqa: E402
 
 
 def _parse_lum_source(value: str | None) -> tuple[str, int] | None:

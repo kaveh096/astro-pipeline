@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from astro_pipeline.pipeline import run_lrgb
+from astro_pipeline.lrgb_orchestrator import run_lrgb
 
 PROJECT_DIR = Path(r"C:\path\to\your\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
 

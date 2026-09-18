@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from astro_pipeline.export_image import export  # noqa: E402
 from astro_pipeline.ingest import scan_session  # noqa: E402
+from astro_pipeline.master_builder import build_single_filter_master  # noqa: E402
 from astro_pipeline.narrowband_boost import (  # noqa: E402
     CHANNEL_INDEX,
     DEFAULT_BOOST_FACTOR,
@@ -45,10 +46,7 @@ from astro_pipeline.narrowband_boost import (  # noqa: E402
     rescale_narrowband_to_reference,
     split_rgb_channels,
 )
-from astro_pipeline.pipeline import (  # noqa: E402
-    _NarrowbandNormalizingReport,
-    build_single_filter_master,
-)
+from astro_pipeline.narrowband_filters import _NarrowbandNormalizingReport  # noqa: E402
 from astro_pipeline.reconciliation import reproject_to_reference  # noqa: E402
 from astro_pipeline.siril_driver import run_script  # noqa: E402
 from astro_pipeline.stretch_compose import stretch_and_compose, stretch_rgb  # noqa: E402

@@ -373,7 +373,6 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
     out = pipeline_dir(project_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    import astro_pipeline.pipeline as pipeline_module
     import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
 
     class _FakeLightFrame:
@@ -444,7 +443,7 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
     monkeypatch.setattr(lrgb_orchestrator_module, "build_group_master", fake_build_master)
 
     try:
-        pipeline_module.run_lrgb(
+        lrgb_orchestrator_module.run_lrgb(
             project_dir, telescope="T99", target="M51", ra_hours=1.0, dec_deg=1.0,
         )
     except RuntimeError as exc:
@@ -571,7 +570,6 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
     from astropy.io import fits as fits_module
 
     import astro_pipeline.run_signature as run_signature_module
-    import astro_pipeline.pipeline as pipeline_module
     import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
     from astro_pipeline.workspace import pipeline_dir
 
@@ -667,7 +665,7 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
     monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
 
     try:
-        pipeline_module.run_lrgb(
+        lrgb_orchestrator_module.run_lrgb(
             project_dir, telescope="T99", target="M51", ra_hours=1.0, dec_deg=1.0,
         )
     except RuntimeError as exc:

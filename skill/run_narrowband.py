@@ -18,7 +18,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from astro_pipeline.calibration import DEFAULT_PEDESTAL  # noqa: E402
-from astro_pipeline.pipeline import NARROWBAND_PALETTES, run_narrowband  # noqa: E402
+from astro_pipeline.narrowband_filters import NARROWBAND_PALETTES  # noqa: E402
+from astro_pipeline.narrowband_orchestrator import run_narrowband  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
