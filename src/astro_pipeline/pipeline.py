@@ -101,7 +101,6 @@ imaged the same target on the same telescope:
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -132,10 +131,10 @@ from .contributor_staleness import (
     _flat_frame_hash,
     _osc_contributor_frame_hash,
 )
-from .export_image import ExportResult, export
+from .export_image import export
 from .filter_constants import LUMINANCE_FILTER, OSC_FILTER, RGB_FILTERS
 from .ingest import scan_session
-from .checkpoints import Checkpoint, checkpoint, save_checkpoints
+from .checkpoints import checkpoint, save_checkpoints
 from .logging_utils import log as _log
 from .luminance_selection import (
     LumCandidate,
@@ -156,6 +155,7 @@ from .narrowband_filters import (
     equalize_narrowband_channels,
     normalize_narrowband_filter_name,
 )
+from .pipeline_result import PipelineResult
 from .resume_guard import usable
 from .reconciliation import (
     combine_same_grid,
@@ -176,15 +176,6 @@ from .run_signature import (
 )
 from .stretch_compose import stretch_and_compose, stretch_rgb
 from .workspace import contributor_dir, pipeline_dir
-
-@dataclass
-class PipelineResult:
-    masters: dict[str, Path] = field(default_factory=dict)
-    composite_path: Path | None = None
-    export_result: ExportResult | None = None
-    checkpoints: list[Checkpoint] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
-
 
 # --- Slice 4.1: run-signature helpers ---------------------------------------
 # Factored out of run_lrgb as their own functions for the same reason
