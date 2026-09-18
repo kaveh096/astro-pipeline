@@ -8,24 +8,21 @@ from astro_pipeline.background_color import UnknownInstrumentError, resolve_inst
 from astro_pipeline.calibration import CalibrationMode, FlatPolicy
 from astro_pipeline.ingest import scan_session
 from astro_pipeline.colour_contributor import ColourContributor, ColourContributorBuilder
+from astro_pipeline.luminance_selection import discover_luminance_contributors, select_luminance_source
+from astro_pipeline.master_builder import build_group_master, contributor_fwhm_arcsec, resolve_lights
 from astro_pipeline.pipeline import (
     NARROWBAND_PALETTES,
     _NarrowbandNormalizingReport,
-    build_group_master,
     build_single_filter_master,
-    contributor_dir,
-    contributor_fwhm_arcsec,
-    discover_luminance_contributors,
     equalize_narrowband_channels,
     infer_calibration_mode,
     infer_flat_policy,
     normalize_narrowband_filter_name,
-    resolve_lights,
     run_lrgb,
     run_narrowband,
-    select_luminance_source,
 )
 from astro_pipeline.siril_driver import find_siril_cli
+from astro_pipeline.workspace import contributor_dir
 
 from conftest import (
     FINAL_DIR,
@@ -582,8 +579,6 @@ def test_build_colour_contributor_skips_on_missing_green_not_just_red(tmp_path: 
     test. So this only checks that the missing-filter detection itself
     (in RGB_FILTERS order) would name Green, not Red, by inspecting
     resolve_lights directly rather than running the full function."""
-    from astro_pipeline.pipeline import resolve_lights
-
     report = _FakeReportGreenBlueOnly()
     red_lights, _ = resolve_lights(report, "T24", "M51", "Red", 2)
     green_lights, _ = resolve_lights(report, "T24", "M51", "Green", 2)
@@ -1448,6 +1443,7 @@ def test_run_lrgb_rgb_only_full_run_no_luminance_no_crash(tmp_path: Path, monkey
     "<target>_rgb" not "<target>_lrgb") all actually happened.
     """
     import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
 
     class _FakeLightFrame:
         def __init__(self, path_name: str, user: str = "observer1") -> None:
@@ -1479,7 +1475,7 @@ def test_run_lrgb_rgb_only_full_run_no_luminance_no_crash(tmp_path: Path, monkey
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
 
     # A real, tiny, readable 3-channel FITS -- what a real ColourContributor's
     # composite_path would point to (rgb_colour_calibrated.fit shape).
@@ -1539,6 +1535,7 @@ def test_run_lrgb_rgb_only_multi_contributor_raises_not_implemented(tmp_path: Pa
     combine. Pure unit test -- no real Siril needed, since the
     NotImplementedError fires before any reprojection/stretch call."""
     import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
 
     class _FakeLightFrame:
         def __init__(self, path_name: str, user: str = "observer1") -> None:
@@ -1567,7 +1564,7 @@ def test_run_lrgb_rgb_only_multi_contributor_raises_not_implemented(tmp_path: Pa
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
 
     stub_composite = tmp_path / "stub.fit"
     data = np.zeros((3, 4, 4), dtype=np.float32)
@@ -1604,6 +1601,7 @@ def test_run_lrgb_mixed_osc_and_rgb_same_binning_raises_not_implemented(tmp_path
     testing, not by adversarial review, and covered separately by
     test_run_lrgb_rgb_only_full_run_no_luminance_no_crash actually passing)."""
     import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
 
     class _FakeLightFrame:
         def __init__(self, path_name: str, user: str = "observer1") -> None:
@@ -1629,7 +1627,7 @@ def test_run_lrgb_mixed_osc_and_rgb_same_binning_raises_not_implemented(tmp_path
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -1672,6 +1670,7 @@ def test_run_lrgb_stop_after_masters_returns_before_reconciliation_MOCKED(
     ANY reconciliation-stage code runs, by making
     run_graxpert_background_extraction raise if it's ever called."""
     import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
 
     class _FakeLightFrame:
         def __init__(self, path_name: str, user: str = "observer1") -> None:
@@ -1699,7 +1698,7 @@ def test_run_lrgb_stop_after_masters_returns_before_reconciliation_MOCKED(
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
 
     build_master_calls = {"n": 0}
 
@@ -1712,7 +1711,7 @@ def test_run_lrgb_stop_after_masters_returns_before_reconciliation_MOCKED(
         _write_fake_master(master_path)
         return master_path
 
-    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
+    monkeypatch.setattr(lrgb_orchestrator_module, "build_group_master", fake_build_master)
 
     stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
     data = np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
@@ -1733,7 +1732,7 @@ def test_run_lrgb_stop_after_masters_returns_before_reconciliation_MOCKED(
     def fail_if_called(*a, **k):
         raise AssertionError("must not run reconciliation-stage code when stop_after='masters'")
 
-    monkeypatch.setattr(pipeline_module, "run_graxpert_background_extraction", fail_if_called)
+    monkeypatch.setattr(lrgb_orchestrator_module, "run_graxpert_background_extraction", fail_if_called)
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -1765,6 +1764,7 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
     a bare no-resumability mock would (wrongly) look like "masters get
     rebuilt on every call" no matter what run_lrgb actually does."""
     import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
     from astro_pipeline.reconciliation import ReconciliationResult
     from astro_pipeline.stretch_compose import ComposeResult
 
@@ -1794,7 +1794,7 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
 
     build_master_calls = {"n": 0}
 
@@ -1809,7 +1809,7 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
         _write_fake_master(master_path)
         return master_path
 
-    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
+    monkeypatch.setattr(lrgb_orchestrator_module, "build_group_master", fake_build_master)
 
     stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
     data = np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
@@ -1836,7 +1836,7 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
         _write_fake_master(output_path, seed=2)
         return output_path
 
-    monkeypatch.setattr(pipeline_module, "run_graxpert_background_extraction", fake_graxpert_bg)
+    monkeypatch.setattr(lrgb_orchestrator_module, "run_graxpert_background_extraction", fake_graxpert_bg)
 
     def fake_reproject_to_reference(source_path, reference_path, output_path):
         import shutil as _shutil
@@ -1847,7 +1847,7 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
             footprint_min=1.0, footprint_mean=1.0, nan_fraction=0.0,
         )
 
-    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject_to_reference)
+    monkeypatch.setattr(lrgb_orchestrator_module, "reproject_to_reference", fake_reproject_to_reference)
 
     def fake_stretch_and_compose(lum_path, rgb_path, output_dir, output_stem, method="autostretch", **kwargs):
         composite_path = Path(output_dir) / f"{output_stem}.fit"
@@ -1857,7 +1857,7 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
             composite_path=composite_path, lum_stretch_log=None, rgb_stretch_log=None, compose_log=None,
         )
 
-    monkeypatch.setattr(pipeline_module, "stretch_and_compose", fake_stretch_and_compose)
+    monkeypatch.setattr(lrgb_orchestrator_module, "stretch_and_compose", fake_stretch_and_compose)
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -1908,6 +1908,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
     import shutil
 
     import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
     from astro_pipeline.reconciliation import GainOffsetFit, ReconciliationResult
 
     class _FakeLightFrame:
@@ -1942,7 +1943,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
 
     def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *a, **k):
         master_path = (
@@ -1952,7 +1953,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
         _write_fake_master(master_path)
         return master_path
 
-    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
+    monkeypatch.setattr(lrgb_orchestrator_module, "build_group_master", fake_build_master)
 
     # BIN1 is the weaker contributor (stack_total=6), BIN2 the stronger one
     # (stack_total=20) -- BIN2 must be picked as the gain/offset reference,
@@ -1984,7 +1985,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
         _write_fake_master(output_path, seed=3)
         return output_path
 
-    monkeypatch.setattr(pipeline_module, "run_graxpert_background_extraction", fake_graxpert_bg)
+    monkeypatch.setattr(lrgb_orchestrator_module, "run_graxpert_background_extraction", fake_graxpert_bg)
 
     reproject_calls: list[Path] = []
 
@@ -1996,7 +1997,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
             footprint_min=1.0, footprint_mean=1.0, nan_fraction=0.0,
         )
 
-    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject_to_reference)
+    monkeypatch.setattr(lrgb_orchestrator_module, "reproject_to_reference", fake_reproject_to_reference)
 
     def fake_crop_to_common_coverage(paths, output_dir):
         output_dir = Path(output_dir)
@@ -2008,7 +2009,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
             out_paths.append(out_path)
         return out_paths
 
-    monkeypatch.setattr(pipeline_module, "crop_to_common_coverage", fake_crop_to_common_coverage)
+    monkeypatch.setattr(lrgb_orchestrator_module, "crop_to_common_coverage", fake_crop_to_common_coverage)
 
     match_gain_offset_calls: list[tuple[Path, Path]] = []
 
@@ -2017,7 +2018,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
         shutil.copy2(path, output_path)
         return [GainOffsetFit(channel=0, gain=1.0, reference_background=0.1, contributor_background=0.1, n_pixels=100)]
 
-    monkeypatch.setattr(pipeline_module, "match_gain_offset", fake_match_gain_offset)
+    monkeypatch.setattr(lrgb_orchestrator_module, "match_gain_offset", fake_match_gain_offset)
 
     combine_calls: list[dict] = []
 
@@ -2028,7 +2029,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
         shutil.copy2(paths[reference_index], output_path)
         return Path(output_path)
 
-    monkeypatch.setattr(pipeline_module, "combine_same_grid", fake_combine_same_grid)
+    monkeypatch.setattr(lrgb_orchestrator_module, "combine_same_grid", fake_combine_same_grid)
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -2080,6 +2081,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
     import shutil
 
     import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
     from astro_pipeline.reconciliation import ReconciliationResult
     from astro_pipeline.stretch_compose import ComposeResult
 
@@ -2109,7 +2111,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
 
     call_counts = {"build_master": 0, "build_colour": 0, "graxpert": 0, "reproject": 0, "stretch": 0}
 
@@ -2124,7 +2126,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
         _write_fake_master(master_path)
         return master_path
 
-    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
+    monkeypatch.setattr(lrgb_orchestrator_module, "build_group_master", fake_build_master)
 
     stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
     fits.PrimaryHDU(
@@ -2150,7 +2152,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
         _write_fake_master(output_path, seed=2)
         return output_path
 
-    monkeypatch.setattr(pipeline_module, "run_graxpert_background_extraction", fake_graxpert_bg)
+    monkeypatch.setattr(lrgb_orchestrator_module, "run_graxpert_background_extraction", fake_graxpert_bg)
 
     def fake_reproject_to_reference(source_path, reference_path, output_path):
         call_counts["reproject"] += 1
@@ -2160,7 +2162,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
             footprint_min=1.0, footprint_mean=1.0, nan_fraction=0.0,
         )
 
-    monkeypatch.setattr(pipeline_module, "reproject_to_reference", fake_reproject_to_reference)
+    monkeypatch.setattr(lrgb_orchestrator_module, "reproject_to_reference", fake_reproject_to_reference)
 
     def fake_stretch_and_compose(lum_path, rgb_path, output_dir, output_stem, method="autostretch", **kwargs):
         call_counts["stretch"] += 1
@@ -2172,7 +2174,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
             composite_path=composite_path, lum_stretch_log=None, rgb_stretch_log=None, compose_log=None,
         )
 
-    monkeypatch.setattr(pipeline_module, "stretch_and_compose", fake_stretch_and_compose)
+    monkeypatch.setattr(lrgb_orchestrator_module, "stretch_and_compose", fake_stretch_and_compose)
 
     real_delete_if_exists = pipeline_module._delete_if_exists
     deleted_names: list[str] = []
@@ -2182,7 +2184,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
             deleted_names.append(Path(path).name)
         real_delete_if_exists(path, reason, notes)
 
-    monkeypatch.setattr(pipeline_module, "_delete_if_exists", spy_delete_if_exists)
+    monkeypatch.setattr(lrgb_orchestrator_module, "_delete_if_exists", spy_delete_if_exists)
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()

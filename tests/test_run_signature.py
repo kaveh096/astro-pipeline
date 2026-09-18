@@ -374,6 +374,7 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
     out.mkdir(parents=True, exist_ok=True)
 
     import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
 
     class _FakeLightFrame:
         def __init__(self, path_name: str, user: str = "observer1") -> None:
@@ -433,14 +434,14 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
         def flat_index(self):
             return {("T99", 1, "Luminance"): new_flats}
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
 
     def fake_build_master(*args, **kwargs):
         # Stop run_lrgb right after the Luminance-loop call site we care
         # about has run -- no Siril/register/solve needed for this test.
         raise RuntimeError("stop-after-build-master-call-site")
 
-    monkeypatch.setattr(pipeline_module, "build_group_master", fake_build_master)
+    monkeypatch.setattr(lrgb_orchestrator_module, "build_group_master", fake_build_master)
 
     try:
         pipeline_module.run_lrgb(
@@ -571,6 +572,7 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
 
     import astro_pipeline.run_signature as run_signature_module
     import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
     from astro_pipeline.workspace import pipeline_dir
 
     calls: list[tuple] = []
@@ -647,7 +649,7 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
     }
     (out / "run_signature.json").write_text(json.dumps(persisted), encoding="utf-8")
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
 
     # A real, tiny, readable FITS file so the Luminance loop's own
     # `fits.getheader(lum_master_path).get("STACKCNT", ...)` call (right
@@ -655,7 +657,7 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
     # is the COLOUR call site, so the Luminance path just needs to complete.
     stub_master = tmp_path / "stub_master.fit"
     fits_module.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
-    monkeypatch.setattr(pipeline_module, "build_group_master", lambda *a, **k: stub_master)
+    monkeypatch.setattr(lrgb_orchestrator_module, "build_group_master", lambda *a, **k: stub_master)
 
     def fake_build_rgb(self, *args, **kwargs):
         raise RuntimeError("stop-after-colour-call-site")
