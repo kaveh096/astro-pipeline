@@ -669,6 +669,164 @@ class LRGBOrchestrator:
             _log(cp.summary(), self.notes)
             save_checkpoints(self.result.checkpoints, self.checkpoints_path)
 
+    def _reconcile(self) -> None:
+        """L background extraction, per-contributor reprojection,
+        crop-to-common-coverage, gain/offset match, weighted combine,
+        checkpoint 04. Sets `self.lum_for_compose_path` (Luminance-driven
+        runs only) and `self.rgb_reconciled` -- both read again by
+        `_finalize()` (Step 12d).
+        """
+        # --- luminance: background extraction --------------------------------
+        # Skipped entirely for is_rgb_only -- there is no L to extract a
+        # background from. lum_bg/lum_for_compose_path (both real inputs to the
+        # reprojection block below) only exist on the Luminance-driven path.
+        if not self.is_rgb_only:
+            lum_bg = self.final / "lum_bg.fits"
+            if not usable(lum_bg, self.notes):
+                shutil.copy2(self.result.masters[LUMINANCE_FILTER], self.final / "lum.fit")
+                _log("[run ] GraXpert background extraction on L", self.notes)
+                lum_bg = run_graxpert_background_extraction(self.final / "lum.fit", output_stem="lum_bg")
+            else:
+                _log("[skip] L background extraction already done", self.notes)
+
+            cp = checkpoint(
+                lum_bg, "03_lum_background_extracted", output_dir=self.checkpoint_dir,
+                linear=True, previous=self.previous, previous_linear=self.previous_linear,
+            )
+            self.result.checkpoints.append(cp)
+            self.previous, self.previous_linear = cp.stats, True
+            _log(cp.summary(), self.notes)
+            save_checkpoints(self.result.checkpoints, self.checkpoints_path)
+
+            # `lum_for_compose_path` is computed unconditionally (not inside the
+            # usable() guard below) so a RESUMED run -- which skips rebuilding
+            # rgb_reconciled entirely -- still picks the same L file that was
+            # actually paired with it. Getting this wrong pairs a cropped
+            # rgb_reconciled with the original, larger lum_bg on resume: a shape
+            # mismatch feeding into rgbcomp -lum=.
+            self.lum_for_compose_path = lum_bg
+            if len(self.contributors) > 1:
+                self.lum_for_compose_path = self.final / "lum_bg_cropped.fits"
+
+        # --- reproject every colour contributor onto L's grid, then combine --
+        self.rgb_reconciled = self.final / "rgb_reconciled.fit"
+        if not usable(self.rgb_reconciled, self.notes):
+            if self.is_rgb_only:
+                # No L to reproject onto -- rgb_reconciled is a direct copy of
+                # the single contributor's colour-calibrated output (same
+                # pixels, same WCS grid, nothing to reconcile against). More
+                # than one RGB-only contributor needs real gain-match/crop
+                # logic with no L to crop against -- untested, deferred rather
+                # than built blind (see plan-rgb-only-mode.md's non-goals).
+                if len(self.contributors) != 1:
+                    raise NotImplementedError(
+                        f"RGB-only mode with {len(self.contributors)} colour contributors "
+                        f"({[c.key for c in self.contributors]}) is not supported -- only the "
+                        "single-contributor case (no reconciliation needed) is implemented."
+                    )
+                _log("[run ] RGB-only: no Luminance to reproject onto -- using contributor directly", self.notes)
+                shutil.copy2(self.contributors[0].composite_path, self.rgb_reconciled)
+            elif len(self.contributors) == 1:
+                _log("[run ] reprojecting colour onto L's pixel grid", self.notes)
+                recon = reproject_to_reference(self.contributors[0].composite_path, lum_bg, self.rgb_reconciled)
+                _log(f"       footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f}", self.notes)
+            else:
+                reprojected_paths = []
+                for contributor in self.contributors:
+                    # Slice 3.3: keyed by (telescope, binning) identity, not
+                    # loop position -- verified on real data that positional
+                    # naming (`contrib{i}` over sorted(rgb_binnings)) put
+                    # BIN1's contributor at index 0 even though BIN2 is the
+                    # PRIMARY one, a real footgun for anyone reading these
+                    # files by number expecting index 0 = primary.
+                    out_path = self.final / f"rgb_reconciled_contrib_{contributor.key}.fit"
+                    recon = reproject_to_reference(contributor.composite_path, lum_bg, out_path)
+                    _log(
+                        f"[run ] reprojected {contributor.key} onto L's grid "
+                        f"(footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f})",
+                        self.notes,
+                    )
+                    reprojected_paths.append(out_path)
+
+                # Crop L and every reprojected contributor to their common
+                # coverage BEFORE combining, rather than combining with a
+                # NaN-aware per-pixel fallback. Each contributor ran its own
+                # independent GraXpert background extraction, so their absolute
+                # background pedestals genuinely differ (measured on real data:
+                # 0.101 vs 0.085, ~18% apart) even though each is internally
+                # well balanced (R~G~B within each). A NaN-aware combine uses
+                # whichever contributor has data at a given pixel, which leaves
+                # a hard STEP in background level exactly at the coverage
+                # boundary -- rendered by the shadow-clipped stretch as a
+                # visible colour-shifted band along that edge. This is the same
+                # failure shape as the single-contributor channel-alignment
+                # banding fixed earlier (see crop_to_common_coverage's own
+                # docstring) -- cropping means every remaining pixel is a
+                # genuine average of every contributor, so there is no boundary
+                # left to show a seam at.
+                cropped = crop_to_common_coverage(
+                    [lum_bg, *reprojected_paths], self.final / "combined_crop"
+                )
+                cropped_shape = fits.getdata(cropped[0], memmap=False).shape
+                _log(
+                    f"[run ] cropped L + {len(self.contributors)} contributors to common coverage {cropped_shape}",
+                    self.notes,
+                )
+                shutil.copy2(cropped[0], self.lum_for_compose_path)
+                cropped_rgb = cropped[1:]  # aligned 1:1 with `contributors`
+
+                # Slice 3.4/3.5: the designated reference is the contributor
+                # with the most STACKCNT -- both the gain/offset fit (3.4) and
+                # the weighting (3.5) are measured against/by it, and it also
+                # supplies the combined output's FITS header (3.6), replacing
+                # the old paths[0] positional pick. `reference`/`reference_pos`
+                # are computed once, above, right after the colour-contributor
+                # loop (Slice 4.1 needs the reference's identity for the run
+                # signature even on a single-contributor run) -- reused here
+                # rather than recomputed.
+                gain_matched: list[Path] = []
+                for i, (contributor, path) in enumerate(zip(self.contributors, cropped_rgb)):
+                    if i == self.reference_pos:
+                        gain_matched.append(path)
+                        continue
+                    matched_path = self.final / "combined_crop" / f"gain_matched_{contributor.key}.fit"
+                    fit_results = match_gain_offset(path, cropped_rgb[self.reference_pos], matched_path)
+                    for fit in fit_results:
+                        _log(
+                            f"       {contributor.key} vs {self.reference.key} ch{fit.channel}: "
+                            f"gain={fit.gain:.4f} on {fit.n_pixels} high-signal px "
+                            f"(ref bkg {fit.reference_background:.5f}, "
+                            f"contrib bkg {fit.contributor_background:.5f})",
+                            self.notes,
+                        )
+                    gain_matched.append(matched_path)
+
+                # Slice 3.5: weight by STACKCNT (subs that actually survived
+                # quality filtering/rejection into the stacked masters), not
+                # sub_count (raw light count) -- see combine_same_grid's own
+                # docstring for why an inverse-variance scheme was tried and
+                # rejected in between.
+                weights = [float(c.stack_total) for c in self.contributors]
+                combine_same_grid(
+                    gain_matched, self.rgb_reconciled, weights=weights, reference_index=self.reference_pos,
+                )
+                _log(
+                    f"[run ] combined {len(self.contributors)} colour contributors by STACKCNT "
+                    f"(weights {weights})",
+                    self.notes,
+                )
+        else:
+            _log("[skip] reprojection already done", self.notes)
+
+        cp = checkpoint(
+            self.rgb_reconciled, "04_rgb_reconciled", output_dir=self.checkpoint_dir,
+            linear=True, previous=self.previous, previous_linear=self.previous_linear,
+        )
+        self.result.checkpoints.append(cp)
+        self.previous, self.previous_linear = cp.stats, True
+        _log(cp.summary(), self.notes)
+        save_checkpoints(self.result.checkpoints, self.checkpoints_path)
+
 
 def run_lrgb(
     project_dir: str | Path,
@@ -792,156 +950,11 @@ def run_lrgb(
         _log(f"[stop] stop_after='masters' -- {masters_note}; stopping before reconciliation", notes)
         return result
 
-    # --- luminance: background extraction --------------------------------
-    # Skipped entirely for is_rgb_only -- there is no L to extract a
-    # background from. lum_bg/lum_for_compose_path (both real inputs to the
-    # reprojection block below) only exist on the Luminance-driven path.
-    if not is_rgb_only:
-        lum_bg = final / "lum_bg.fits"
-        if not usable(lum_bg, notes):
-            shutil.copy2(result.masters[LUMINANCE_FILTER], final / "lum.fit")
-            _log("[run ] GraXpert background extraction on L", notes)
-            lum_bg = run_graxpert_background_extraction(final / "lum.fit", output_stem="lum_bg")
-        else:
-            _log("[skip] L background extraction already done", notes)
+    orchestrator._reconcile()
 
-        cp = checkpoint(
-            lum_bg, "03_lum_background_extracted", output_dir=checkpoint_dir,
-            linear=True, previous=previous, previous_linear=previous_linear,
-        )
-        result.checkpoints.append(cp)
-        previous, previous_linear = cp.stats, True
-        _log(cp.summary(), notes)
-        save_checkpoints(result.checkpoints, checkpoints_path)
-
-        # `lum_for_compose_path` is computed unconditionally (not inside the
-        # usable() guard below) so a RESUMED run -- which skips rebuilding
-        # rgb_reconciled entirely -- still picks the same L file that was
-        # actually paired with it. Getting this wrong pairs a cropped
-        # rgb_reconciled with the original, larger lum_bg on resume: a shape
-        # mismatch feeding into rgbcomp -lum=.
-        lum_for_compose_path = lum_bg
-        if len(contributors) > 1:
-            lum_for_compose_path = final / "lum_bg_cropped.fits"
-
-    # --- reproject every colour contributor onto L's grid, then combine --
-    rgb_reconciled = final / "rgb_reconciled.fit"
-    if not usable(rgb_reconciled, notes):
-        if is_rgb_only:
-            # No L to reproject onto -- rgb_reconciled is a direct copy of
-            # the single contributor's colour-calibrated output (same
-            # pixels, same WCS grid, nothing to reconcile against). More
-            # than one RGB-only contributor needs real gain-match/crop
-            # logic with no L to crop against -- untested, deferred rather
-            # than built blind (see plan-rgb-only-mode.md's non-goals).
-            if len(contributors) != 1:
-                raise NotImplementedError(
-                    f"RGB-only mode with {len(contributors)} colour contributors "
-                    f"({[c.key for c in contributors]}) is not supported -- only the "
-                    "single-contributor case (no reconciliation needed) is implemented."
-                )
-            _log("[run ] RGB-only: no Luminance to reproject onto -- using contributor directly", notes)
-            shutil.copy2(contributors[0].composite_path, rgb_reconciled)
-        elif len(contributors) == 1:
-            _log("[run ] reprojecting colour onto L's pixel grid", notes)
-            recon = reproject_to_reference(contributors[0].composite_path, lum_bg, rgb_reconciled)
-            _log(f"       footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f}", notes)
-        else:
-            reprojected_paths = []
-            for contributor in contributors:
-                # Slice 3.3: keyed by (telescope, binning) identity, not
-                # loop position -- verified on real data that positional
-                # naming (`contrib{i}` over sorted(rgb_binnings)) put
-                # BIN1's contributor at index 0 even though BIN2 is the
-                # PRIMARY one, a real footgun for anyone reading these
-                # files by number expecting index 0 = primary.
-                out_path = final / f"rgb_reconciled_contrib_{contributor.key}.fit"
-                recon = reproject_to_reference(contributor.composite_path, lum_bg, out_path)
-                _log(
-                    f"[run ] reprojected {contributor.key} onto L's grid "
-                    f"(footprint {recon.footprint_mean:.3f}, NaN {recon.nan_fraction:.3f})",
-                    notes,
-                )
-                reprojected_paths.append(out_path)
-
-            # Crop L and every reprojected contributor to their common
-            # coverage BEFORE combining, rather than combining with a
-            # NaN-aware per-pixel fallback. Each contributor ran its own
-            # independent GraXpert background extraction, so their absolute
-            # background pedestals genuinely differ (measured on real data:
-            # 0.101 vs 0.085, ~18% apart) even though each is internally
-            # well balanced (R~G~B within each). A NaN-aware combine uses
-            # whichever contributor has data at a given pixel, which leaves
-            # a hard STEP in background level exactly at the coverage
-            # boundary -- rendered by the shadow-clipped stretch as a
-            # visible colour-shifted band along that edge. This is the same
-            # failure shape as the single-contributor channel-alignment
-            # banding fixed earlier (see crop_to_common_coverage's own
-            # docstring) -- cropping means every remaining pixel is a
-            # genuine average of every contributor, so there is no boundary
-            # left to show a seam at.
-            cropped = crop_to_common_coverage(
-                [lum_bg, *reprojected_paths], final / "combined_crop"
-            )
-            cropped_shape = fits.getdata(cropped[0], memmap=False).shape
-            _log(
-                f"[run ] cropped L + {len(contributors)} contributors to common coverage {cropped_shape}",
-                notes,
-            )
-            shutil.copy2(cropped[0], lum_for_compose_path)
-            cropped_rgb = cropped[1:]  # aligned 1:1 with `contributors`
-
-            # Slice 3.4/3.5: the designated reference is the contributor
-            # with the most STACKCNT -- both the gain/offset fit (3.4) and
-            # the weighting (3.5) are measured against/by it, and it also
-            # supplies the combined output's FITS header (3.6), replacing
-            # the old paths[0] positional pick. `reference`/`reference_pos`
-            # are computed once, above, right after the colour-contributor
-            # loop (Slice 4.1 needs the reference's identity for the run
-            # signature even on a single-contributor run) -- reused here
-            # rather than recomputed.
-            gain_matched: list[Path] = []
-            for i, (contributor, path) in enumerate(zip(contributors, cropped_rgb)):
-                if i == reference_pos:
-                    gain_matched.append(path)
-                    continue
-                matched_path = final / "combined_crop" / f"gain_matched_{contributor.key}.fit"
-                fit_results = match_gain_offset(path, cropped_rgb[reference_pos], matched_path)
-                for fit in fit_results:
-                    _log(
-                        f"       {contributor.key} vs {reference.key} ch{fit.channel}: "
-                        f"gain={fit.gain:.4f} on {fit.n_pixels} high-signal px "
-                        f"(ref bkg {fit.reference_background:.5f}, "
-                        f"contrib bkg {fit.contributor_background:.5f})",
-                        notes,
-                    )
-                gain_matched.append(matched_path)
-
-            # Slice 3.5: weight by STACKCNT (subs that actually survived
-            # quality filtering/rejection into the stacked masters), not
-            # sub_count (raw light count) -- see combine_same_grid's own
-            # docstring for why an inverse-variance scheme was tried and
-            # rejected in between.
-            weights = [float(c.stack_total) for c in contributors]
-            combine_same_grid(
-                gain_matched, rgb_reconciled, weights=weights, reference_index=reference_pos,
-            )
-            _log(
-                f"[run ] combined {len(contributors)} colour contributors by STACKCNT "
-                f"(weights {weights})",
-                notes,
-            )
-    else:
-        _log("[skip] reprojection already done", notes)
-
-    cp = checkpoint(
-        rgb_reconciled, "04_rgb_reconciled", output_dir=checkpoint_dir,
-        linear=True, previous=previous, previous_linear=previous_linear,
-    )
-    result.checkpoints.append(cp)
-    previous, previous_linear = cp.stats, True
-    _log(cp.summary(), notes)
-    save_checkpoints(result.checkpoints, checkpoints_path)
+    rgb_reconciled = orchestrator.rgb_reconciled
+    lum_for_compose_path = orchestrator.lum_for_compose_path if not is_rgb_only else None
+    previous, previous_linear = orchestrator.previous, orchestrator.previous_linear
 
     if stop_after == "reconciled":
         reconciled_note = (
