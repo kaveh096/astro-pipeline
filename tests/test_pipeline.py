@@ -22,7 +22,7 @@ from astro_pipeline.pipeline import (
     run_narrowband,
 )
 from astro_pipeline.siril_driver import find_siril_cli
-from astro_pipeline.workspace import contributor_dir
+from astro_pipeline.workspace import contributor_dir, pipeline_dir
 
 from conftest import (
     FINAL_DIR,
@@ -1047,7 +1047,7 @@ def test_run_narrowband_raises_with_real_filter_diagnostic_when_no_match(tmp_pat
     filters aren't found, the error names the REAL distinct FILTER
     strings actually seen at this telescope/binning, not just a bare
     'no lights found'."""
-    import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.narrowband_orchestrator as narrowband_orchestrator_module
 
     class _FakeReportWrongSpelling:
         def instrument_groups(self):
@@ -1066,7 +1066,7 @@ def test_run_narrowband_raises_with_real_filter_diagnostic_when_no_match(tmp_pat
         def calibrated_instrument_groups(self):
             return {}
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda project_dir: _FakeReportWrongSpelling())
+    monkeypatch.setattr(narrowband_orchestrator_module, "scan_session", lambda project_dir: _FakeReportWrongSpelling())
 
     with pytest.raises(RuntimeError, match="SomeWeirdSpelling"):
         run_narrowband(tmp_path, "T20", "M42", 5.588, -5.391, palette="sho")
@@ -1077,7 +1077,7 @@ def test_run_narrowband_exports_with_palette_named_stem(tmp_path: Path, monkeypa
     build -> equalization -> stretch -> export) reaches export() with the
     palette-named stem, not '_lrgb'/'_rgb'."""
     import astro_pipeline.colour_contributor as colour_contributor_module
-    import astro_pipeline.pipeline as pipeline_module
+    import astro_pipeline.narrowband_orchestrator as narrowband_orchestrator_module
     from astro_pipeline.workspace import pipeline_dir
 
     project_dir = tmp_path / "project"
@@ -1104,7 +1104,7 @@ def test_run_narrowband_exports_with_palette_named_stem(tmp_path: Path, monkeypa
         def calibrated_instrument_groups(self):
             return {}
 
-    monkeypatch.setattr(pipeline_module, "scan_session", lambda pd: _FakeReportSHO())
+    monkeypatch.setattr(narrowband_orchestrator_module, "scan_session", lambda pd: _FakeReportSHO())
 
     def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *args, **kwargs):
         p = tmp_path / f"master_{filter_name}.fit"
@@ -1151,7 +1151,7 @@ def test_run_narrowband_exports_with_palette_named_stem(tmp_path: Path, monkeypa
     monkeypatch.setattr(colour_contributor_module, "crop_to_common_coverage", lambda paths, out_dir: None)
     monkeypatch.setattr(colour_contributor_module, "run_script", fake_run_script)
     monkeypatch.setattr(colour_contributor_module, "run_graxpert_background_extraction", fake_bg_extraction)
-    monkeypatch.setattr(pipeline_module, "stretch_rgb", fake_stretch_rgb)
+    monkeypatch.setattr(narrowband_orchestrator_module, "stretch_rgb", fake_stretch_rgb)
 
     result = run_narrowband(project_dir, "T20", "M42", 5.588, -5.391, palette="sho", binning=2)
 
@@ -1442,7 +1442,6 @@ def test_run_lrgb_rgb_only_full_run_no_luminance_no_crash(tmp_path: Path, monkey
     = direct copy, checkpoint 05_rgb_final not 05_lrgb_final, export stem
     "<target>_rgb" not "<target>_lrgb") all actually happened.
     """
-    import astro_pipeline.pipeline as pipeline_module
     import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
 
     class _FakeLightFrame:
@@ -1534,7 +1533,6 @@ def test_run_lrgb_rgb_only_multi_contributor_raises_not_implemented(tmp_path: Pa
     ??7 non-goal) must fail loudly, not silently attempt an unverified
     combine. Pure unit test -- no real Siril needed, since the
     NotImplementedError fires before any reprojection/stretch call."""
-    import astro_pipeline.pipeline as pipeline_module
     import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
 
     class _FakeLightFrame:
@@ -1600,7 +1598,6 @@ def test_run_lrgb_mixed_osc_and_rgb_same_binning_raises_not_implemented(tmp_path
     lists would misfire on every real OSC-only target; caught during real
     testing, not by adversarial review, and covered separately by
     test_run_lrgb_rgb_only_full_run_no_luminance_no_crash actually passing)."""
-    import astro_pipeline.pipeline as pipeline_module
     import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
 
     class _FakeLightFrame:
@@ -1669,7 +1666,6 @@ def test_run_lrgb_stop_after_masters_returns_before_reconciliation_MOCKED(
     finding 2/3a). Asserts stop_after="masters" really does return before
     ANY reconciliation-stage code runs, by making
     run_graxpert_background_extraction raise if it's ever called."""
-    import astro_pipeline.pipeline as pipeline_module
     import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
 
     class _FakeLightFrame:
@@ -1705,7 +1701,7 @@ def test_run_lrgb_stop_after_masters_returns_before_reconciliation_MOCKED(
     def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *a, **k):
         build_master_calls["n"] += 1
         master_path = (
-            pipeline_module.pipeline_dir(project_dir) / group_name / "lights"
+            pipeline_dir(project_dir) / group_name / "lights"
             / f"master_{filter_name.lower()}.fit"
         )
         _write_fake_master(master_path)
@@ -1763,7 +1759,6 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
     behavior lives inside those functions, not in run_lrgb's own loop, so
     a bare no-resumability mock would (wrongly) look like "masters get
     rebuilt on every call" no matter what run_lrgb actually does."""
-    import astro_pipeline.pipeline as pipeline_module
     import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
     from astro_pipeline.reconciliation import ReconciliationResult
     from astro_pipeline.stretch_compose import ComposeResult
@@ -1800,7 +1795,7 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
 
     def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *a, **k):
         master_path = (
-            pipeline_module.pipeline_dir(project_dir) / group_name / "lights"
+            pipeline_dir(project_dir) / group_name / "lights"
             / f"master_{filter_name.lower()}.fit"
         )
         if master_path.exists():
@@ -1907,7 +1902,6 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
     not their own internal correctness (already covered elsewhere)."""
     import shutil
 
-    import astro_pipeline.pipeline as pipeline_module
     import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
     from astro_pipeline.reconciliation import GainOffsetFit, ReconciliationResult
 
@@ -1947,7 +1941,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
 
     def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *a, **k):
         master_path = (
-            pipeline_module.pipeline_dir(project_dir) / group_name / "lights"
+            pipeline_dir(project_dir) / group_name / "lights"
             / f"master_{filter_name.lower()}.fit"
         )
         _write_fake_master(master_path)
@@ -2080,7 +2074,6 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
     """
     import shutil
 
-    import astro_pipeline.pipeline as pipeline_module
     import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
     from astro_pipeline.reconciliation import ReconciliationResult
     from astro_pipeline.stretch_compose import ComposeResult
@@ -2117,7 +2110,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
 
     def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *a, **k):
         master_path = (
-            pipeline_module.pipeline_dir(project_dir) / group_name / "lights"
+            pipeline_dir(project_dir) / group_name / "lights"
             / f"master_{filter_name.lower()}.fit"
         )
         if master_path.exists():
@@ -2176,7 +2169,8 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
 
     monkeypatch.setattr(lrgb_orchestrator_module, "stretch_and_compose", fake_stretch_and_compose)
 
-    real_delete_if_exists = pipeline_module._delete_if_exists
+    from astro_pipeline.contributor_staleness import _delete_if_exists as real_delete_if_exists
+
     deleted_names: list[str] = []
 
     def spy_delete_if_exists(path, reason, notes):
