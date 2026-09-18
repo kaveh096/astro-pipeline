@@ -1,13 +1,19 @@
 """`run_lrgb`: end-to-end LRGB orchestration for a single telescope+target,
 combining every user who contributed data on that telescope.
 
-Moved out of `pipeline.py` verbatim (Task 5 Step 12a) -- see
-`docs/task5-oop-refactor-plan.md` Section 1 and `docs/task5-step12-substeps.md`
-for the full design rationale (multi-user/multi-contributor combining rules,
-the three-phase `masters`/`reconciled`/`final` stage order, resumability via
-`usable()`, and the `RunSignature`-driven staleness cascade). `pipeline.py`'s
-own module docstring still carries the detailed narrative explanation of
-*why* the pipeline is shaped this way; it is not duplicated here.
+Moved out of `pipeline.py` verbatim (Task 5 Step 12a), then restructured
+around an `LRGBOrchestrator` class (Steps 12b-12d) whose three phase methods
+match the existing `STAGE_ORDER = ("masters", "reconciled", "final")`
+vocabulary -- see `docs/task5-oop-refactor-plan.md` Section 1 and
+`docs/task5-step12-substeps.md` for the full design rationale
+(multi-user/multi-contributor combining rules, resumability via `usable()`,
+and the `RunSignature`-driven staleness cascade). `pipeline.py`'s own module
+docstring still carries the detailed narrative explanation of *why* the
+pipeline is shaped this way; it is not duplicated here.
+
+`run_lrgb()` itself keeps a byte-for-byte identical public signature and
+behavior throughout this restructuring -- it is the only name any external
+caller (skill scripts, tests) ever imports.
 """
 
 from __future__ import annotations
@@ -81,6 +87,587 @@ from .workspace import contributor_dir, pipeline_dir
 # Factored out of run_lrgb as their own functions for the same reason
 # select_luminance_source/resolve_instrument_profile were: directly
 # testable without invoking the full calibrate/stack/solve/SPCC chain.
+
+
+class LRGBOrchestrator:
+    """Holds the mutable state `run_lrgb`'s three phases
+    (masters/reconciled/final) share, so it doesn't have to be threaded as
+    an ever-growing parameter list or returned as an ever-growing tuple
+    between free functions. `run_lrgb()` itself is the only public surface
+    -- constructs one of these and drives it; nothing outside this module
+    ever sees the class.
+    """
+
+    def __init__(
+        self,
+        project_dir: str | Path,
+        telescope: str,
+        target: str,
+        ra_hours: float,
+        dec_deg: float,
+        lum_binning: int = 1,
+        rgb_binning: int = 2,
+        stretch_method: str = "autostretch",
+        lum_source: tuple[str, int] | None = None,
+        pedestal: float = DEFAULT_PEDESTAL,
+        stop_after: str | None = None,
+        force: set[str] | None = None,
+        flat_policy: FlatPolicy | None = None,
+        calibration_mode: dict[str, CalibrationMode] | None = None,
+    ) -> None:
+        if stop_after is not None and stop_after not in STAGE_ORDER:
+            raise ValueError(f"stop_after={stop_after!r} is not one of {STAGE_ORDER}")
+        force = set(force) if force else set()
+        unknown_force = force - set(STAGE_ORDER)
+        if unknown_force:
+            raise ValueError(f"force={sorted(unknown_force)} names unknown stage(s); valid: {STAGE_ORDER}")
+
+        self.telescope = telescope
+        self.target = target
+        self.ra_hours = ra_hours
+        self.dec_deg = dec_deg
+        self.lum_binning = lum_binning
+        self.rgb_binning = rgb_binning
+        self.stretch_method = stretch_method
+        self.lum_source = lum_source
+        self.pedestal = pedestal
+        self.stop_after = stop_after
+        self.force = force
+        self.flat_policy = flat_policy
+        self.calibration_mode = calibration_mode
+
+        self.project_dir = Path(project_dir)
+        self.out = pipeline_dir(self.project_dir)
+        self.final = self.out / "final"
+        self.final.mkdir(parents=True, exist_ok=True)
+        self.result = PipelineResult()
+        self.notes = self.result.notes
+
+        self.checkpoint_dir = self.out / "checkpoints"
+        self.checkpoints_path = self.checkpoint_dir / "checkpoints.json"
+        self.run_signature_path = self.out / "run_signature.json"
+        self.old_signature = load_run_signature(self.run_signature_path)
+
+        # Checkpoint delta-chaining state, threaded through every checkpoint
+        # call across all three phases -- initialized here (rather than at
+        # the top of `_build_masters()`) since nothing reads either before
+        # the first checkpoint is emitted, and this keeps all `__init__`-time
+        # state assignment in one place.
+        self.previous = None
+        self.previous_linear: bool | None = None
+
+    def _build_masters(self) -> None:
+        """Luminance discovery/build/select, RGB+OSC contributor
+        discovery/build, reference-contributor selection, `RunSignature`
+        construction + `diff_invalidation` + the `force`-cascade delete,
+        masters-stage checkpoints. Sets `self.is_rgb_only`,
+        `self.contributors`, `self.reference`, `self.reference_pos` --
+        read by `run_lrgb`'s own reconciled/final phases after this
+        returns (Steps 12c/12d will move those phases into methods here
+        too; until then `run_lrgb` reads these directly off the instance).
+        """
+        _log(f"=== scanning {self.project_dir.name} ===", self.notes)
+        report = scan_session(self.project_dir)
+
+        # --- luminance masters: every (telescope, binning) that has Luminance
+        # data for this target gets its own master built here -- NOT scoped to
+        # the caller's `telescope`, otherwise a telescope that only ever
+        # contributes colour under the user's colour-only rule (T21 today) would
+        # never get its own Luminance master built under any slice, including
+        # this one. Each user sharing a (telescope, binning) is still merged at
+        # the raw-sub level (see module docstring) -- that combining logic is
+        # per-contributor, unaffected by there now being more than one
+        # contributor.
+        #
+        # Which contributor actually drives the rendered composite is Slice 2's
+        # measured recommendation: every contributor's master gets built (so
+        # every one is on disk and inspectable, even the ones not selected --
+        # per this project's checkpointed-not-black-box design principle), its
+        # median FWHM gets measured and logged, and the sharpest one wins by
+        # default. This is deliberately NOT folded into the build loop below --
+        # the winner can only be known after every candidate has been measured.
+        cal_index = report.calibration_index()
+        lum_contributors = discover_luminance_contributors(report, self.target, self.telescope, self.lum_binning)
+        force_masters = "masters" in self.force
+
+        lum_candidates: list[LumCandidate] = []
+        lum_frame_hashes: dict[str, str] = {}
+        lum_flat_frame_hashes: dict[str, str] = {}
+        lum_stackcnt: dict[str, int] = {}
+        lum_calibration_modes: dict[str, str] = {}
+        for lum_telescope, contrib_lum_binning in lum_contributors:
+            lum_key = (lum_telescope, contrib_lum_binning)
+            lum_label = f"Luminance-{lum_telescope}-bin{contrib_lum_binning}"
+            contributor_key = f"{lum_telescope}_bin{contrib_lum_binning}"
+            lum_calibration_mode = (self.calibration_mode or {}).get(
+                lum_telescope, infer_calibration_mode(report, lum_telescope)
+            )
+            lum_calibration_modes[contributor_key] = lum_calibration_mode.value
+            lum_lights, lum_group_name = resolve_lights(
+                report, lum_telescope, self.target, LUMINANCE_FILTER, contrib_lum_binning,
+                calibration_mode=lum_calibration_mode,
+            )
+            if len(lum_lights) < MIN_SEQUENCE_FRAMES:
+                # Real finding (T72's single NGC 3628 Luminance test sub, first
+                # real precalibrated-path run): Siril refuses to create a
+                # sequence from fewer than MIN_SEQUENCE_FRAMES frames, which
+                # register_and_stack() cannot recover from (an opaque "No
+                # sequence found" crash). A Siril constraint, not specific to
+                # this contributor's calibration mode -- skip-and-log here,
+                # mirroring the established pattern for a colour contributor
+                # missing a filter, rather than crashing the whole run over one
+                # under-populated contributor.
+                _log(
+                    f"[skip] {lum_label}: only {len(lum_lights)} light(s), need at least "
+                    f"{MIN_SEQUENCE_FRAMES} to form a Siril sequence -- skipping this "
+                    "Luminance contributor rather than crashing the whole run",
+                    self.notes,
+                )
+                continue
+            frame_hash = frame_identity_hash([f.path.name for f in lum_lights])
+            lum_frame_hashes[contributor_key] = frame_hash
+
+            # Slice 2.2: the matched flat set for this Luminance contributor,
+            # looked up here (not inside build_group_master -- see its own docstring)
+            # since only the caller has `report` in scope to call flat_index()
+            # on. Slice 2.2's per-telescope FlatPolicy: REQUIRE if this
+            # telescope ships ANY flat at all (T21's real case), else
+            # SKIP_IF_MISSING (T24's), unless `flat_policy` was explicitly
+            # passed to override uniformly for the whole run.
+            #
+            # Precalibrated-path plan: a PRECALIBRATED telescope's flats are
+            # never consulted at all (already flat-corrected upstream, see
+            # stage_precalibrated_lights()'s docstring) -- calling
+            # infer_flat_policy on it would be misleading, since T73 DOES ship
+            # (BIN1-only) flats and would report REQUIRE despite this run path
+            # never using them.
+            if lum_calibration_mode == CalibrationMode.PRECALIBRATED:
+                lum_flat_frames: list = []
+                lum_flat_policy = FlatPolicy.SKIP_IF_MISSING
+            else:
+                lum_flat_frames = report.flat_index().get(
+                    (lum_telescope, contrib_lum_binning, LUMINANCE_FILTER), []
+                )
+                lum_flat_policy = (
+                    self.flat_policy if self.flat_policy is not None else infer_flat_policy(report, lum_telescope)
+                )
+            lum_flat_frame_hash = _flat_frame_hash(lum_flat_frames)
+            lum_flat_frame_hashes[contributor_key] = lum_flat_frame_hash
+
+            # Slice 4.1: usable() only knows whether master_luminance.fit
+            # exists and reads clean -- it has zero notion of which lights
+            # produced it, so a sub silently added/removed/replaced (the
+            # orphaned pre-merge T24-observer1-M51-Luminance-bin1 group is real,
+            # on-disk proof this gap is not hypothetical) would otherwise never
+            # trigger a rebuild. Delete the stale master here so usable()'s own
+            # skip-if-present gate inside build_group_master naturally regenerates it.
+            # Slice 2.3: `flat_frame_hash` is now also passed here -- omitting
+            # it (or leaving contributor_stale's own parameter at its default)
+            # would silently defeat the whole point of tracking it at all, see
+            # ContributorSignature/contributor_stale in run_signature.py.
+            stale = force_masters or (
+                self.old_signature is not None
+                and self.old_signature.contributor_stale(
+                    "luminance", contributor_key, frame_hash, self.pedestal, lum_flat_frame_hash
+                )
+            )
+            if stale:
+                master_path = pipeline_dir(self.project_dir) / lum_group_name / "lights" / f"master_{LUMINANCE_FILTER.lower()}.fit"
+                _delete_if_exists(master_path, f"{lum_label}: run signature changed", self.notes)
+
+            lum_users = sorted({f.user for f in lum_lights})
+            if len(lum_users) > 1:
+                _log(f"[run ] combining Luminance across users: {', '.join(lum_users)}", self.notes)
+            lum_master_path = build_group_master(
+                self.project_dir, lum_lights, cal_index, lum_group_name, LUMINANCE_FILTER,
+                lum_telescope, contrib_lum_binning, self.ra_hours, self.dec_deg, self.notes,
+                flat_frames=lum_flat_frames, flat_policy=lum_flat_policy, pedestal=self.pedestal,
+                calibration_mode=lum_calibration_mode,
+            )
+            self.result.masters[lum_label] = lum_master_path
+            lum_stackcnt[contributor_key] = int(fits.getheader(lum_master_path).get("STACKCNT", len(lum_lights)))
+            fwhm_arcsec = contributor_fwhm_arcsec(lum_master_path, self.notes, label=lum_label)
+            if fwhm_arcsec is not None:
+                _log(f"       {lum_label}: median FWHM {fwhm_arcsec:.2f}\"", self.notes)
+            lum_candidates.append((lum_key, lum_master_path, fwhm_arcsec))
+
+        # RGB-only mode (2026-09): no Luminance data exists for this target on ANY
+        # telescope -- lum_candidates stays empty when discover_luminance_contributors
+        # found nothing real to build (the build loop's MIN_SEQUENCE_FRAMES skip above
+        # can also leave it empty for a telescope with too few Luminance lights).
+        # "Zero Luminance masters could be built for this target, anywhere" is a
+        # purely structural, unambiguous fact once the build loop has run -- unlike
+        # CalibrationMode's own auto-detection (a judgement call about degraded vs
+        # intentional data), there is no real target where "some but deliberately
+        # excluded" Luminance would misfire on this: select_luminance_source's own
+        # sharpest-wins rule already handles "built but not chosen"; empty only
+        # happens when literally nothing could be built. Real case: Abell 6 and
+        # HFG1 (T02), a one-shot-colour delivery with no Luminance filter at all.
+        self.is_rgb_only = not lum_candidates
+        if self.is_rgb_only:
+            if self.lum_source is not None:
+                raise ValueError(
+                    f"lum_source={self.lum_source!r} given but no Luminance data exists for "
+                    f"{self.target} on any telescope -- nothing to select from"
+                )
+            _log(f"[run ] no Luminance data found for {self.target} on any telescope -- RGB-only mode", self.notes)
+            selected_key, selected_path, selected_fwhm = None, None, None
+        else:
+            selected_key, selected_path, selected_fwhm = select_luminance_source(
+                lum_candidates, self.lum_source, (self.telescope, self.lum_binning), self.notes
+            )
+            self.result.masters[LUMINANCE_FILTER] = selected_path
+
+        # --- colour contributors: one per binning that has a full R/G/B set,
+        # for this telescope+target. rgb_binning is the PRIMARY contributor and
+        # keeps the legacy top-level file paths; anything else discovered is an
+        # additional contributor reconciled in at the master level. ------------
+        rgb_binnings = sorted(
+            {
+                key[3]
+                for key in report.instrument_groups()
+                if key[0] == self.telescope and key[1] == self.target and key[2] in RGB_FILTERS
+            }
+        )
+        if self.rgb_binning not in rgb_binnings:
+            rgb_binnings = [self.rgb_binning, *rgb_binnings]
+
+        # RGB-only/OSC plan (2026-09): one-shot-colour (Color/OSC) binnings for
+        # this telescope+target, symmetric with the RGB discovery above --
+        # deliberately telescope-scoped the same way (discover_osc_contributors
+        # itself searches every telescope, mirroring discover_luminance_
+        # contributors, but this caller only ever builds its OWN telescope's
+        # OSC contributors, matching RGB discovery's existing, documented
+        # hard-scoping -- broadening either one is a separate, later concern).
+        osc_binnings = sorted(
+            {
+                b for (osc_telescope, b) in discover_osc_contributors(report, self.target, self.telescope, self.rgb_binning)
+                if osc_telescope == self.telescope
+            }
+        )
+        # Mixed OSC+mono-RGB reconciliation is deliberately unsupported (see
+        # plan-rgb-only-mode.md ??7): channel-order parity between Siril's
+        # -debayer output and rgbcomp's R-then-G-then-B convention has never
+        # been verified, and a binning with BOTH real shapes of colour data
+        # would produce two ColourContributors with the IDENTICAL `.key` -- a
+        # real dict-key collision that would silently corrupt colour_frame_
+        # hashes/colour_flat_frame_hashes/new_signature.colour construction
+        # below. Caught HERE, at contributor-collection time, before any
+        # build or signature construction -- not deferred to reconciliation,
+        # which round-2 adversarial review found is already too late to
+        # prevent the corruption.
+        #
+        # Checked against REAL data presence (report.instrument_groups()
+        # directly), NOT the padded `rgb_binnings`/`osc_binnings` lists above --
+        # both of those unconditionally prepend the caller's own `rgb_binning`
+        # even with zero real data of that shape (mirrors discover_luminance_
+        # contributors' own "always include caller's combo" convention), so
+        # intersecting the padded lists directly would false-positive on
+        # *every* real OSC-only target, since there is no separate osc_binning
+        # parameter distinguishing the two intentions -- caught during real
+        # testing, not by either adversarial review round.
+        _real_rgb_binnings = {
+            key[3] for key in report.instrument_groups()
+            if key[0] == self.telescope and key[1] == self.target and key[2] in RGB_FILTERS
+        }
+        _real_osc_binnings = {
+            key[3] for key in report.instrument_groups()
+            if key[0] == self.telescope and key[1] == self.target and key[2] == OSC_FILTER
+        }
+        _mixed_shape_binnings = _real_rgb_binnings & _real_osc_binnings
+        if _mixed_shape_binnings:
+            raise NotImplementedError(
+                f"{self.telescope}/{self.target} has both full R/G/B and one-shot-colour (Color) data at "
+                f"binning(s) {sorted(_mixed_shape_binnings)} -- combining a mono-RGB and an OSC "
+                "contributor for the same (telescope, binning) is not supported (unverified "
+                "channel-order parity between debayer output and rgbcomp)."
+            )
+
+        # RGB-only/OSC plan (2026-09): try mono first, then OSC, before giving
+        # up -- a telescope registered ONLY as OSC (T02's real case) must not
+        # silently compute profile_tuple=None here while its own
+        # _build_osc_colour_contributor persists a real OSC signature later.
+        # An earlier version of this only tried the mono resolver, which
+        # meant profile_tuple was unconditionally None for T02 every run,
+        # while the (not-yet-existing-at-that-point) OSC signature was real --
+        # `existing.spcc_profile != profile_tuple` would then always compare
+        # true, deleting and rebuilding SPCC's output on every single
+        # invocation, silently defeating resume-safety. Caught by round-1
+        # adversarial review before this ever shipped.
+        try:
+            profile = resolve_instrument_profile(self.telescope)
+            profile_tuple = (profile.mono_sensor, profile.red_filter, profile.green_filter, profile.blue_filter)
+        except UnknownInstrumentError:
+            try:
+                osc_profile = resolve_osc_instrument_profile(self.telescope)
+                profile_tuple = (osc_profile.osc_sensor, osc_profile.osc_filter or "", osc_profile.osc_lpf or "")
+            except UnknownInstrumentError:
+                # Let _build_colour_contributor/_build_osc_colour_contributor
+                # raise this at the right point (inside SPCC, once there is
+                # actually a contributor to fail on) rather than aborting
+                # discovery over a telescope with no registered profile of
+                # either shape; recorded as no profile for signature purposes.
+                profile_tuple = None
+
+        # Slice 2.2: colour discovery is hard-scoped to the caller's own
+        # `telescope` (see module docstring / plan-flats-v3.md fact 11), so
+        # there is exactly one telescope's worth of flat policy (and,
+        # precalibrated-path plan, calibration mode) to infer here, computed
+        # once rather than per-binning.
+        colour_calibration_mode = (self.calibration_mode or {}).get(
+            self.telescope, infer_calibration_mode(report, self.telescope)
+        )
+        colour_flat_policy = (
+            FlatPolicy.SKIP_IF_MISSING
+            if colour_calibration_mode == CalibrationMode.PRECALIBRATED
+            else (self.flat_policy if self.flat_policy is not None else infer_flat_policy(report, self.telescope))
+        )
+
+        self.contributors: list[ColourContributor] = []
+        colour_frame_hashes: dict[str, str] = {}
+        colour_flat_frame_hashes: dict[str, str] = {}
+        for binning in rgb_binnings:
+            contributor_key = f"{self.telescope}_bin{binning}"
+            contrib_dir = contributor_dir(self.final, self.telescope, binning, self.rgb_binning)
+            frame_hash = _colour_contributor_frame_hash(report, self.telescope, self.target, binning)
+            colour_frame_hashes[contributor_key] = frame_hash
+            colour_flat_frame_hash = _colour_contributor_flat_frame_hash(report, self.telescope, binning)
+            colour_flat_frame_hashes[contributor_key] = colour_flat_frame_hash
+
+            # Slice 4.1: same gap as the Luminance loop above, plus SPCC
+            # profile identity -- neither is visible to usable()'s file-only
+            # gate. A frame/pedestal change forces a full rebuild (raw R/G/B
+            # masters and every downstream product); an SPCC-profile-only
+            # change only needs the colour-calibrated output redone, since the
+            # profile has no effect on calibration/stacking. Slice 2.3: the
+            # matched flat set is now also part of what "full rebuild" means --
+            # contributor_stale's own `flat_frame_hash` parameter is passed
+            # explicitly here, not left at its default (see run_signature.py's
+            # ContributorSignature/contributor_stale docstrings for exactly why
+            # a default alone would silently defeat this).
+            needs_full_rebuild = force_masters or (
+                self.old_signature is not None
+                and self.old_signature.contributor_stale(
+                    "colour", contributor_key, frame_hash, self.pedestal, colour_flat_frame_hash
+                )
+            )
+            if needs_full_rebuild:
+                deleted = _clear_colour_contributor_products(
+                    contrib_dir, self.project_dir, report, self.telescope, self.target, binning,
+                    calibration_mode=colour_calibration_mode,
+                )
+                if deleted:
+                    _log(
+                        f"[run ] BIN{binning}: run signature changed -- deleted "
+                        f"{len(deleted)} stale contributor file(s) to force rebuild",
+                        self.notes,
+                    )
+            elif self.old_signature is not None:
+                existing = self.old_signature.colour.get(contributor_key)
+                if existing is not None and existing.spcc_profile != profile_tuple:
+                    _delete_if_exists(
+                        contrib_dir / "rgb_colour_calibrated.fit",
+                        f"BIN{binning}: SPCC profile changed",
+                        self.notes,
+                    )
+
+            builder = ColourContributorBuilder(
+                self.project_dir, contrib_dir, report, self.telescope, self.target, binning,
+                self.ra_hours, self.dec_deg, self.notes,
+            )
+            contributor = builder.build_rgb(
+                flat_policy=colour_flat_policy, calibration_mode=colour_calibration_mode,
+            )
+            if contributor is None:
+                # Logged inside ColourContributorBuilder.build_rgb already
+                # (Slice 3.2: log-and-skip, not abort-the-run).
+                continue
+            self.contributors.append(contributor)
+            if len(rgb_binnings) > 1:
+                _log(
+                    f"       {contributor.key} contributor: {contributor.stack_total} stacked "
+                    "subs across R/G/B (STACKCNT)",
+                    self.notes,
+                )
+
+        # RGB-only/OSC plan (2026-09): one-shot-colour (Color) contributors,
+        # built alongside the mono-RGB ones above into the SAME `contributors`
+        # list -- the mixed-shape guard earlier already ruled out any binning
+        # collision between the two discovery results.
+        #
+        # REAL BUG, fixed 2026-09-16 (found while writing Task 5's Step-0 safety
+        # net tests): `osc_binnings` is the PADDED list from discover_osc_
+        # contributors(), which -- like discover_luminance_contributors() --
+        # always includes the caller's own (telescope, rgb_binning) even with
+        # ZERO real Color/OSC data for this target. Iterating that padded list
+        # unconditionally meant every pure mono-RGB target (M51, NGC 3628,
+        # Abell 31, ...) ran this loop once for its own rgb_binning too, which
+        # clobbered `colour_frame_hashes[contributor_key]` (the SAME key the
+        # mono-RGB loop above just wrote) with an empty-lights OSC hash --
+        # poisoning contributor_stale()'s comparison on every subsequent call
+        # and forcing a full colour-contributor rebuild (raw masters through
+        # SPCC) on EVERY resume, forever, for any target with no real OSC data.
+        # Only iterate binnings with REAL Color data (`_real_osc_binnings`,
+        # already computed above for the mixed-shape guard) -- a real OSC-only
+        # telescope (T02, T68) is unaffected, since its real binning(s) are
+        # already members of that set.
+        for binning in osc_binnings:
+            if binning not in _real_osc_binnings:
+                continue
+            contributor_key = f"{self.telescope}_bin{binning}"
+            contrib_dir = contributor_dir(self.final, self.telescope, binning, self.rgb_binning)
+            frame_hash = _osc_contributor_frame_hash(report, self.telescope, self.target, binning, colour_calibration_mode)
+            colour_frame_hashes[contributor_key] = frame_hash
+            colour_flat_frame_hashes[contributor_key] = ""  # OSC never consults flats -- see build_group_master docstring
+
+            needs_full_rebuild = force_masters or (
+                self.old_signature is not None
+                and self.old_signature.contributor_stale("colour", contributor_key, frame_hash, self.pedestal, "")
+            )
+            if needs_full_rebuild:
+                deleted = _clear_osc_contributor_products(
+                    contrib_dir, self.project_dir, report, self.telescope, self.target, binning,
+                    calibration_mode=colour_calibration_mode,
+                )
+                if deleted:
+                    _log(
+                        f"[run ] BIN{binning}: run signature changed -- deleted "
+                        f"{len(deleted)} stale OSC contributor file(s) to force rebuild",
+                        self.notes,
+                    )
+            elif self.old_signature is not None:
+                existing = self.old_signature.colour.get(contributor_key)
+                if existing is not None and existing.spcc_profile != profile_tuple:
+                    _delete_if_exists(
+                        contrib_dir / "rgb_colour_calibrated.fit",
+                        f"BIN{binning}: SPCC profile changed",
+                        self.notes,
+                    )
+
+            builder = ColourContributorBuilder(
+                self.project_dir, contrib_dir, report, self.telescope, self.target, binning,
+                self.ra_hours, self.dec_deg, self.notes,
+            )
+            contributor = builder.build_osc(calibration_mode=colour_calibration_mode)
+            if contributor is None:
+                continue
+            self.contributors.append(contributor)
+
+        if not self.contributors:
+            raise RuntimeError(
+                f"No usable RGB or OSC colour contributor for {self.telescope}/{self.target} -- every "
+                f"discovered RGB binning ({rgb_binnings}) was missing at least one of "
+                f"Red/Green/Blue, and every discovered OSC binning ({osc_binnings}) had no "
+                f"usable Color data either."
+            )
+
+        # Slice 3.4/3.5's designated reference -- the contributor with the
+        # most STACKCNT -- computed here (not only inside the >1-contributor
+        # branch below) so Slice 4.1's signature can record it even for a
+        # single-contributor run; max() over one element just returns it.
+        self.reference_pos = max(range(len(self.contributors)), key=lambda i: self.contributors[i].stack_total)
+        self.reference = self.contributors[self.reference_pos]
+        if len(self.contributors) > 1:
+            _log(
+                f"[run ] gain/offset reference: {self.reference.key} "
+                f"(STACKCNT {self.reference.stack_total}, highest)",
+                self.notes,
+            )
+
+        # --- Slice 4.1: build this run's signature, diff against whatever was
+        # persisted last time, and delete exactly the downstream files that
+        # diff says are now stale -- BEFORE touching lum_bg.fits/
+        # rgb_reconciled.fit/lrgb_final.fit below, so their own usable() gates
+        # see the deletion and regenerate naturally (see run_signature.py's
+        # module docstring: no second, parallel gating mechanism). This is
+        # the ONLY place STACKCNT and the reference-contributor identity are
+        # known, which is why the reference-flip nuance (STACKCNT changing
+        # enough to pick a different reference with no light frame changing
+        # at all) can only be caught here, post-build -- not in the pre-build
+        # per-contributor checks above.
+        new_signature = RunSignature(
+            stretch_method=self.stretch_method,
+            pedestal=self.pedestal,
+            # RGB-only mode: selected_key is None (no Luminance exists for this
+            # target on any telescope) -- "" mirrors this dataclass's own existing
+            # empty-string sentinel for "nothing selected" (colour_reference's
+            # default, below), and diff_invalidation's real comparison is a plain
+            # equality check that handles "" like any other string: a target
+            # gaining/losing Luminance data between runs correctly registers as a
+            # signature change.
+            luminance_selected=f"{selected_key[0]}_bin{selected_key[1]}" if selected_key else "",
+            luminance={
+                key: ContributorSignature(
+                    key=key, stackcnt=lum_stackcnt[key], frame_hash=lum_frame_hashes[key],
+                    flat_frame_hash=lum_flat_frame_hashes[key],
+                    calibration_mode=lum_calibration_modes[key],
+                )
+                for key in lum_frame_hashes
+            },
+            colour_reference=self.reference.key,
+            colour={
+                c.key: ContributorSignature(
+                    key=c.key, stackcnt=c.stack_total, frame_hash=colour_frame_hashes[c.key],
+                    flat_frame_hash=colour_flat_frame_hashes[c.key],
+                    spcc_profile=profile_tuple,
+                    calibration_mode=colour_calibration_mode.value,
+                )
+                for c in self.contributors
+            },
+        )
+        signature_stages = diff_invalidation(self.old_signature, new_signature)
+        stages_to_invalidate = set(signature_stages)
+        for stage in self.force:
+            stages_to_invalidate |= cascade_from(stage)
+
+        def _reason(stage: str) -> str:
+            # Distinguish an automatic signature-mismatch invalidation from an
+            # explicit force -- both end up in `stages_to_invalidate`, but the
+            # log should say which actually applied here, not always blame the
+            # signature (a force={"final"} call has nothing to do with
+            # stretch_method, for example).
+            via_signature = stage in signature_stages
+            via_force = any(stage in cascade_from(f) for f in self.force)
+            if via_signature and via_force:
+                return "run signature changed, and explicitly forced"
+            if via_signature:
+                return "run signature changed"
+            return "explicitly forced"
+
+        if "masters" in stages_to_invalidate:
+            reason = f"{_reason('masters')} (Luminance-affecting)"
+            _delete_if_exists(self.final / "lum_bg.fits", reason, self.notes)
+            _delete_if_exists(self.final / "rgb_reconciled.fit", reason, self.notes)
+            _delete_if_exists(self.final / "lrgb_final.fit", reason, self.notes)
+        if "reconciled" in stages_to_invalidate:
+            reason = f"{_reason('reconciled')} (colour-affecting)"
+            _delete_if_exists(self.final / "rgb_reconciled.fit", reason, self.notes)
+            _delete_if_exists(self.final / "lrgb_final.fit", reason, self.notes)
+        if "final" in stages_to_invalidate:
+            _delete_if_exists(self.final / "lrgb_final.fit", _reason("final"), self.notes)
+        save_run_signature(new_signature, self.run_signature_path)
+
+        # --- checkpoints for the "masters" stop_after boundary ----------------
+        if not self.is_rgb_only:
+            cp = checkpoint(
+                selected_path, f"01_master_{LUMINANCE_FILTER.lower()}", output_dir=self.checkpoint_dir,
+                linear=True, previous=self.previous, previous_linear=self.previous_linear,
+            )
+            self.result.checkpoints.append(cp)
+            self.previous, self.previous_linear = cp.stats, True
+            _log(cp.summary(), self.notes)
+            save_checkpoints(self.result.checkpoints, self.checkpoints_path)
+
+        primary_calibrated = self.final / "rgb_colour_calibrated.fit"
+        if primary_calibrated.exists():
+            cp = checkpoint(
+                primary_calibrated, "02_primary_rgb_colour_calibrated", output_dir=self.checkpoint_dir,
+                linear=True, previous=self.previous, previous_linear=self.previous_linear,
+            )
+            self.result.checkpoints.append(cp)
+            self.previous, self.previous_linear = cp.stats, True
+            _log(cp.summary(), self.notes)
+            save_checkpoints(self.result.checkpoints, self.checkpoints_path)
 
 
 def run_lrgb(
@@ -178,527 +765,24 @@ def run_lrgb(
     telescope with real Bias+Dark (T24, T21) is unaffected, unconditionally
     RAW_LOCAL.
     """
-    if stop_after is not None and stop_after not in STAGE_ORDER:
-        raise ValueError(f"stop_after={stop_after!r} is not one of {STAGE_ORDER}")
-    force = set(force) if force else set()
-    unknown_force = force - set(STAGE_ORDER)
-    if unknown_force:
-        raise ValueError(f"force={sorted(unknown_force)} names unknown stage(s); valid: {STAGE_ORDER}")
-
-    project_dir = Path(project_dir)
-    out = pipeline_dir(project_dir)
-    final = out / "final"
-    final.mkdir(parents=True, exist_ok=True)
-    result = PipelineResult()
-    notes = result.notes
-
-    checkpoint_dir = out / "checkpoints"
-    checkpoints_path = checkpoint_dir / "checkpoints.json"
-    run_signature_path = out / "run_signature.json"
-    old_signature = load_run_signature(run_signature_path)
-
-    _log(f"=== scanning {project_dir.name} ===", notes)
-    report = scan_session(project_dir)
-
-    # --- luminance masters: every (telescope, binning) that has Luminance
-    # data for this target gets its own master built here -- NOT scoped to
-    # the caller's `telescope`, otherwise a telescope that only ever
-    # contributes colour under the user's colour-only rule (T21 today) would
-    # never get its own Luminance master built under any slice, including
-    # this one. Each user sharing a (telescope, binning) is still merged at
-    # the raw-sub level (see module docstring) -- that combining logic is
-    # per-contributor, unaffected by there now being more than one
-    # contributor.
-    #
-    # Which contributor actually drives the rendered composite is Slice 2's
-    # measured recommendation: every contributor's master gets built (so
-    # every one is on disk and inspectable, even the ones not selected --
-    # per this project's checkpointed-not-black-box design principle), its
-    # median FWHM gets measured and logged, and the sharpest one wins by
-    # default. This is deliberately NOT folded into the build loop below --
-    # the winner can only be known after every candidate has been measured.
-    cal_index = report.calibration_index()
-    lum_contributors = discover_luminance_contributors(report, target, telescope, lum_binning)
-    force_masters = "masters" in force
-
-    lum_candidates: list[LumCandidate] = []
-    lum_frame_hashes: dict[str, str] = {}
-    lum_flat_frame_hashes: dict[str, str] = {}
-    lum_stackcnt: dict[str, int] = {}
-    lum_calibration_modes: dict[str, str] = {}
-    for lum_telescope, contrib_lum_binning in lum_contributors:
-        lum_key = (lum_telescope, contrib_lum_binning)
-        lum_label = f"Luminance-{lum_telescope}-bin{contrib_lum_binning}"
-        contributor_key = f"{lum_telescope}_bin{contrib_lum_binning}"
-        lum_calibration_mode = (calibration_mode or {}).get(
-            lum_telescope, infer_calibration_mode(report, lum_telescope)
-        )
-        lum_calibration_modes[contributor_key] = lum_calibration_mode.value
-        lum_lights, lum_group_name = resolve_lights(
-            report, lum_telescope, target, LUMINANCE_FILTER, contrib_lum_binning,
-            calibration_mode=lum_calibration_mode,
-        )
-        if len(lum_lights) < MIN_SEQUENCE_FRAMES:
-            # Real finding (T72's single NGC 3628 Luminance test sub, first
-            # real precalibrated-path run): Siril refuses to create a
-            # sequence from fewer than MIN_SEQUENCE_FRAMES frames, which
-            # register_and_stack() cannot recover from (an opaque "No
-            # sequence found" crash). A Siril constraint, not specific to
-            # this contributor's calibration mode -- skip-and-log here,
-            # mirroring the established pattern for a colour contributor
-            # missing a filter, rather than crashing the whole run over one
-            # under-populated contributor.
-            _log(
-                f"[skip] {lum_label}: only {len(lum_lights)} light(s), need at least "
-                f"{MIN_SEQUENCE_FRAMES} to form a Siril sequence -- skipping this "
-                "Luminance contributor rather than crashing the whole run",
-                notes,
-            )
-            continue
-        frame_hash = frame_identity_hash([f.path.name for f in lum_lights])
-        lum_frame_hashes[contributor_key] = frame_hash
-
-        # Slice 2.2: the matched flat set for this Luminance contributor,
-        # looked up here (not inside build_group_master -- see its own docstring)
-        # since only the caller has `report` in scope to call flat_index()
-        # on. Slice 2.2's per-telescope FlatPolicy: REQUIRE if this
-        # telescope ships ANY flat at all (T21's real case), else
-        # SKIP_IF_MISSING (T24's), unless `flat_policy` was explicitly
-        # passed to override uniformly for the whole run.
-        #
-        # Precalibrated-path plan: a PRECALIBRATED telescope's flats are
-        # never consulted at all (already flat-corrected upstream, see
-        # stage_precalibrated_lights()'s docstring) -- calling
-        # infer_flat_policy on it would be misleading, since T73 DOES ship
-        # (BIN1-only) flats and would report REQUIRE despite this run path
-        # never using them.
-        if lum_calibration_mode == CalibrationMode.PRECALIBRATED:
-            lum_flat_frames: list = []
-            lum_flat_policy = FlatPolicy.SKIP_IF_MISSING
-        else:
-            lum_flat_frames = report.flat_index().get(
-                (lum_telescope, contrib_lum_binning, LUMINANCE_FILTER), []
-            )
-            lum_flat_policy = (
-                flat_policy if flat_policy is not None else infer_flat_policy(report, lum_telescope)
-            )
-        lum_flat_frame_hash = _flat_frame_hash(lum_flat_frames)
-        lum_flat_frame_hashes[contributor_key] = lum_flat_frame_hash
-
-        # Slice 4.1: usable() only knows whether master_luminance.fit
-        # exists and reads clean -- it has zero notion of which lights
-        # produced it, so a sub silently added/removed/replaced (the
-        # orphaned pre-merge T24-observer1-M51-Luminance-bin1 group is real,
-        # on-disk proof this gap is not hypothetical) would otherwise never
-        # trigger a rebuild. Delete the stale master here so usable()'s own
-        # skip-if-present gate inside build_group_master naturally regenerates it.
-        # Slice 2.3: `flat_frame_hash` is now also passed here -- omitting
-        # it (or leaving contributor_stale's own parameter at its default)
-        # would silently defeat the whole point of tracking it at all, see
-        # ContributorSignature/contributor_stale in run_signature.py.
-        stale = force_masters or (
-            old_signature is not None
-            and old_signature.contributor_stale(
-                "luminance", contributor_key, frame_hash, pedestal, lum_flat_frame_hash
-            )
-        )
-        if stale:
-            master_path = pipeline_dir(project_dir) / lum_group_name / "lights" / f"master_{LUMINANCE_FILTER.lower()}.fit"
-            _delete_if_exists(master_path, f"{lum_label}: run signature changed", notes)
-
-        lum_users = sorted({f.user for f in lum_lights})
-        if len(lum_users) > 1:
-            _log(f"[run ] combining Luminance across users: {', '.join(lum_users)}", notes)
-        lum_master_path = build_group_master(
-            project_dir, lum_lights, cal_index, lum_group_name, LUMINANCE_FILTER,
-            lum_telescope, contrib_lum_binning, ra_hours, dec_deg, notes,
-            flat_frames=lum_flat_frames, flat_policy=lum_flat_policy, pedestal=pedestal,
-            calibration_mode=lum_calibration_mode,
-        )
-        result.masters[lum_label] = lum_master_path
-        lum_stackcnt[contributor_key] = int(fits.getheader(lum_master_path).get("STACKCNT", len(lum_lights)))
-        fwhm_arcsec = contributor_fwhm_arcsec(lum_master_path, notes, label=lum_label)
-        if fwhm_arcsec is not None:
-            _log(f"       {lum_label}: median FWHM {fwhm_arcsec:.2f}\"", notes)
-        lum_candidates.append((lum_key, lum_master_path, fwhm_arcsec))
-
-    # RGB-only mode (2026-09): no Luminance data exists for this target on ANY
-    # telescope -- lum_candidates stays empty when discover_luminance_contributors
-    # found nothing real to build (the build loop's MIN_SEQUENCE_FRAMES skip above
-    # can also leave it empty for a telescope with too few Luminance lights).
-    # "Zero Luminance masters could be built for this target, anywhere" is a
-    # purely structural, unambiguous fact once the build loop has run -- unlike
-    # CalibrationMode's own auto-detection (a judgement call about degraded vs
-    # intentional data), there is no real target where "some but deliberately
-    # excluded" Luminance would misfire on this: select_luminance_source's own
-    # sharpest-wins rule already handles "built but not chosen"; empty only
-    # happens when literally nothing could be built. Real case: Abell 6 and
-    # HFG1 (T02), a one-shot-colour delivery with no Luminance filter at all.
-    is_rgb_only = not lum_candidates
-    if is_rgb_only:
-        if lum_source is not None:
-            raise ValueError(
-                f"lum_source={lum_source!r} given but no Luminance data exists for "
-                f"{target} on any telescope -- nothing to select from"
-            )
-        _log(f"[run ] no Luminance data found for {target} on any telescope -- RGB-only mode", notes)
-        selected_key, selected_path, selected_fwhm = None, None, None
-    else:
-        selected_key, selected_path, selected_fwhm = select_luminance_source(
-            lum_candidates, lum_source, (telescope, lum_binning), notes
-        )
-        result.masters[LUMINANCE_FILTER] = selected_path
-
-    # --- colour contributors: one per binning that has a full R/G/B set,
-    # for this telescope+target. rgb_binning is the PRIMARY contributor and
-    # keeps the legacy top-level file paths; anything else discovered is an
-    # additional contributor reconciled in at the master level. ------------
-    rgb_binnings = sorted(
-        {
-            key[3]
-            for key in report.instrument_groups()
-            if key[0] == telescope and key[1] == target and key[2] in RGB_FILTERS
-        }
+    orchestrator = LRGBOrchestrator(
+        project_dir, telescope, target, ra_hours, dec_deg,
+        lum_binning=lum_binning, rgb_binning=rgb_binning, stretch_method=stretch_method,
+        lum_source=lum_source, pedestal=pedestal, stop_after=stop_after, force=force,
+        flat_policy=flat_policy, calibration_mode=calibration_mode,
     )
-    if rgb_binning not in rgb_binnings:
-        rgb_binnings = [rgb_binning, *rgb_binnings]
+    orchestrator._build_masters()
 
-    # RGB-only/OSC plan (2026-09): one-shot-colour (Color/OSC) binnings for
-    # this telescope+target, symmetric with the RGB discovery above --
-    # deliberately telescope-scoped the same way (discover_osc_contributors
-    # itself searches every telescope, mirroring discover_luminance_
-    # contributors, but this caller only ever builds its OWN telescope's
-    # OSC contributors, matching RGB discovery's existing, documented
-    # hard-scoping -- broadening either one is a separate, later concern).
-    osc_binnings = sorted(
-        {
-            b for (osc_telescope, b) in discover_osc_contributors(report, target, telescope, rgb_binning)
-            if osc_telescope == telescope
-        }
-    )
-    # Mixed OSC+mono-RGB reconciliation is deliberately unsupported (see
-    # plan-rgb-only-mode.md ??7): channel-order parity between Siril's
-    # -debayer output and rgbcomp's R-then-G-then-B convention has never
-    # been verified, and a binning with BOTH real shapes of colour data
-    # would produce two ColourContributors with the IDENTICAL `.key` -- a
-    # real dict-key collision that would silently corrupt colour_frame_
-    # hashes/colour_flat_frame_hashes/new_signature.colour construction
-    # below. Caught HERE, at contributor-collection time, before any
-    # build or signature construction -- not deferred to reconciliation,
-    # which round-2 adversarial review found is already too late to
-    # prevent the corruption.
-    #
-    # Checked against REAL data presence (report.instrument_groups()
-    # directly), NOT the padded `rgb_binnings`/`osc_binnings` lists above --
-    # both of those unconditionally prepend the caller's own `rgb_binning`
-    # even with zero real data of that shape (mirrors discover_luminance_
-    # contributors' own "always include caller's combo" convention), so
-    # intersecting the padded lists directly would false-positive on
-    # *every* real OSC-only target, since there is no separate osc_binning
-    # parameter distinguishing the two intentions -- caught during real
-    # testing, not by either adversarial review round.
-    _real_rgb_binnings = {
-        key[3] for key in report.instrument_groups()
-        if key[0] == telescope and key[1] == target and key[2] in RGB_FILTERS
-    }
-    _real_osc_binnings = {
-        key[3] for key in report.instrument_groups()
-        if key[0] == telescope and key[1] == target and key[2] == OSC_FILTER
-    }
-    _mixed_shape_binnings = _real_rgb_binnings & _real_osc_binnings
-    if _mixed_shape_binnings:
-        raise NotImplementedError(
-            f"{telescope}/{target} has both full R/G/B and one-shot-colour (Color) data at "
-            f"binning(s) {sorted(_mixed_shape_binnings)} -- combining a mono-RGB and an OSC "
-            "contributor for the same (telescope, binning) is not supported (unverified "
-            "channel-order parity between debayer output and rgbcomp)."
-        )
-
-    # RGB-only/OSC plan (2026-09): try mono first, then OSC, before giving
-    # up -- a telescope registered ONLY as OSC (T02's real case) must not
-    # silently compute profile_tuple=None here while its own
-    # _build_osc_colour_contributor persists a real OSC signature later.
-    # An earlier version of this only tried the mono resolver, which
-    # meant profile_tuple was unconditionally None for T02 every run,
-    # while the (not-yet-existing-at-that-point) OSC signature was real --
-    # `existing.spcc_profile != profile_tuple` would then always compare
-    # true, deleting and rebuilding SPCC's output on every single
-    # invocation, silently defeating resume-safety. Caught by round-1
-    # adversarial review before this ever shipped.
-    try:
-        profile = resolve_instrument_profile(telescope)
-        profile_tuple = (profile.mono_sensor, profile.red_filter, profile.green_filter, profile.blue_filter)
-    except UnknownInstrumentError:
-        try:
-            osc_profile = resolve_osc_instrument_profile(telescope)
-            profile_tuple = (osc_profile.osc_sensor, osc_profile.osc_filter or "", osc_profile.osc_lpf or "")
-        except UnknownInstrumentError:
-            # Let _build_colour_contributor/_build_osc_colour_contributor
-            # raise this at the right point (inside SPCC, once there is
-            # actually a contributor to fail on) rather than aborting
-            # discovery over a telescope with no registered profile of
-            # either shape; recorded as no profile for signature purposes.
-            profile_tuple = None
-
-    # Slice 2.2: colour discovery is hard-scoped to the caller's own
-    # `telescope` (see module docstring / plan-flats-v3.md fact 11), so
-    # there is exactly one telescope's worth of flat policy (and,
-    # precalibrated-path plan, calibration mode) to infer here, computed
-    # once rather than per-binning.
-    colour_calibration_mode = (calibration_mode or {}).get(
-        telescope, infer_calibration_mode(report, telescope)
-    )
-    colour_flat_policy = (
-        FlatPolicy.SKIP_IF_MISSING
-        if colour_calibration_mode == CalibrationMode.PRECALIBRATED
-        else (flat_policy if flat_policy is not None else infer_flat_policy(report, telescope))
-    )
-
-    contributors: list[ColourContributor] = []
-    colour_frame_hashes: dict[str, str] = {}
-    colour_flat_frame_hashes: dict[str, str] = {}
-    for binning in rgb_binnings:
-        contributor_key = f"{telescope}_bin{binning}"
-        contrib_dir = contributor_dir(final, telescope, binning, rgb_binning)
-        frame_hash = _colour_contributor_frame_hash(report, telescope, target, binning)
-        colour_frame_hashes[contributor_key] = frame_hash
-        colour_flat_frame_hash = _colour_contributor_flat_frame_hash(report, telescope, binning)
-        colour_flat_frame_hashes[contributor_key] = colour_flat_frame_hash
-
-        # Slice 4.1: same gap as the Luminance loop above, plus SPCC
-        # profile identity -- neither is visible to usable()'s file-only
-        # gate. A frame/pedestal change forces a full rebuild (raw R/G/B
-        # masters and every downstream product); an SPCC-profile-only
-        # change only needs the colour-calibrated output redone, since the
-        # profile has no effect on calibration/stacking. Slice 2.3: the
-        # matched flat set is now also part of what "full rebuild" means --
-        # contributor_stale's own `flat_frame_hash` parameter is passed
-        # explicitly here, not left at its default (see run_signature.py's
-        # ContributorSignature/contributor_stale docstrings for exactly why
-        # a default alone would silently defeat this).
-        needs_full_rebuild = force_masters or (
-            old_signature is not None
-            and old_signature.contributor_stale(
-                "colour", contributor_key, frame_hash, pedestal, colour_flat_frame_hash
-            )
-        )
-        if needs_full_rebuild:
-            deleted = _clear_colour_contributor_products(
-                contrib_dir, project_dir, report, telescope, target, binning,
-                calibration_mode=colour_calibration_mode,
-            )
-            if deleted:
-                _log(
-                    f"[run ] BIN{binning}: run signature changed -- deleted "
-                    f"{len(deleted)} stale contributor file(s) to force rebuild",
-                    notes,
-                )
-        elif old_signature is not None:
-            existing = old_signature.colour.get(contributor_key)
-            if existing is not None and existing.spcc_profile != profile_tuple:
-                _delete_if_exists(
-                    contrib_dir / "rgb_colour_calibrated.fit",
-                    f"BIN{binning}: SPCC profile changed",
-                    notes,
-                )
-
-        builder = ColourContributorBuilder(
-            project_dir, contrib_dir, report, telescope, target, binning, ra_hours, dec_deg, notes,
-        )
-        contributor = builder.build_rgb(
-            flat_policy=colour_flat_policy, calibration_mode=colour_calibration_mode,
-        )
-        if contributor is None:
-            # Logged inside ColourContributorBuilder.build_rgb already
-            # (Slice 3.2: log-and-skip, not abort-the-run).
-            continue
-        contributors.append(contributor)
-        if len(rgb_binnings) > 1:
-            _log(
-                f"       {contributor.key} contributor: {contributor.stack_total} stacked "
-                "subs across R/G/B (STACKCNT)",
-                notes,
-            )
-
-    # RGB-only/OSC plan (2026-09): one-shot-colour (Color) contributors,
-    # built alongside the mono-RGB ones above into the SAME `contributors`
-    # list -- the mixed-shape guard earlier already ruled out any binning
-    # collision between the two discovery results.
-    #
-    # REAL BUG, fixed 2026-09-16 (found while writing Task 5's Step-0 safety
-    # net tests): `osc_binnings` is the PADDED list from discover_osc_
-    # contributors(), which -- like discover_luminance_contributors() --
-    # always includes the caller's own (telescope, rgb_binning) even with
-    # ZERO real Color/OSC data for this target. Iterating that padded list
-    # unconditionally meant every pure mono-RGB target (M51, NGC 3628,
-    # Abell 31, ...) ran this loop once for its own rgb_binning too, which
-    # clobbered `colour_frame_hashes[contributor_key]` (the SAME key the
-    # mono-RGB loop above just wrote) with an empty-lights OSC hash --
-    # poisoning contributor_stale()'s comparison on every subsequent call
-    # and forcing a full colour-contributor rebuild (raw masters through
-    # SPCC) on EVERY resume, forever, for any target with no real OSC data.
-    # Only iterate binnings with REAL Color data (`_real_osc_binnings`,
-    # already computed above for the mixed-shape guard) -- a real OSC-only
-    # telescope (T02, T68) is unaffected, since its real binning(s) are
-    # already members of that set.
-    for binning in osc_binnings:
-        if binning not in _real_osc_binnings:
-            continue
-        contributor_key = f"{telescope}_bin{binning}"
-        contrib_dir = contributor_dir(final, telescope, binning, rgb_binning)
-        frame_hash = _osc_contributor_frame_hash(report, telescope, target, binning, colour_calibration_mode)
-        colour_frame_hashes[contributor_key] = frame_hash
-        colour_flat_frame_hashes[contributor_key] = ""  # OSC never consults flats -- see build_group_master docstring
-
-        needs_full_rebuild = force_masters or (
-            old_signature is not None
-            and old_signature.contributor_stale("colour", contributor_key, frame_hash, pedestal, "")
-        )
-        if needs_full_rebuild:
-            deleted = _clear_osc_contributor_products(
-                contrib_dir, project_dir, report, telescope, target, binning,
-                calibration_mode=colour_calibration_mode,
-            )
-            if deleted:
-                _log(
-                    f"[run ] BIN{binning}: run signature changed -- deleted "
-                    f"{len(deleted)} stale OSC contributor file(s) to force rebuild",
-                    notes,
-                )
-        elif old_signature is not None:
-            existing = old_signature.colour.get(contributor_key)
-            if existing is not None and existing.spcc_profile != profile_tuple:
-                _delete_if_exists(
-                    contrib_dir / "rgb_colour_calibrated.fit",
-                    f"BIN{binning}: SPCC profile changed",
-                    notes,
-                )
-
-        builder = ColourContributorBuilder(
-            project_dir, contrib_dir, report, telescope, target, binning, ra_hours, dec_deg, notes,
-        )
-        contributor = builder.build_osc(calibration_mode=colour_calibration_mode)
-        if contributor is None:
-            continue
-        contributors.append(contributor)
-
-    if not contributors:
-        raise RuntimeError(
-            f"No usable RGB or OSC colour contributor for {telescope}/{target} -- every "
-            f"discovered RGB binning ({rgb_binnings}) was missing at least one of "
-            f"Red/Green/Blue, and every discovered OSC binning ({osc_binnings}) had no "
-            f"usable Color data either."
-        )
-
-    # Slice 3.4/3.5's designated reference -- the contributor with the
-    # most STACKCNT -- computed here (not only inside the >1-contributor
-    # branch below) so Slice 4.1's signature can record it even for a
-    # single-contributor run; max() over one element just returns it.
-    reference_pos = max(range(len(contributors)), key=lambda i: contributors[i].stack_total)
-    reference = contributors[reference_pos]
-    if len(contributors) > 1:
-        _log(
-            f"[run ] gain/offset reference: {reference.key} "
-            f"(STACKCNT {reference.stack_total}, highest)",
-            notes,
-        )
-
-    # --- Slice 4.1: build this run's signature, diff against whatever was
-    # persisted last time, and delete exactly the downstream files that
-    # diff says are now stale -- BEFORE touching lum_bg.fits/
-    # rgb_reconciled.fit/lrgb_final.fit below, so their own usable() gates
-    # see the deletion and regenerate naturally (see run_signature.py's
-    # module docstring: no second, parallel gating mechanism). This is
-    # the ONLY place STACKCNT and the reference-contributor identity are
-    # known, which is why the reference-flip nuance (STACKCNT changing
-    # enough to pick a different reference with no light frame changing
-    # at all) can only be caught here, post-build -- not in the pre-build
-    # per-contributor checks above.
-    new_signature = RunSignature(
-        stretch_method=stretch_method,
-        pedestal=pedestal,
-        # RGB-only mode: selected_key is None (no Luminance exists for this
-        # target on any telescope) -- "" mirrors this dataclass's own existing
-        # empty-string sentinel for "nothing selected" (colour_reference's
-        # default, below), and diff_invalidation's real comparison is a plain
-        # equality check that handles "" like any other string: a target
-        # gaining/losing Luminance data between runs correctly registers as a
-        # signature change.
-        luminance_selected=f"{selected_key[0]}_bin{selected_key[1]}" if selected_key else "",
-        luminance={
-            key: ContributorSignature(
-                key=key, stackcnt=lum_stackcnt[key], frame_hash=lum_frame_hashes[key],
-                flat_frame_hash=lum_flat_frame_hashes[key],
-                calibration_mode=lum_calibration_modes[key],
-            )
-            for key in lum_frame_hashes
-        },
-        colour_reference=reference.key,
-        colour={
-            c.key: ContributorSignature(
-                key=c.key, stackcnt=c.stack_total, frame_hash=colour_frame_hashes[c.key],
-                flat_frame_hash=colour_flat_frame_hashes[c.key],
-                spcc_profile=profile_tuple,
-                calibration_mode=colour_calibration_mode.value,
-            )
-            for c in contributors
-        },
-    )
-    signature_stages = diff_invalidation(old_signature, new_signature)
-    stages_to_invalidate = set(signature_stages)
-    for stage in force:
-        stages_to_invalidate |= cascade_from(stage)
-
-    def _reason(stage: str) -> str:
-        # Distinguish an automatic signature-mismatch invalidation from an
-        # explicit force -- both end up in `stages_to_invalidate`, but the
-        # log should say which actually applied here, not always blame the
-        # signature (a force={"final"} call has nothing to do with
-        # stretch_method, for example).
-        via_signature = stage in signature_stages
-        via_force = any(stage in cascade_from(f) for f in force)
-        if via_signature and via_force:
-            return "run signature changed, and explicitly forced"
-        if via_signature:
-            return "run signature changed"
-        return "explicitly forced"
-
-    if "masters" in stages_to_invalidate:
-        reason = f"{_reason('masters')} (Luminance-affecting)"
-        _delete_if_exists(final / "lum_bg.fits", reason, notes)
-        _delete_if_exists(final / "rgb_reconciled.fit", reason, notes)
-        _delete_if_exists(final / "lrgb_final.fit", reason, notes)
-    if "reconciled" in stages_to_invalidate:
-        reason = f"{_reason('reconciled')} (colour-affecting)"
-        _delete_if_exists(final / "rgb_reconciled.fit", reason, notes)
-        _delete_if_exists(final / "lrgb_final.fit", reason, notes)
-    if "final" in stages_to_invalidate:
-        _delete_if_exists(final / "lrgb_final.fit", _reason("final"), notes)
-    save_run_signature(new_signature, run_signature_path)
-
-    # --- checkpoints for the "masters" stop_after boundary ----------------
-    previous = None
-    previous_linear: bool | None = None
-    if not is_rgb_only:
-        cp = checkpoint(
-            selected_path, f"01_master_{LUMINANCE_FILTER.lower()}", output_dir=checkpoint_dir,
-            linear=True, previous=previous, previous_linear=previous_linear,
-        )
-        result.checkpoints.append(cp)
-        previous, previous_linear = cp.stats, True
-        _log(cp.summary(), notes)
-        save_checkpoints(result.checkpoints, checkpoints_path)
-
-    primary_calibrated = final / "rgb_colour_calibrated.fit"
-    if primary_calibrated.exists():
-        cp = checkpoint(
-            primary_calibrated, "02_primary_rgb_colour_calibrated", output_dir=checkpoint_dir,
-            linear=True, previous=previous, previous_linear=previous_linear,
-        )
-        result.checkpoints.append(cp)
-        previous, previous_linear = cp.stats, True
-        _log(cp.summary(), notes)
-        save_checkpoints(result.checkpoints, checkpoints_path)
+    result = orchestrator.result
+    notes = orchestrator.notes
+    final = orchestrator.final
+    is_rgb_only = orchestrator.is_rgb_only
+    contributors = orchestrator.contributors
+    reference = orchestrator.reference
+    reference_pos = orchestrator.reference_pos
+    checkpoint_dir = orchestrator.checkpoint_dir
+    checkpoints_path = orchestrator.checkpoints_path
+    previous, previous_linear = orchestrator.previous, orchestrator.previous_linear
 
     if stop_after == "masters":
         masters_note = (
