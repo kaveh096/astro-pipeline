@@ -4,31 +4,26 @@ Living project roadmap. Update this file (don't create a new one) whenever
 priorities change, a task finishes, or a decision gets made. This is the
 first thing a new session should read after `README.md`/`SKILL.md`.
 
-Last updated: 2026-09-17. Current `main` HEAD: `6fc7d64` (1 commit ahead
-of `origin/main` -- **not yet pushed**, see "Immediate next step" below).
-The prior handoff's "25 commits ahead, not pushed" was stale -- those 25
-were already pushed by the time this session picked the work back up;
-only Step 11 (below) is new since then.
+Last updated: 2026-09-17. Current `main` HEAD: `2e004c4`, pushed and
+up to date with `origin/main`.
 
 ---
 
 ## 1. Immediate next step (do this first)
 
-1. Push everything: `git push origin main` (1 commit, nothing destructive
-   -- this is a fast-forward, no force needed. Verify with `git status`/
-   `git log origin/main..main` first as usual before pushing).
-2. Resume **Task 5** (the OOP refactor) at **Step 12** of
-   `docs/task5-oop-refactor-plan.md` -- the biggest, highest-risk step in
-   the plan (`lrgb_orchestrator.py`). Read that file in full, including
-   its inline `[Round-1/Round-2 review]` correction annotations (authoritative
-   over the plan's original base text wherever they disagree) and
-   especially "Open questions" item 3 (the `self.` state inventory for
-   `LRGBOrchestrator`, wrong twice already across 2 review rounds) before
-   touching any code. Steps 0-11 are done (see Section 2 below); Steps
-   12-17 remain. Consider a fresh, independent adversarial review pass
-   before/after Step 12 specifically, the same way the original plan was
-   reviewed -- see the plan's own recommendation.
-3. Full test suite baseline to hold after every step: **288 passed, 35
+1. Resume **Task 5** (the OOP refactor) at **Step 13** of
+   `docs/task5-oop-refactor-plan.md` -- `narrowband_orchestrator.py`
+   (`run_narrowband` stays a plain function, no forced base class with
+   `LRGBOrchestrator` -- see the plan's own "deliberate non-uniformity"
+   reasoning in Section 1). Steps 0-12 are done (see Section 2 below,
+   and `docs/task5-step12-substeps.md` for Step 12's own detailed
+   sub-plan and 3 rounds of adversarial review); Steps 13-17 remain.
+   Step 13 is much smaller/lower-risk than Step 12 -- a single ~180-line
+   function move, no class introduction -- but still re-derive its own
+   monkeypatch/import-migration inventory from the real current code
+   rather than trusting Step 12's numbers, which are already stale for a
+   different function.
+2. Full test suite baseline to hold after every step: **288 passed, 35
    skipped, 0 failed** (`.venv/Scripts/python.exe -m pytest tests/ -q`,
    ~5-8 minutes). If this number ever changes unexpectedly, stop and
    understand why before continuing -- don't assume it's fine.
@@ -195,22 +190,35 @@ Siril/GraXpert smoke tests + broad fast mocked coverage.
   far: import-and-use-unchanged inside `run_lrgb`, no call-site updates
   needed.
 
-`pipeline.py`: 2478 -> ~1200 lines so far (was 1370 after Step 10; Step 11
-removed another ~120).
+`pipeline.py`: 2478 -> ~1200 lines before Step 12 (was 1370 after Step 10;
+Step 11 removed another ~120); Step 12 moved `run_lrgb` (~844 lines) out
+entirely, into the new `lrgb_orchestrator.py` (~1020 lines including the
+`LRGBOrchestrator` class).
 
-**Remaining (Steps 12-17), per the plan document:**
-- Step 12: `lrgb_orchestrator.py` -- the biggest single step (~800 lines,
-  `run_lrgb` -> an `LRGBOrchestrator` class with `_build_masters()`/
-  `_reconcile()`/`_finalize()` methods). The plan recommends splitting
-  this into 4 sub-commits (12a-d) if the diff proves unreviewable in one
-  piece. **Read the plan's "Open questions" section 3 and its round-2
-  correction carefully before starting this step** -- the required
-  shared-state inventory for the orchestrator class (what becomes
-  `self.` attributes) was wrong twice already across 2 review rounds
-  (missing `previous`/`previous_linear`/`final`/`target`/`stretch_method`
-  after round 1, then `reference_pos` too after round 2) -- don't trust
-  any single version of that list without re-deriving it from the real
-  checkpoint-chain code yourself.
+- Step 12 (`e68cee0` sub-plan + review docs, `1cbfa41`/`bd0cdb9`/`c66e5ae`/
+  `758415e`/`2e004c4` code): `lrgb_orchestrator.py` -- the biggest single
+  step, done as 5 sub-commits per its own dedicated sub-plan
+  (`docs/task5-step12-substeps.md`, independently re-derived and put
+  through 3 rounds of fresh adversarial review before any code moved --
+  see that file's own review-outcome sections for what each round caught,
+  including a critical `PipelineResult` circular-import that survived the
+  original plan's 2 rounds entirely). Sub-commits: 12a-0 (extracted
+  `pipeline_result.py`, pre-empting the cycle), 12a (moved `run_lrgb`
+  verbatim; caught one real gap --  `export` was never classified in
+  either plan document's import migration and was missing from the new
+  file, causing 3 immediate, loud test failures, fixed same-commit), 12b
+  (introduced `LRGBOrchestrator`, extracted `_build_masters()`), 12c
+  (extracted `_reconcile()`), 12d (extracted `_finalize()`, introduced
+  `run()`, collapsed `run_lrgb()` to a thin construct-and-run wrapper --
+  confirmed via `inspect.signature()` byte-for-byte identical to the
+  pre-Step-12 signature). Final `self.` state inventory: 27 attributes (14
+  constructor params + 13 computed cross-phase attributes, one of which --
+  `rgb_reconciled` -- neither of the original plan's 2 review rounds had
+  caught either). Full suite green after every sub-commit, wall-clock
+  unchanged throughout (~8 min), all 5 skill scripts smoke-tested after
+  each.
+
+**Remaining (Steps 13-17), per the plan document:**
 - Step 13: `narrowband_orchestrator.py` (`run_narrowband` -- stays a
   plain function, no forced base class with `LRGBOrchestrator`).
 - Step 14: resolve the facade-vs-update-callers question for whatever's
