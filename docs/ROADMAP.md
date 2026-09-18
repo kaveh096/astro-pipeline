@@ -4,29 +4,42 @@ Living project roadmap. Update this file (don't create a new one) whenever
 priorities change, a task finishes, or a decision gets made. This is the
 first thing a new session should read after `README.md`/`SKILL.md`.
 
-Last updated: 2026-09-17. Current `main` HEAD: `2e004c4`, pushed and
+Last updated: 2026-09-17. Current `main` HEAD: `3688de0`, pushed and
 up to date with `origin/main`.
 
 ---
 
 ## 1. Immediate next step (do this first)
 
-1. Resume **Task 5** (the OOP refactor) at **Step 13** of
-   `docs/task5-oop-refactor-plan.md` -- `narrowband_orchestrator.py`
-   (`run_narrowband` stays a plain function, no forced base class with
-   `LRGBOrchestrator` -- see the plan's own "deliberate non-uniformity"
-   reasoning in Section 1). Steps 0-12 are done (see Section 2 below,
-   and `docs/task5-step12-substeps.md` for Step 12's own detailed
-   sub-plan and 3 rounds of adversarial review); Steps 13-17 remain.
-   Step 13 is much smaller/lower-risk than Step 12 -- a single ~180-line
-   function move, no class introduction -- but still re-derive its own
-   monkeypatch/import-migration inventory from the real current code
-   rather than trusting Step 12's numbers, which are already stale for a
-   different function.
-2. Full test suite baseline to hold after every step: **288 passed, 35
-   skipped, 0 failed** (`.venv/Scripts/python.exe -m pytest tests/ -q`,
-   ~5-8 minutes). If this number ever changes unexpectedly, stop and
-   understand why before continuing -- don't assume it's fine.
+**Task 5 (the OOP refactor) is done except for Step 17**, the final,
+human-only gate:
+
+1. **Step 17 -- manual real-data verification**, on Kaveh's own machine
+   only (cannot be done from this dev environment: the M51 "Desktop"
+   fixture is genuinely absent here, confirmed repeatedly across this
+   whole task). With `ASTRO_PIPELINE_DESKTOP_DIR`/
+   `ASTRO_PIPELINE_ITELESCOPE_DIR` configured (copy
+   `tests/local_paths.py.example` to `tests/local_paths.py` and fill in
+   real paths if not already done), run the full suite and confirm:
+   - no fixture-gated test newly fails or newly skips versus the 288/35
+     baseline;
+   - `test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output`'s
+     SHA-256 byte-identity check still passes -- the actual
+     "did 17 steps of refactoring change a single output byte" oracle for
+     the whole task.
+   This is the one check nothing else in this task substitutes for.
+2. Once Step 17 passes (or if a real discrepancy shows up and needs
+   triage), Task 5 is fully closed out. At that point, revisit Section 4
+   below (deferred work) and Section 6 (previously-rejected ideas worth
+   re-asking about) for what to prioritize next -- both have gone
+   unrevisited for a while and this task's own convention is to
+   periodically re-question them rather than assume they're settled.
+3. Full test suite baseline to hold: **288 passed, 35 skipped, 0 failed**
+   (`.venv/Scripts/python.exe -m pytest tests/ -q`, ~5-8 minutes; timing
+   varied 3.5-8 minutes across this session's own runs with identical
+   pass/skip counts each time -- confirmed as ordinary system load
+   variance, not a regression signal, so don't over-read wall-clock alone
+   without also checking the skip count matches).
 
 ---
 
@@ -218,23 +231,45 @@ entirely, into the new `lrgb_orchestrator.py` (~1020 lines including the
   unchanged throughout (~8 min), all 5 skill scripts smoke-tested after
   each.
 
-**Remaining (Steps 13-17), per the plan document:**
-- Step 13: `narrowband_orchestrator.py` (`run_narrowband` -- stays a
-  plain function, no forced base class with `LRGBOrchestrator`).
-- Step 14: resolve the facade-vs-update-callers question for whatever's
-  left importing old names from `pipeline.py` (the plan recommends
-  updating callers directly, not a permanent re-export facade).
-- Step 15 (optional): split `reconciliation.py` into a package
-  (reprojection / coverage-cropping / gain-offset -- 3 genuinely
-  independent algorithms, no external caller needs to change).
-- Step 16 (optional): split `background_color.py` into
-  `color_calibration.py` (SPCC) + `background_extraction.py` (GraXpert).
-- Step 17: **manual real-data verification** on Kaveh's own machine
-  (`ASTRO_PIPELINE_DESKTOP_DIR`/`ASTRO_PIPELINE_ITELESCOPE_DIR`
-  configured) -- the actual final behavior-preservation gate, especially
-  the SHA-256 byte-identity check in
-  `test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output`.
-  This can only run on one machine; it is not a CI-able step.
+- Step 13 (`ff9941f`): `narrowband_orchestrator.py` -- `run_narrowband`
+  (~160 lines) moved out as a plain function (no forced base class with
+  `LRGBOrchestrator`, per the plan's own non-uniformity call). Re-derived
+  its own import-migration inventory fresh rather than reusing Step 12's
+  (a different function's imports don't transfer) -- `pipeline.py` shrank
+  to a pure 112-line re-export facade with no function bodies of its own.
+  Retargeted 3 monkeypatch sites; also caught and fixed 2 latent breaks
+  Step 12 had left in `run_lrgb` tests once `pipeline.py`'s import block
+  finished shrinking (`pipeline_module.pipeline_dir`/`._delete_if_exists`
+  references that were never in scope for Step 12's own retargeting).
+- Step 14 (`a3b96bc`): resolved the facade-vs-update-callers question --
+  updated all 7 external files (`scripts/run_m51.py`, 4 skill scripts, 2
+  test files) to import from real module homes instead of `pipeline.py`,
+  then **deleted `pipeline.py` entirely** (confirmed via repo-wide grep
+  that nothing referenced it anymore). Its module docstring (real
+  institutional knowledge, not implementation detail) moved into
+  `lrgb_orchestrator.py`'s own docstring rather than being lost; one stale
+  reference (`_build_colour_contributor`, renamed at Step 10) fixed along
+  the way.
+- Step 15 (optional, `3b0741e`): split `reconciliation.py` into a package
+  (`reproject.py`/`coverage.py`/`gain_offset.py`, sharing only
+  `ReprojectionError`) with an `__init__.py` re-exporting everything --
+  genuinely zero-caller-impact, confirmed by grep before touching
+  anything.
+- Step 16 (optional, `3688de0`): split `background_color.py` into
+  `color_calibration.py` (SPCC) + `background_extraction.py` (GraXpert),
+  keeping `background_color.py` itself as a deliberate permanent facade
+  (unlike `pipeline.py`'s case) -- its "Stages 6-7" orchestration concept
+  is still real and its module name isn't being deprecated, so real
+  external callers (skill/run_post_process.py, colour_contributor.py,
+  lrgb_orchestrator.py) needed zero changes.
+
+**Remaining: Step 17 only** -- **manual real-data verification** on
+Kaveh's own machine (`ASTRO_PIPELINE_DESKTOP_DIR`/
+`ASTRO_PIPELINE_ITELESCOPE_DIR` configured) -- the actual final
+behavior-preservation gate, especially the SHA-256 byte-identity check in
+`test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output`. This
+can only run on one machine; it is not a CI-able step, and nothing in this
+session could substitute for it.
 
 **Risks to keep re-checking at every remaining step** (full detail in the
 plan doc's Section 3): monkeypatch-target drift (a moved function's test
