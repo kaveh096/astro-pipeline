@@ -827,6 +827,97 @@ class LRGBOrchestrator:
         _log(cp.summary(), self.notes)
         save_checkpoints(self.result.checkpoints, self.checkpoints_path)
 
+    def _finalize(self) -> None:
+        """Stretch + compose + export, checkpoint 05. Mutates
+        `self.result.composite_path`/`self.result.export_result` and
+        appends the final checkpoint.
+        """
+        # --- stretch + composition --------------------------------------------
+        # RGB-only: stretch the reconciled RGB alone, no rgbcomp -lum= (no L to
+        # composite onto). Output named "rgb_final" (not "lrgb_final") -- an
+        # RGB-only run producing a file literally named "lrgb" would be
+        # misleading on disk.
+        composite_name = "rgb_final" if self.is_rgb_only else "lrgb_final"
+        composite = self.final / f"{composite_name}.fit"
+        if not usable(composite, self.notes):
+            if self.is_rgb_only:
+                rgb_in = self.final / "rgb_for_compose.fit"
+                shutil.copy2(self.rgb_reconciled, rgb_in)
+                _log(f"[run ] stretch ({self.stretch_method}), RGB-only (no Luminance to compose)", self.notes)
+                compose = stretch_rgb(rgb_in, self.final, output_stem=composite_name, method=self.stretch_method)
+            else:
+                lum_in = self.final / "lum_for_compose.fit"
+                rgb_in = self.final / "rgb_for_compose.fit"
+                shutil.copy2(self.lum_for_compose_path, lum_in)
+                shutil.copy2(self.rgb_reconciled, rgb_in)
+                _log(f"[run ] stretch ({self.stretch_method}) + rgbcomp -lum", self.notes)
+                compose = stretch_and_compose(
+                    lum_in, rgb_in, self.final, output_stem=composite_name, method=self.stretch_method,
+                )
+            composite = compose.composite_path
+        else:
+            _log(f"[skip] {'RGB' if self.is_rgb_only else 'LRGB'} composite already present", self.notes)
+        self.result.composite_path = composite
+
+        cp = checkpoint(
+            composite, "05_rgb_final" if self.is_rgb_only else "05_lrgb_final", output_dir=self.checkpoint_dir,
+            linear=False, previous=self.previous, previous_linear=self.previous_linear,  # post-stretch: render faithfully
+        )
+        self.result.checkpoints.append(cp)
+        self.previous, self.previous_linear = cp.stats, False
+        _log(cp.summary(), self.notes)
+        save_checkpoints(self.result.checkpoints, self.checkpoints_path)
+
+        # --- export -----------------------------------------------------------
+        # Always re-run, unconditionally -- export() has no usable() gate of its
+        # own (cheap: format conversion, not a Siril/GraXpert/SPCC call), so it
+        # simply reflects whatever `composite` currently is, resumed or fresh.
+        _log("[run ] export TIFF + preview", self.notes)
+        # Slice 4.4: `target` threaded through as the stem instead of a
+        # hardcoded "M51_lrgb" -- verified safe against the real M51 fixture
+        # (target="M51" here reproduces the exact same "M51_lrgb" stem, so
+        # tests/test_pipeline.py's byte-identical-output assertions against
+        # M51_lrgb.tif are unaffected), and required for the skill (4.4) to
+        # generalize the handoff path to whatever target the user throws at it
+        # next instead of silently mislabeling every future target's TIFF as
+        # M51's.
+        self.result.export_result = export(
+            composite, output_dir=self.final,
+            stem=f"{self.target}_rgb" if self.is_rgb_only else f"{self.target}_lrgb",
+        )
+        _log(
+            f"       row order {self.result.export_result.row_order}, "
+            f"clipped low {self.result.export_result.clipped_low_fraction:.4f} / "
+            f"high {self.result.export_result.clipped_high_fraction:.4f}",
+            self.notes,
+        )
+
+    def run(self) -> PipelineResult:
+        """Runs the three phases in order, honoring `self.stop_after` at
+        each boundary -- the `stop_after`/`force` vocabulary is validated
+        once, in `__init__`, before any of this runs.
+        """
+        self._build_masters()
+        if self.stop_after == "masters":
+            masters_note = (
+                "every colour contributor built (RGB-only, no Luminance data found)"
+                if self.is_rgb_only else "Luminance selected and every colour contributor built"
+            )
+            _log(f"[stop] stop_after='masters' -- {masters_note}; stopping before reconciliation", self.notes)
+            return self.result
+
+        self._reconcile()
+        if self.stop_after == "reconciled":
+            reconciled_note = (
+                "colour ready (RGB-only, no Luminance to extract/reconcile against)"
+                if self.is_rgb_only else "L background extracted and colour reconciled"
+            )
+            _log(f"[stop] stop_after='reconciled' -- {reconciled_note}; stopping before stretch/export", self.notes)
+            return self.result
+
+        self._finalize()
+        return self.result
+
 
 def run_lrgb(
     project_dir: str | Path,
@@ -923,104 +1014,9 @@ def run_lrgb(
     telescope with real Bias+Dark (T24, T21) is unaffected, unconditionally
     RAW_LOCAL.
     """
-    orchestrator = LRGBOrchestrator(
+    return LRGBOrchestrator(
         project_dir, telescope, target, ra_hours, dec_deg,
         lum_binning=lum_binning, rgb_binning=rgb_binning, stretch_method=stretch_method,
         lum_source=lum_source, pedestal=pedestal, stop_after=stop_after, force=force,
         flat_policy=flat_policy, calibration_mode=calibration_mode,
-    )
-    orchestrator._build_masters()
-
-    result = orchestrator.result
-    notes = orchestrator.notes
-    final = orchestrator.final
-    is_rgb_only = orchestrator.is_rgb_only
-    contributors = orchestrator.contributors
-    reference = orchestrator.reference
-    reference_pos = orchestrator.reference_pos
-    checkpoint_dir = orchestrator.checkpoint_dir
-    checkpoints_path = orchestrator.checkpoints_path
-    previous, previous_linear = orchestrator.previous, orchestrator.previous_linear
-
-    if stop_after == "masters":
-        masters_note = (
-            "every colour contributor built (RGB-only, no Luminance data found)"
-            if is_rgb_only else "Luminance selected and every colour contributor built"
-        )
-        _log(f"[stop] stop_after='masters' -- {masters_note}; stopping before reconciliation", notes)
-        return result
-
-    orchestrator._reconcile()
-
-    rgb_reconciled = orchestrator.rgb_reconciled
-    lum_for_compose_path = orchestrator.lum_for_compose_path if not is_rgb_only else None
-    previous, previous_linear = orchestrator.previous, orchestrator.previous_linear
-
-    if stop_after == "reconciled":
-        reconciled_note = (
-            "colour ready (RGB-only, no Luminance to extract/reconcile against)"
-            if is_rgb_only else "L background extracted and colour reconciled"
-        )
-        _log(f"[stop] stop_after='reconciled' -- {reconciled_note}; stopping before stretch/export", notes)
-        return result
-
-    # --- stretch + composition --------------------------------------------
-    # RGB-only: stretch the reconciled RGB alone, no rgbcomp -lum= (no L to
-    # composite onto). Output named "rgb_final" (not "lrgb_final") -- an
-    # RGB-only run producing a file literally named "lrgb" would be
-    # misleading on disk.
-    composite_name = "rgb_final" if is_rgb_only else "lrgb_final"
-    composite = final / f"{composite_name}.fit"
-    if not usable(composite, notes):
-        if is_rgb_only:
-            rgb_in = final / "rgb_for_compose.fit"
-            shutil.copy2(rgb_reconciled, rgb_in)
-            _log(f"[run ] stretch ({stretch_method}), RGB-only (no Luminance to compose)", notes)
-            compose = stretch_rgb(rgb_in, final, output_stem=composite_name, method=stretch_method)
-        else:
-            lum_in = final / "lum_for_compose.fit"
-            rgb_in = final / "rgb_for_compose.fit"
-            shutil.copy2(lum_for_compose_path, lum_in)
-            shutil.copy2(rgb_reconciled, rgb_in)
-            _log(f"[run ] stretch ({stretch_method}) + rgbcomp -lum", notes)
-            compose = stretch_and_compose(
-                lum_in, rgb_in, final, output_stem=composite_name, method=stretch_method,
-            )
-        composite = compose.composite_path
-    else:
-        _log(f"[skip] {'RGB' if is_rgb_only else 'LRGB'} composite already present", notes)
-    result.composite_path = composite
-
-    cp = checkpoint(
-        composite, "05_rgb_final" if is_rgb_only else "05_lrgb_final", output_dir=checkpoint_dir,
-        linear=False, previous=previous, previous_linear=previous_linear,  # post-stretch: render faithfully
-    )
-    result.checkpoints.append(cp)
-    previous, previous_linear = cp.stats, False
-    _log(cp.summary(), notes)
-    save_checkpoints(result.checkpoints, checkpoints_path)
-
-    # --- export -----------------------------------------------------------
-    # Always re-run, unconditionally -- export() has no usable() gate of its
-    # own (cheap: format conversion, not a Siril/GraXpert/SPCC call), so it
-    # simply reflects whatever `composite` currently is, resumed or fresh.
-    _log("[run ] export TIFF + preview", notes)
-    # Slice 4.4: `target` threaded through as the stem instead of a
-    # hardcoded "M51_lrgb" -- verified safe against the real M51 fixture
-    # (target="M51" here reproduces the exact same "M51_lrgb" stem, so
-    # tests/test_pipeline.py's byte-identical-output assertions against
-    # M51_lrgb.tif are unaffected), and required for the skill (4.4) to
-    # generalize the handoff path to whatever target the user throws at it
-    # next instead of silently mislabeling every future target's TIFF as
-    # M51's.
-    result.export_result = export(
-        composite, output_dir=final, stem=f"{target}_rgb" if is_rgb_only else f"{target}_lrgb"
-    )
-    _log(
-        f"       row order {result.export_result.row_order}, "
-        f"clipped low {result.export_result.clipped_low_fraction:.4f} / "
-        f"high {result.export_result.clipped_high_fraction:.4f}",
-        notes,
-    )
-
-    return result
+    ).run()
