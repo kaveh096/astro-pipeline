@@ -4,22 +4,30 @@ Living project roadmap. Update this file (don't create a new one) whenever
 priorities change, a task finishes, or a decision gets made. This is the
 first thing a new session should read after `README.md`/`SKILL.md`.
 
-Last updated: 2026-09-17. Current `main` HEAD: `72aa306` (25 commits ahead
+Last updated: 2026-09-17. Current `main` HEAD: `6fc7d64` (1 commit ahead
 of `origin/main` -- **not yet pushed**, see "Immediate next step" below).
+The prior handoff's "25 commits ahead, not pushed" was stale -- those 25
+were already pushed by the time this session picked the work back up;
+only Step 11 (below) is new since then.
 
 ---
 
 ## 1. Immediate next step (do this first)
 
-1. Push everything: `git push origin main` (25 commits, nothing destructive
+1. Push everything: `git push origin main` (1 commit, nothing destructive
    -- this is a fast-forward, no force needed. Verify with `git status`/
    `git log origin/main..main` first as usual before pushing).
-2. Resume **Task 5** (the OOP refactor) at **Step 11** of
-   `docs/task5-oop-refactor-plan.md` -- read that file in full before
-   touching any code, including its inline `[Round-1/Round-2 review]`
-   correction annotations, which are authoritative over the plan's
-   original base text wherever they disagree. Steps 0-10 are already done
-   (see Section 2 below); Steps 11-17 remain.
+2. Resume **Task 5** (the OOP refactor) at **Step 12** of
+   `docs/task5-oop-refactor-plan.md` -- the biggest, highest-risk step in
+   the plan (`lrgb_orchestrator.py`). Read that file in full, including
+   its inline `[Round-1/Round-2 review]` correction annotations (authoritative
+   over the plan's original base text wherever they disagree) and
+   especially "Open questions" item 3 (the `self.` state inventory for
+   `LRGBOrchestrator`, wrong twice already across 2 review rounds) before
+   touching any code. Steps 0-11 are done (see Section 2 below); Steps
+   12-17 remain. Consider a fresh, independent adversarial review pass
+   before/after Step 12 specifically, the same way the original plan was
+   reviewed -- see the plan's own recommendation.
 3. Full test suite baseline to hold after every step: **288 passed, 35
    skipped, 0 failed** (`.venv/Scripts/python.exe -m pytest tests/ -q`,
    ~5-8 minutes). If this number ever changes unexpectedly, stop and
@@ -179,13 +187,18 @@ Siril/GraXpert smoke tests + broad fast mocked coverage.
   shared GraXpert-extraction/SPCC-calibration body logic factored into
   `_extract_background()`/`_run_spcc()` methods (not just shared
   parameters -- a round-2 review finding).
+- Step 11 (`6fc7d64`): `luminance_selection.py` -- `LumCandidate`,
+  `select_luminance_source`, `discover_luminance_contributors`,
+  `discover_osc_contributors`, moved verbatim as plain functions (no class
+  -- see the plan's own reasoning). No monkeypatch sites or skill-script
+  imports targeted these three names, so this was the lowest-risk step so
+  far: import-and-use-unchanged inside `run_lrgb`, no call-site updates
+  needed.
 
-`pipeline.py`: 2478 -> ~1370 lines so far (was 1674 after Step 9; Step 10
-removed another ~300).
+`pipeline.py`: 2478 -> ~1200 lines so far (was 1370 after Step 10; Step 11
+removed another ~120).
 
-**Remaining (Steps 11-17), per the plan document:**
-- Step 11: `luminance_selection.py` (plain functions, not a class --
-  deliberately, see the plan's own reasoning).
+**Remaining (Steps 12-17), per the plan document:**
 - Step 12: `lrgb_orchestrator.py` -- the biggest single step (~800 lines,
   `run_lrgb` -> an `LRGBOrchestrator` class with `_build_masters()`/
   `_reconcile()`/`_finalize()` methods). The plan recommends splitting
