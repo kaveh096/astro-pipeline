@@ -15,8 +15,16 @@ LIGHT_NAME = "raw-T24-observer1-M51-20250123-021344-Blue-BIN2-E-300-001.fit"
 BIAS_NAME = "T24-observer1-Bias-000-LD20250203-LT171434-BIN1.fit"
 DARK_NAME = "T24-observer1-Dark-300-LD20250203-LT155037-BIN1.fit"
 
+from astro_pipeline.contributor_staleness import _flat_frame_hash
+
 from conftest import LUM_USERS, RGB_USER
 from conftest import PROJECT_DIR as REAL_SESSION_DIR
+from conftest import ABELL31_PROJECT_DIR, requires_abell31_project
+from conftest import M42_PROJECT_DIR, requires_m42_project
+from conftest import M31_PROJECT_DIR, requires_m31_project
+from conftest import NGC3628_PROJECT_DIR, requires_ngc3628_project
+from conftest import ABELL6_PROJECT_DIR, requires_abell6_project
+from conftest import IC1396_PROJECT_DIR, requires_ic1396_project
 
 # The other real collaborator on T24's real multi-user Luminance group --
 # whichever of the two real configured usernames isn't RGB_USER (T24's
@@ -434,3 +442,164 @@ def test_instrument_groups_merges_users_sharing_telescope_and_binning() -> None:
     assert {f.user for f in groups[("T24", "M51", "Red", 2)]} == {RGB_USER}
     assert ("T24", "M51", "Red", 1) in groups
     assert {f.user for f in groups[("T24", "M51", "Red", 1)]} == {COLLABORATOR_USER}
+
+
+# --- plan-flats-v4.md Step 1a: data invariants (test-only, behaviour-free).
+# Gate (D): flat_index()/calibration_index() keys+counts, flat
+# unique-basename counts, _flat_frame_hash(T21 L), and instrument_groups()
+# counts, for every one of the plan's seven gate-(D) projects. All of these
+# use TODAY's scan_session() with no fallback flag -- that parameter does
+# not exist until Step 4b; this step only pins down today's real,
+# unparameterized behaviour so 4a/4b have a real-data regression net to
+# extend rather than invent from scratch. ------------------------------
+
+
+@pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
+def test_flat_index_real_t21_luminance_unique_basenames_and_hash() -> None:
+    """G1's own real numbers (plan ??1.3.5/??1.5): T21's real Luminance
+    flat set spans two twilight sessions with 10 colliding generic
+    'skyflat<N>' basenames -- 30 matched CalibrationFrames collapse to only
+    20 UNIQUE basenames. The existing frame-identity hash is blind to this
+    (it hashes basenames, duplicates included) -- pinned here at its real,
+    persisted value so Step 3b's fix has a documented before/after."""
+    report = scan_session(REAL_SESSION_DIR)
+    t21_l_flats = report.flat_index()[("T21", 1, "Luminance")]
+    assert len(t21_l_flats) == 30
+    assert len({f.path.name for f in t21_l_flats}) == 20
+    assert _flat_frame_hash(t21_l_flats) == "349469062e57762c"
+
+
+@pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
+def test_calibration_index_real_m51_snapshot() -> None:
+    """A coarse calibration_index() snapshot for M51 -- both real
+    telescopes have recognised Bias+Dark (RAW_LOCAL structurally possible
+    for both), and T24 ships zero Flat of any kind (see
+    test_t24_real_groups_have_no_matched_flats_and_command_is_unaffected
+    in test_calibration.py -- the same fact from the flat_index() side)."""
+    report = scan_session(REAL_SESSION_DIR)
+    cal_index = report.calibration_index()
+    telescopes_with_bias = {t for (t, ftype, _b, _e) in cal_index if ftype == "Bias"}
+    telescopes_with_dark = {t for (t, ftype, _b, _e) in cal_index if ftype == "Dark"}
+    assert telescopes_with_bias == {"T21", "T24"}
+    assert telescopes_with_dark == {"T21", "T24"}
+    assert not any(t == "T24" for (t, b, filt) in report.flat_index())
+
+
+@pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
+def test_instrument_groups_real_m51_post_deletion_counts() -> None:
+    """Pinned against the POST-DELETION tree (plan ??4.0's event), per the
+    plan's own Step 1a text -- T21 L bin1 = 2, T24 L bin1 = 21. Kaveh's
+    deletion of the byte-identical duplicate M51 folders
+    (Uncalibrated Lights - Jan 2025/, calibrated Lights - T24 - Feb 2025/)
+    is explicitly OUT OF SCOPE for the coding task that added this test
+    (handled separately, outside this branch's own commits) -- until that
+    deletion happens on this machine, this assertion is expected to be RED
+    for the identical, already-documented reason as this file's own
+    test_scan_real_multi_telescope_session /
+    test_instrument_groups_merges_users_sharing_telescope_and_binning
+    (??1.5: today's tree gives T21=4, T24=42, not 2/21). It turns green
+    with zero code change the moment the deletion happens."""
+    report = scan_session(REAL_SESSION_DIR)
+    groups = report.instrument_groups()
+    assert len(groups.get(("T21", "M51", "Luminance", 1), [])) == 2
+    assert len(groups.get(("T24", "M51", "Luminance", 1), [])) == 21
+
+
+@requires_ngc3628_project
+def test_scan_real_ngc3628_no_calibration_frames_recognized_today() -> None:
+    """NGC 3628/T73 (Feb 2025): PRECALIBRATED, CALSTAT='BF' -- no local
+    Bias/Dark of any kind, so calibration_index() must be empty for T73."""
+    report = scan_session(NGC3628_PROJECT_DIR)
+    assert not any(t == "T73" for (t, _ftype, _b, _e) in report.calibration_index())
+    assert not any(t == "T73" for (t, _b, _filt) in report.flat_index())
+
+
+@requires_abell6_project
+def test_scan_real_abell6_no_calibration_frames_recognized_today() -> None:
+    """Abell 6 and HFG1/T02 (Dec 2022): PRECALIBRATED, CALSTAT='BDF' -- no
+    local Bias/Dark of any kind."""
+    report = scan_session(ABELL6_PROJECT_DIR)
+    assert not any(t == "T02" for (t, _ftype, _b, _e) in report.calibration_index())
+    assert not any(t == "T02" for (t, _b, _filt) in report.flat_index())
+
+
+@requires_abell31_project
+def test_scan_real_abell31_no_calibration_frames_recognized_today() -> None:
+    """Abell 31/T59 (Mar 2023), a NEW gate-(D) fixture added by Step 1a:
+    PRECALIBRATED, CALSTAT='BDF', no unrecognised calibration frames of any
+    kind (plan ??2.1) -- included for completeness even though it has
+    nothing local to recognise."""
+    report = scan_session(ABELL31_PROJECT_DIR)
+    raw_lights = [f for f in report.lights if f.provenance == "raw"]
+    assert len(raw_lights) == 30
+    assert not any(t == "T59" for (t, _ftype, _b, _e) in report.calibration_index())
+    assert not any(t == "T59" for (t, _b, _filt) in report.flat_index())
+    assert len(report.unrecognized) == 0
+
+
+@requires_m42_project
+def test_scan_real_m42_flats_and_bias_dark_unrecognized_today() -> None:
+    """M42/T20 (Jan 2022), a NEW gate-(D) fixture added by Step 1a: real
+    raw lights across 7 filters (plan ??2.1's own counts), a real 70-file
+    flat library and real bias/dark -- NONE of the calibration frames are
+    recognised today (no 'T20' folder token anywhere in their path; only
+    the LIGHT filenames carry a T20 token) -- the real fixture Step 4b's
+    header-based fallback recognition targets."""
+    report = scan_session(M42_PROJECT_DIR)
+    raw_lights = [f for f in report.lights if f.provenance == "raw"]
+    assert len(raw_lights) == 73
+    counts = {}
+    for f in raw_lights:
+        counts[(f.telescope, f.filter_name, f.binning)] = counts.get((f.telescope, f.filter_name, f.binning), 0) + 1
+    assert counts == {
+        ("T20", "Luminance", 1): 10,
+        ("T20", "Red", 2): 8,
+        ("T20", "Green", 2): 6,
+        ("T20", "Blue", 2): 7,
+        ("T20", "Ha", 2): 15,
+        ("T20", "OIII", 2): 14,
+        ("T20", "SII", 2): 13,
+    }
+    assert not any(t == "T20" for (t, _ftype, _b, _e) in report.calibration_index())
+    assert not any(t == "T20" for (t, _b, _filt) in report.flat_index())
+    assert len(report.unrecognized) == 200
+
+
+@requires_m31_project
+def test_scan_real_m31_bias_dark_unrecognized_today() -> None:
+    """M31/T05 (Aug 2021), a NEW gate-(D) fixture added by Step 1a: real
+    folder/user token literally 'T5' (not 'T05') -- the real fixture for
+    Step 4b's T5->T05 telescope-token normalisation. R/G/B lights ARE
+    recognised today (the light-filename convention already embeds a
+    telescope token); bias/dark/flat are NOT (their folder is 'T5', which
+    the strict ^T\\d+$ directory rule uppercases to 'T5', not 'T05' -- and
+    T5 never even matches the light-side telescope token in the first
+    place, so they land in calibration_index() under nothing at all today)."""
+    report = scan_session(M31_PROJECT_DIR)
+    raw_lights = [f for f in report.lights if f.provenance == "raw"]
+    assert len(raw_lights) == 21
+    counts = {}
+    for f in raw_lights:
+        counts[(f.telescope, f.filter_name, f.binning)] = counts.get((f.telescope, f.filter_name, f.binning), 0) + 1
+    assert counts == {
+        ("T05", "Red", 1): 7,
+        ("T05", "Green", 1): 7,
+        ("T05", "Blue", 1): 7,
+    }
+    assert not any(t in ("T05", "T5") for (t, _ftype, _b, _e) in report.calibration_index())
+    assert not any(t in ("T05", "T5") for (t, _b, _filt) in report.flat_index())
+    assert len(report.unrecognized) == 151
+
+
+@requires_ic1396_project
+def test_scan_real_ic1396_flats_and_bias_unrecognized_today() -> None:
+    """IC 1396/T68 (Sep 2021), extending the existing IC1396 fixture
+    (already used in test_calibration.py) to ingest.py's own gate-(D)
+    checks: real OSC (Color) lights recognised, real 88-frame flat library
+    and real 48-frame bias NOT recognised at all today (no 'T68' folder
+    token in their path)."""
+    report = scan_session(IC1396_PROJECT_DIR)
+    raw_lights = [f for f in report.lights if f.provenance == "raw"]
+    assert len(raw_lights) == 25
+    assert not any(t == "T68" for (t, _ftype, _b, _e) in report.calibration_index())
+    assert not any(t == "T68" for (t, _b, _filt) in report.flat_index())

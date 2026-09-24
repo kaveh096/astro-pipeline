@@ -156,3 +156,34 @@ IC1396_PROJECT_DIR = _under(_ITELESCOPE_DIR, "IC 1396 - Elephant Trunk - RGB - T
 requires_ic1396_project = pytest.mark.skipif(
     not IC1396_PROJECT_DIR.exists(), reason=f"raw project folder not present: {IC1396_PROJECT_DIR}"
 )
+
+# Abell 31/T59 (Mar 2023) real delivery -- PRECALIBRATED, CALSTAT=BDF, no
+# unrecognised calibration frames of any kind (plan-flats-v4.md ??2.1) --
+# one of that plan's seven gate-(D) data-invariant projects (??4.0),
+# included for completeness even though it has nothing of its own to
+# recognise.
+ABELL31_PROJECT_DIR = _under(_ITELESCOPE_DIR, "Abell 31 - LRGB - Mar 2023")
+requires_abell31_project = pytest.mark.skipif(
+    not ABELL31_PROJECT_DIR.exists(), reason=f"raw project folder not present: {ABELL31_PROJECT_DIR}"
+)
+
+# M42/T20 (Jan 2022) real delivery -- mono LRGB + narrowband (Ha/OIII/SII),
+# with a real raw flat library (70 files, dated 2020-03-19, ~21 months
+# older than the lights) and real bias/dark under a "Bias-Darks-T20-..."
+# naming convention -- none of it recognised today because the flats/
+# darks carry no "T20" folder token at all (plan-flats-v4.md ??2.1) -- the
+# real fixture for Step 4b's opt-in header-based calibration recognition.
+M42_PROJECT_DIR = _under(_ITELESCOPE_DIR, "M42 - Orion Nebula - LRGBHOS - Jan 2022")
+requires_m42_project = pytest.mark.skipif(
+    not M42_PROJECT_DIR.exists(), reason=f"raw project folder not present: {M42_PROJECT_DIR}"
+)
+
+# M31/T05 (Aug 2021) real delivery -- mono RGB, real bias/dark filenames
+# literally spelled "T5" (not "T05") and a folder literally named "T5" --
+# the real fixture for Step 4b's T5->T05 telescope-token normalisation
+# (plan-flats-v4.md ??2.1). Its darks are also the real, unfixed G15
+# temperature mismatch (-15C darks vs -10C lights), documented not fixed.
+M31_PROJECT_DIR = _under(_ITELESCOPE_DIR, "M31 - Andromeda - T5 - RGB - Aug 2021")
+requires_m31_project = pytest.mark.skipif(
+    not M31_PROJECT_DIR.exists(), reason=f"raw project folder not present: {M31_PROJECT_DIR}"
+)
