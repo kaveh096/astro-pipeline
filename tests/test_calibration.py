@@ -16,6 +16,7 @@ from astro_pipeline.calibration import (
     build_master_flat,
     calibrate_lights,
     classify_flat_identity,
+    flat_sanity_notes,
     run_calibration,
     select_dark,
     sequence_name,
@@ -713,6 +714,110 @@ def test_run_calibration_logs_flat_identity_summary(tmp_path: Path, monkeypatch)
     assert any("1 matched" in line for line in notes)
 
 
+# --- Step 7 (plan-flats-v4.md): flat_sanity_notes -- warning-only, on a
+# SAMPLE of raw flat frames (never the Siril-normalised master). ----------
+
+
+def _write_flat_with_level(path: Path, adu_value: float, exptime: float = 5.0, date_obs: str = "2024-06-16T08:00:00") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    hdu = fits.PrimaryHDU(data=np.full((8, 8), adu_value, dtype=np.uint16))
+    hdu.header["EXPTIME"] = exptime
+    hdu.header["DATE-OBS"] = date_obs
+    hdu.writeto(path)
+
+
+def _flat_frame(path: Path, telescope: str = "T21", binning: int = 1, filter_name: str = "Luminance") -> CalibrationFrame:
+    return CalibrationFrame(path=path, telescope=telescope, frame_type="Flat", binning=binning, exptime=0.0, filter_name=filter_name)
+
+
+def test_flat_sanity_notes_empty_list_returns_empty() -> None:
+    assert flat_sanity_notes([]) == []
+
+
+def test_flat_sanity_notes_level_within_range_no_warning(tmp_path: Path) -> None:
+    # ~35% of 65535, matching T21's own real real-data level.
+    p = tmp_path / "flat0.fit"
+    _write_flat_with_level(p, 23000.0)
+    notes = flat_sanity_notes([_flat_frame(p)])
+    assert not any("level" in n for n in notes)
+
+
+def test_flat_sanity_notes_level_too_low_warns(tmp_path: Path) -> None:
+    p = tmp_path / "flat0.fit"
+    _write_flat_with_level(p, 1000.0)  # ~1.5% of 65535, well under the 10% floor
+    notes = flat_sanity_notes([_flat_frame(p)])
+    assert any("level" in n and "outside" in n for n in notes)
+
+
+def test_flat_sanity_notes_level_too_high_warns(tmp_path: Path) -> None:
+    p = tmp_path / "flat0.fit"
+    _write_flat_with_level(p, 60000.0)  # ~92% of 65535, over the 85% ceiling
+    notes = flat_sanity_notes([_flat_frame(p)])
+    assert any("level" in n and "outside" in n for n in notes)
+
+
+def test_flat_sanity_notes_saturation_warns(tmp_path: Path) -> None:
+    path = tmp_path / "flat_sat.fit"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = np.full((8, 8), 30000, dtype=np.uint16)
+    data[0, 0] = 65000  # one saturated pixel
+    hdu = fits.PrimaryHDU(data=data)
+    hdu.header["EXPTIME"] = 5.0
+    hdu.header["DATE-OBS"] = "2024-06-16T08:00:00"
+    hdu.writeto(path)
+    notes = flat_sanity_notes([_flat_frame(path)])
+    assert any("saturation" in n for n in notes)
+
+
+def test_flat_sanity_notes_exposure_min_max_and_spread(tmp_path: Path) -> None:
+    frames = []
+    for i, exptime in enumerate([5.0, 6.0, 7.0]):
+        p = tmp_path / f"flat{i}.fit"
+        _write_flat_with_level(p, 23000.0, exptime=exptime)
+        frames.append(_flat_frame(p))
+    notes = flat_sanity_notes(frames)
+    exposure_notes = [n for n in notes if "exposure" in n]
+    assert len(exposure_notes) == 1
+    assert "5.000" in exposure_notes[0] and "7.000" in exposure_notes[0]
+
+
+def test_flat_sanity_notes_unknown_date_for_1970_date_obs(tmp_path: Path) -> None:
+    p = tmp_path / "flat0.fit"
+    _write_flat_with_level(p, 23000.0, date_obs="1970-01-01T00:00:00")
+    notes = flat_sanity_notes([_flat_frame(p)])
+    assert any("unknown" in n for n in notes)
+    assert not any("flat date:" in n and "1970" in n for n in notes)
+
+
+def test_flat_sanity_notes_age_gap_to_lights(tmp_path: Path) -> None:
+    p = tmp_path / "flat0.fit"
+    _write_flat_with_level(p, 23000.0, date_obs="2024-06-16T08:00:00")
+    from astro_pipeline.ingest import LightFrame
+
+    light = LightFrame(
+        path=Path("light.fit"), provenance="raw", telescope="T21", user="u", target="M51",
+        date="20250115", time="050236", filter_name="Luminance", binning=1, side="E",
+        exptime=300.0, sequence=1,
+    )
+    notes = flat_sanity_notes([_flat_frame(p)], light_frames=[light])
+    date_notes = [n for n in notes if "flat date:" in n]
+    assert len(date_notes) == 1
+    assert "day(s) from the lights" in date_notes[0]
+
+
+@requires_real_session
+def test_flat_sanity_notes_real_t21_luminance() -> None:
+    """Real check: T21's own real Luminance flats sit at about 35% of
+    65535 (??2.3) -- inside the heuristic range, no level/saturation
+    warning expected; a real exposure and date note must still appear."""
+    report = scan_session(REAL_SESSION_DIR)
+    t21_l_flats = report.flat_index()[("T21", 1, "Luminance")]
+    notes = flat_sanity_notes(t21_l_flats)
+    assert not any("outside the heuristic" in n for n in notes)
+    assert any("exposure" in n for n in notes)
+    assert any("flat date" in n for n in notes)
+
+
 @requires_siril
 @requires_real_session
 def test_calibrate_lights_real_t24_command_unaffected_by_slice1(tmp_path: Path) -> None:
@@ -757,7 +862,12 @@ def test_calibrate_lights_real_t24_command_unaffected_by_slice1(tmp_path: Path) 
 def test_calibrate_lights_real_t68_bias_only_debayer_produces_valid_rgb(tmp_path: Path) -> None:
     """Capability B (OSC + local raw calibration, 2026-09), the real,
     load-bearing claim: T68 (IC 1396) has real local bias (48 subs) but
-    NO real local dark frames at all -- master_dark=None, subtract_bias
+    NO RECOGNIZED local dark frames at all (**corrected, plan-flats-v4.md**:
+    50 real dark frames exist on disk, unrecognized by filename -- this
+    test still manually constructs its bias/light CalibrationFrame/
+    LightFrame objects directly from real files, bypassing scan_session's
+    own recognition entirely, so the mechanics this test exercises remain
+    real and valid) -- master_dark=None, subtract_bias
     =True, debayer=True must produce genuine, non-degenerate, plausible
     3-channel calibrated+debayered output from real raw OSC lights, in
     ONE calibrate_lights() call (not a separate debayer pass).

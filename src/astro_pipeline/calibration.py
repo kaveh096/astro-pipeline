@@ -431,7 +431,9 @@ def _calibrate_command(
     `-debayer` to the SAME `calibrate` call rather than needing a separate
     pass. MEASURED, not assumed, against the real installed Siril 1.4.4:
     real T68 (IC 1396) raw OSC lights, bias-only calibration (no dark --
-    T68 has no real local darks), `-bias=<master> -debayer` in one call
+    T68 has no RECOGNIZED local darks; **corrected, plan-flats-v4.md**: 50
+    real dark frames exist on disk, unrecognized by filename today),
+    `-bias=<master> -debayer` in one call
     produced genuine 3-layer (RGGB-demosaiced) `pp_*` output with
     plausible, non-degenerate per-channel statistics -- default False so
     every existing caller's command is completely unchanged.
@@ -559,6 +561,139 @@ def classify_flat_identity(flat_frames: list[CalibrationFrame]) -> FlatIdentityR
         name_collisions=name_collisions,
         staged=len(by_name),
     )
+
+
+# Step 7 (plan-flats-v4.md, fixes G9): heuristic thresholds, marked as
+# such (not sourced from any spec) -- see flat_sanity_notes' own
+# docstring for how they were picked.
+_FLAT_LEVEL_MIN_FRACTION = 0.10
+_FLAT_LEVEL_MAX_FRACTION = 0.85
+_FLAT_SATURATION_FRACTION = 0.95
+
+
+def _sample_flat_frames(flat_frames: list[CalibrationFrame]) -> list[CalibrationFrame]:
+    """First, middle, last of the matched set, by sorted path -- Step 7's
+    own bound (<= 3 raw frames) on how many flats get a real pixel-data
+    read, since the level/saturation checks below need the actual array,
+    unlike the header-only exposure/age checks."""
+    ordered = sorted(flat_frames, key=lambda f: str(f.path))
+    if len(ordered) <= 3:
+        return ordered
+    return [ordered[0], ordered[len(ordered) // 2], ordered[-1]]
+
+
+def flat_sanity_notes(
+    flat_frames: list[CalibrationFrame], light_frames: list[LightFrame] | None = None
+) -> list[str]:
+    """G9 (Step 7, plan-flats-v4.md): warning-only heuristic sanity notes
+    on a SAMPLE of RAW flat frames (pre-Siril, native ADU) -- never the
+    Siril-normalised master, whose data is a 32-bit float in [0, 1]
+    (verified directly, ??2.3): a "fraction of 65535" check applied to the
+    MASTER is nonsensical and would fire on every real master including
+    T21's correctly-behaved one. Never raises -- these are notes, not
+    gates.
+
+    - Level: median ADU of a sample of <= 3 raw flats (first, middle,
+      last of the matched set, `_sample_flat_frames`), as a fraction of
+      65535 (astropy's `getdata` already applies BZERO/BSCALE); warned
+      outside 10-85%. The floor was lowered from an initial 15%, since
+      T21's own real flats sit at about 35% but a naive spread-based
+      reading of a session-to-session spread figure could be misread as
+      lower -- stated explicitly as a heuristic, not sourced from a spec.
+    - Saturation: fraction of pixels >= 0.95 x 65535, same <= 3-frame
+      sample.
+    - Exposure: EXPTIME min/max and within-set spread, read from EVERY
+      matched frame's own header (cheap, metadata-only) -- not limited to
+      the 3-frame sample, since this doesn't need pixel data at all.
+    - Age: flat DATE-OBS span (also every matched frame, header-only) and
+      the gap to `light_frames`' own dates, when given. `DATE-OBS=1970`
+      (a real, observed case: IC 1396's camera clock unset) reads as
+      "unknown", not a nonsensical multi-decade gap.
+    - No CMOS-specific exposure floor: no header reliably identifies CMOS
+      (`INSTRUME='ASI Camera (1)'` is not a floor's worth of signal).
+    """
+    if not flat_frames:
+        return []
+    notes: list[str] = []
+
+    sample = _sample_flat_frames(flat_frames)
+    levels: list[float] = []
+    saturations: list[float] = []
+    for frame in sample:
+        try:
+            data = fits.getdata(frame.path, memmap=False).astype(np.float64)
+        except Exception:
+            continue
+        levels.append(float(np.median(data)) / 65535.0)
+        saturations.append(float(np.mean(data >= _FLAT_SATURATION_FRACTION * 65535.0)))
+
+    if levels:
+        avg_level = sum(levels) / len(levels)
+        if avg_level < _FLAT_LEVEL_MIN_FRACTION or avg_level > _FLAT_LEVEL_MAX_FRACTION:
+            notes.append(
+                f"[warn] flat level {avg_level:.1%} of 65535 is outside the heuristic "
+                f"{_FLAT_LEVEL_MIN_FRACTION:.0%}-{_FLAT_LEVEL_MAX_FRACTION:.0%} range "
+                f"(sample of {len(levels)} raw frame(s))"
+            )
+    if saturations and max(saturations) > 0:
+        notes.append(
+            f"[warn] flat saturation: up to {max(saturations):.1%} of pixels >= "
+            f"{_FLAT_SATURATION_FRACTION:.0%} of 65535 (sample of {len(saturations)} raw frame(s))"
+        )
+
+    real_exptimes: list[float] = []
+    dates: list[str] = []
+    unknown_dates = 0
+    for frame in flat_frames:
+        try:
+            header = fits.getheader(frame.path)
+        except Exception:
+            continue
+        exptime = header.get("EXPTIME")
+        if exptime is not None:
+            try:
+                real_exptimes.append(float(exptime))
+            except (TypeError, ValueError):
+                pass
+        date_obs = str(header.get("DATE-OBS") or "")
+        if not date_obs or date_obs.startswith("1970"):
+            unknown_dates += 1
+        else:
+            dates.append(date_obs[:10])
+
+    if real_exptimes:
+        lo, hi = min(real_exptimes), max(real_exptimes)
+        spread_pct = ((hi - lo) / hi * 100.0) if hi else 0.0
+        notes.append(
+            f"[info] flat exposure: {lo:.3f}-{hi:.3f}s across {len(real_exptimes)} "
+            f"frame(s) ({spread_pct:.0f}% spread)"
+        )
+
+    if dates:
+        span = min(dates) if min(dates) == max(dates) else f"{min(dates)} to {max(dates)}"
+        age_note = f"[info] flat date: {span}"
+        if unknown_dates:
+            age_note += f" ({unknown_dates} frame(s) with unknown/corrupted DATE-OBS)"
+        if light_frames:
+            light_dates = [
+                f"{f.date[:4]}-{f.date[4:6]}-{f.date[6:8]}" for f in light_frames if getattr(f, "date", None)
+            ]
+            if light_dates:
+                try:
+                    flat_ref = datetime.fromisoformat(max(dates))
+                    light_ref = datetime.fromisoformat(min(light_dates))
+                    gap_days = abs((light_ref - flat_ref).days)
+                    age_note += f", {gap_days} day(s) from the lights"
+                except ValueError:
+                    pass
+        notes.append(age_note)
+    elif unknown_dates:
+        notes.append(
+            f"[info] flat date: unknown (DATE-OBS corrupted/unset on all "
+            f"{unknown_dates} matched frame(s))"
+        )
+
+    return notes
 
 
 # Step 3b (plan-flats-v4.md): the FIRST non-empty calibration_recipe this
@@ -797,8 +932,10 @@ def calibrate_lights(
 
     `master_dark=None` (OSC + local raw calibration plan, 2026-09): a
     genuine, real-data-driven case, not a hypothetical -- T68 (IC 1396)
-    has real local bias (48 subs) but NO real local dark frames at all.
-    Bias-only calibration (`-bias=<master>`, no `-dark=`/`-cc=dark`) is a
+    has real local bias (48 subs) but NO RECOGNIZED local dark frames at
+    all (**corrected, plan-flats-v4.md**: 50 real dark frames exist on
+    disk, unrecognized by filename today -- see master_builder.py's
+    `has_any_dark` check and its own corrected comment). Bias-only calibration (`-bias=<master>`, no `-dark=`/`-cc=dark`) is a
     real, independently-optional combination per Siril's own `help
     calibrate` text (`-bias=`/`-dark=`/`-flat=` are each independently
     optional), confirmed working against real T68 lights. `dark_optimize`
@@ -937,7 +1074,9 @@ def run_calibration(
 
     `require_dark=False` (OSC + local raw calibration plan, 2026-09): a
     real, not hypothetical, case -- T68 (IC 1396) has real local bias but
-    NO real local dark frames at all. When `require_dark=False` and
+    NO RECOGNIZED local dark frames at all (**corrected, plan-flats-v4.md**:
+    50 real dark frames exist on disk, unrecognized by filename). When
+    `require_dark=False` and
     `dark_frames` is empty, the dark-master build is skipped entirely and
     `calibrate_lights()` is called with `master_dark=None` (bias-only
     calibration, a real Siril-supported call shape, confirmed against
@@ -967,6 +1106,10 @@ def run_calibration(
         # 20 staged) made visible rather than silently absorbed.
         identity = classify_flat_identity(flat_frames)
         _log(f"       flat: {identity.summary()}", notes)
+        # Step 7 (fixes G9): heuristic sanity notes on a sample of the raw
+        # flats themselves -- warning-only, never raises.
+        for sanity_note in flat_sanity_notes(flat_frames, light_frames):
+            _log(f"       flat: {sanity_note}", notes)
 
     work_dir = Path(work_dir)
     master_bias = build_master_bias(bias_frames, work_dir)
