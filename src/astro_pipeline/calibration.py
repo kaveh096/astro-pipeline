@@ -188,19 +188,26 @@ def select_dark(
     return DarkSelection(safe[chosen_exptime], chosen_exptime, scaled=True)
 
 
-_NOT_USING_DARK_RE = re.compile(r"NOT USING DARK:.*", re.IGNORECASE)
+_NOT_USING_RE = re.compile(r"NOT USING (?:DARK|FLAT|OFFSET):.*", re.IGNORECASE)
 _NEGATIVE_PIXELS_RE = re.compile(r"contains many negative pixels.*", re.IGNORECASE)
 _K0_RE = re.compile(r"Dark optimization of image \d+: k0=[-\d.]+")
 
 
 def _check_calibration_log(result: SirilResult) -> None:
     """Exit code 0 alone is not proof calibration actually worked. Both
-    strings below are real, verified-present strings in the installed
-    Siril 1.4.4 binary (`siril-cli.exe`), found by direct inspection, not
-    documented anywhere obvious:
+    kinds of string below are real, verified-present strings in the
+    installed Siril 1.4.4 binary (`siril-cli.exe`), found by direct
+    inspection, not documented anywhere obvious:
 
         "NOT USING DARK: image dimensions are different" (and siblings --
-        cannot open the file, could not parse the expression, etc.)
+        cannot open the file, could not parse the expression, etc; also
+        "NOT USING FLAT: ..." (6 real variants) and "NOT USING OFFSET: ..."
+        (6 real variants, OFFSET being Siril's own name for what this
+        codebase calls bias) -- verified directly against the installed
+        binary: 5 DARK, 6 FLAT, 6 OFFSET distinct strings, all sharing the
+        same "NOT USING <KIND>: <reason>" shape, hence a prefix regex
+        rather than an enumerated list -- a 7th future variant of any of
+        the three kinds is still caught.)
         "After dark subtraction, the image contains many negative pixels
         (%d%%), calibration frames are probably incorrect"
 
@@ -212,7 +219,7 @@ def _check_calibration_log(result: SirilResult) -> None:
     problems = [
         line
         for line in result.log_lines
-        if _NOT_USING_DARK_RE.search(line) or _NEGATIVE_PIXELS_RE.search(line)
+        if _NOT_USING_RE.search(line) or _NEGATIVE_PIXELS_RE.search(line)
     ]
     if problems:
         raise SirilError(
@@ -546,11 +553,12 @@ def build_master_flat(
         prefix="bc_",
     )
     bias_calibrated_seq = f"bc_{seq}"
-    run_script(
+    result = run_script(
         [command, f"stack {bias_calibrated_seq} rej 3.0 3.0 -out=master"],
         workdir=stage_dir,
         script_name="calibrate.ssf",
     )
+    _check_calibration_log(result)
     master_path = stage_dir / "master.fit"
     if not master_path.exists():
         raise RuntimeError(f"Siril reported success but {master_path} was not created.")

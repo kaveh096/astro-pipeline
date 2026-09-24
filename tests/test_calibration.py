@@ -9,6 +9,7 @@ from astro_pipeline.calibration import (
     CalibrationMode,
     FlatPolicy,
     _calibrate_command,
+    _check_calibration_log,
     build_master,
     build_master_flat,
     calibrate_lights,
@@ -18,7 +19,7 @@ from astro_pipeline.calibration import (
     stage_precalibrated_lights,
 )
 from astro_pipeline.ingest import CalibrationFrame, scan_session
-from astro_pipeline.siril_driver import find_siril_cli
+from astro_pipeline.siril_driver import SirilError, SirilResult, find_siril_cli
 
 try:
     find_siril_cli()
@@ -351,6 +352,93 @@ def test_build_master_flat_raises_on_empty_frame_list(tmp_path: Path) -> None:
         build_master_flat([], tmp_path / "bias.fit", tmp_path)
 
 
+# --- Step 1b (plan-flats-v4.md): Siril's silent "NOT USING <KIND>: ..."
+# drops (exit code 0, no exception) must not pass unnoticed. All 17 lines
+# below are REAL strings verified directly against the installed Siril
+# 1.4.4 `siril-cli.exe` binary (5 DARK, 6 FLAT, 6 OFFSET -- OFFSET being
+# Siril's own name for what this codebase calls bias), matching round 2's
+# corrected count in the plan's review log. Tested against the PREFIX
+# regex, not an enumerated list, so a 7th future variant of any of the
+# three kinds is caught too. ------------------------------------------------
+
+_REAL_NOT_USING_LINES = [
+    "NOT USING DARK: could not parse the expression",
+    "NOT USING DARK: number of channels is different",
+    "NOT USING DARK: image dimensions are different",
+    "NOT USING DARK: cannot open the file",
+    "NOT USING DARK: cannot open file '%s'",
+    "NOT USING FLAT: Could not load reference image",
+    "NOT USING FLAT: could not parse the expression",
+    "NOT USING FLAT: number of channels is different",
+    "NOT USING FLAT: image dimensions are different",
+    "NOT USING FLAT: cannot open the file",
+    "NOT USING FLAT: cannot open file '%s'",
+    "NOT USING OFFSET: the offset value could not be parsed",
+    "NOT USING OFFSET: the offset value is not consistent with image bitdepth",
+    "NOT USING OFFSET: could not parse the expression",
+    "NOT USING OFFSET: number of channels is different",
+    "NOT USING OFFSET: image dimensions are different",
+    "NOT USING OFFSET: cannot open the file",
+]
+
+
+@pytest.mark.parametrize("line", _REAL_NOT_USING_LINES)
+def test_check_calibration_log_raises_on_each_real_not_using_variant(line: str) -> None:
+    result = SirilResult(returncode=0, log_lines=["some unrelated log line", line])
+    with pytest.raises(SirilError):
+        _check_calibration_log(result)
+
+
+def test_check_calibration_log_passes_a_clean_log() -> None:
+    result = SirilResult(
+        returncode=0,
+        log_lines=["Sequence processing succeeded", "Dark optimization of image 1: k0=0.667"],
+    )
+    _check_calibration_log(result)  # must not raise
+
+
+def test_check_calibration_log_still_catches_negative_pixels() -> None:
+    result = SirilResult(
+        returncode=0,
+        log_lines=[
+            "After dark subtraction, the image contains many negative pixels "
+            "(12%), calibration frames are probably incorrect"
+        ],
+    )
+    with pytest.raises(SirilError):
+        _check_calibration_log(result)
+
+
+def test_build_master_flat_raises_on_not_using_offset_in_its_own_log(tmp_path: Path, monkeypatch) -> None:
+    """build_master_flat's own calibrate+stack call was never log-checked
+    before this step (G3) -- confirm it now is, via a monkeypatched
+    run_script that reports exit 0 but a real 'NOT USING OFFSET:' line
+    (OFFSET = Siril's name for the bias this function passes via
+    -bias=)."""
+    import astro_pipeline.calibration as calibration_module
+
+    def fake_run_script(commands, workdir, siril_cli=None, timeout=None, script_name="run.ssf"):
+        if script_name == "convert.ssf":
+            return SirilResult(returncode=0, log_lines=["converted"])
+        return SirilResult(
+            returncode=0,
+            log_lines=["NOT USING OFFSET: cannot open the file"],
+        )
+
+    monkeypatch.setattr(calibration_module, "run_script", fake_run_script)
+
+    flat_path = tmp_path / "flat0.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(flat_path)
+    bias_path = tmp_path / "bias.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(bias_path)
+    flat_frame = CalibrationFrame(
+        path=flat_path, telescope="T99", frame_type="Flat", binning=1, exptime=0.0, filter_name="Luminance",
+    )
+
+    with pytest.raises(SirilError):
+        build_master_flat([flat_frame], bias_path, tmp_path / "work")
+
+
 @requires_siril
 @requires_real_session
 def test_calibrate_lights_real_t24_command_unaffected_by_slice1(tmp_path: Path) -> None:
@@ -528,6 +616,93 @@ def test_select_dark_real_t21_luminance_group() -> None:
     assert selection.scaled is True
     assert selection.exptime == 900.0
     assert len(selection.frames) == 25
+
+
+# --- Step 1b gate (P): Siril run-to-run determinism, T21 Luminance -------
+# (plan-flats-v4.md ??4.0/Step 1b) -- at least 3 independent tmp_path
+# run_calibration() calls for T21's real Luminance BIN1 group, compared
+# pairwise, establish Siril's own run-to-run noise floor for this exact
+# real calibration; then ONE tmp-path run is compared against the real,
+# currently-persisted reference (a different process/session). The bound
+# is 2x the max observed tmp-vs-tmp delta -- exceeding it fails loudly
+# rather than silently widening the tolerance. This is also gate (P)'s
+# reference point for Step 3b's post-fix re-measurement.
+
+
+@requires_siril
+@requires_real_session
+def test_t21_luminance_flat_and_calibration_siril_determinism_bound(tmp_path: Path) -> None:
+    from astro_pipeline.master_builder import resolve_lights
+
+    report = scan_session(REAL_SESSION_DIR)
+    cal_index = report.calibration_index()
+    bias = cal_index[("T21", "Bias", 1, 0.0)]
+    lights, group_name = resolve_lights(report, "T21", "M51", "Luminance", 1)
+    light_exptimes = {f.exptime for f in lights}
+    selection = select_dark(cal_index, "T21", 1, light_exptimes)
+    flats = report.flat_index()[("T21", 1, "Luminance")]
+
+    def run_once(work_dir: Path):
+        return run_calibration(
+            light_frames=lights,
+            bias_frames=bias,
+            dark_frames=selection.frames,
+            work_dir=work_dir,
+            flat_frames=flats,
+            flat_policy=FlatPolicy.REQUIRE,
+            dark_scaled=selection.scaled,
+        )
+
+    tmp_results = [run_once(tmp_path / f"run{i}") for i in range(3)]
+
+    def flat_data(path: Path):
+        return fits.getdata(path, memmap=False).astype(np.float64)
+
+    flat_arrays = [flat_data(r.master_flat) for r in tmp_results]
+    max_tmp_delta = 0.0
+    for i in range(len(flat_arrays)):
+        for j in range(i + 1, len(flat_arrays)):
+            max_tmp_delta = max(max_tmp_delta, float(np.max(np.abs(flat_arrays[i] - flat_arrays[j]))))
+
+    max_tmp_calibrated_delta = 0.0
+    calibrated_sets = [sorted(r.calibrated_lights) for r in tmp_results]
+    for i in range(len(calibrated_sets)):
+        for j in range(i + 1, len(calibrated_sets)):
+            assert len(calibrated_sets[i]) == len(calibrated_sets[j])
+            for a, b in zip(calibrated_sets[i], calibrated_sets[j]):
+                delta = float(np.max(np.abs(flat_data(a) - flat_data(b))))
+                max_tmp_calibrated_delta = max(max_tmp_calibrated_delta, delta)
+
+    from conftest import PIPELINE_DIR
+
+    persisted_master_flat = PIPELINE_DIR / group_name / "flat" / "master.fit"
+    persisted_lights_dir = PIPELINE_DIR / group_name / "lights"
+    if not persisted_master_flat.exists():
+        pytest.skip(f"no persisted reference master flat at {persisted_master_flat}")
+    persisted_data = flat_data(persisted_master_flat)
+    tmp_vs_persisted_flat_delta = float(np.max(np.abs(flat_arrays[0] - persisted_data)))
+
+    flat_bound = 2 * max_tmp_delta
+    assert tmp_vs_persisted_flat_delta <= flat_bound, (
+        f"tmp-vs-persisted master flat delta {tmp_vs_persisted_flat_delta} exceeds "
+        f"2x the observed tmp-vs-tmp determinism bound {flat_bound} "
+        f"(max_tmp_delta={max_tmp_delta}) -- failing loudly rather than "
+        "silently widening the tolerance (plan-flats-v4.md ??4.0)."
+    )
+
+    persisted_calibrated = sorted(persisted_lights_dir.glob("pp_lights_*.fit*"))
+    if persisted_calibrated and len(persisted_calibrated) == len(calibrated_sets[0]):
+        calibrated_bound = 2 * max_tmp_calibrated_delta
+        tmp_vs_persisted_calibrated_delta = max(
+            float(np.max(np.abs(flat_data(a) - flat_data(b))))
+            for a, b in zip(calibrated_sets[0], persisted_calibrated)
+        )
+        assert tmp_vs_persisted_calibrated_delta <= calibrated_bound, (
+            f"tmp-vs-persisted calibrated-light delta {tmp_vs_persisted_calibrated_delta} "
+            f"exceeds 2x the observed tmp-vs-tmp determinism bound {calibrated_bound} "
+            f"(max_tmp_calibrated_delta={max_tmp_calibrated_delta}) -- failing loudly "
+            "rather than silently widening the tolerance (plan-flats-v4.md ??4.0)."
+        )
 
 
 # --- real end-to-end test: proves calibration works without flats ----------
