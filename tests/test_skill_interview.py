@@ -11,9 +11,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skill"))
 
-from interview import dark_scaling_notes, dedupe_calibration_warnings, session_summary  # noqa: E402
+from interview import (  # noqa: E402
+    consequence_annotations,
+    dark_scaling_notes,
+    dedupe_calibration_warnings,
+    flat_identity_preview,
+    render,
+    session_summary,
+    unrecognized_summary,
+)
 
 from conftest import PROJECT_DIR, requires_project  # noqa: E402
+from conftest import IC1396_PROJECT_DIR, requires_ic1396_project  # noqa: E402
 
 
 # --- dedupe_calibration_warnings ---------------------------------------------
@@ -181,3 +190,118 @@ def test_dedupe_actually_reduces_warning_count_on_real_data() -> None:
     # a failed regex match silently passing through unparsed.
     for line in deduped:
         assert ":" in line
+
+
+# --- Step 6a (plan-flats-v4.md): unrecognized_summary/consequence_annotations/
+# flat_identity_preview -- interview and run visibility (G6). --------------
+
+
+class _Frame:
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+
+class _FakeUnrecognizedReport:
+    def __init__(self, unrecognized: list) -> None:
+        self.unrecognized = unrecognized
+
+
+def test_unrecognized_summary_groups_and_counts_by_reason() -> None:
+    report = _FakeUnrecognizedReport(
+        [_Frame("A"), _Frame("A"), _Frame("B"), _Frame("A")]
+    )
+    lines = unrecognized_summary(report)
+    assert lines[0] == "  3x: A"
+    assert lines[1] == "  1x: B"
+
+
+def test_consequence_annotations_bias_dark_always_blocked() -> None:
+    class _FakeReport:
+        def flat_index(self):
+            return {}
+
+    lines = consequence_annotations(_FakeReport(), [
+        "T20 BIN1: no Bias frames (needed for Luminance)",
+        "T20 BIN1: no Dark frames at 300s (needed for Luminance)",
+    ])
+    assert all(line.startswith("  [BLOCKED]") for line in lines)
+
+
+def test_consequence_annotations_flat_require_is_blocked_skip_is_not() -> None:
+    class _FakeReport:
+        def __init__(self, has_flat: bool) -> None:
+            self._has_flat = has_flat
+
+        def flat_index(self):
+            return {("T20", 1, "Luminance"): ["f"]} if self._has_flat else {}
+
+    require_lines = consequence_annotations(
+        _FakeReport(has_flat=True), ["T20 BIN1: no Flat frames (needed for Red)"],
+    )
+    assert require_lines[0].startswith("  [BLOCKED]")
+
+    skip_lines = consequence_annotations(
+        _FakeReport(has_flat=False), ["T24 BIN1: no Flat frames (needed for Red)"],
+    )
+    assert "no flat applied" in skip_lines[0]
+    assert "[BLOCKED]" not in skip_lines[0]
+
+
+def test_flat_identity_preview_counts_copies_and_collisions(tmp_path: Path) -> None:
+    import numpy as np
+    from astropy.io import fits
+
+    class _CalFrame:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+    dir1, dir2 = tmp_path / "s1", tmp_path / "s2"
+    dir1.mkdir()
+    dir2.mkdir()
+
+    identical_a = dir1 / "identical.fit"
+    identical_b = dir2 / "identical.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(identical_a)
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(identical_b)
+
+    collide_a = dir1 / "skyflat0.fit"
+    collide_b = dir2 / "skyflat0.fit"
+    hdu_a = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16))
+    hdu_a.header["EXPTIME"] = 5.0
+    hdu_a.writeto(collide_a)
+    hdu_b = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16))
+    hdu_b.header["EXPTIME"] = 6.0
+    hdu_b.writeto(collide_b)
+
+    unique = dir1 / "skyflat1.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(unique)
+
+    frames = [_CalFrame(p) for p in (identical_a, identical_b, collide_a, collide_b, unique)]
+    summary = flat_identity_preview(frames)
+    assert summary == "5 frames (1 copies, 1 collisions)"
+
+
+@requires_project
+def test_render_real_m51_includes_new_step6_sections() -> None:
+    """Real gate check: M51's own interview output gains the new
+    Consequences/Matched flats/Unrecognized frames sections."""
+    from astro_pipeline.ingest import scan_session
+
+    report = scan_session(PROJECT_DIR)
+    text = render(PROJECT_DIR, report)
+    assert "Matched flats:" in text
+    assert "T21 BIN1/Luminance:" in text
+    # T24's own real "no flat" gap must be annotated, not just listed.
+    assert "no flat applied" in text or "[BLOCKED]" in text
+
+
+@requires_ic1396_project
+def test_render_real_ic1396_includes_unrecognized_section() -> None:
+    """IC 1396's real, still-unrecognized-today flat/bias/dark libraries
+    (flag off, as render()/scan_session default) must show up in the new
+    Unrecognized frames section -- previously invisible."""
+    from astro_pipeline.ingest import scan_session
+
+    report = scan_session(IC1396_PROJECT_DIR)
+    text = render(IC1396_PROJECT_DIR, report)
+    assert "Unrecognized frames" in text

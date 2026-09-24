@@ -712,6 +712,45 @@ def test_build_master_debayer_with_no_real_dark_skips_select_dark_and_requires_b
     assert captured["debayer"] is True
 
 
+# --- Step 6b (plan-flats-v4.md, fixes half of G6): a group proceeding
+# without a flat previously left no record of that fact anywhere. -----------
+
+
+def test_build_group_master_logs_no_flat_applied_note_when_flat_frames_empty(tmp_path: Path, monkeypatch) -> None:
+    import astro_pipeline.master_builder as master_builder_module
+
+    def fake_run_calibration(light_frames, bias, dark_frames, **kwargs):
+        class _FakeCalResult:
+            flat_corrected = False
+
+        return _FakeCalResult()
+
+    monkeypatch.setattr(master_builder_module, "run_calibration", fake_run_calibration)
+
+    stub_master = tmp_path / "stub_master.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
+
+    class _FakeStackResult:
+        master_path = stub_master
+
+    monkeypatch.setattr(master_builder_module, "register_and_stack", lambda *a, **k: _FakeStackResult())
+    monkeypatch.setattr(master_builder_module, "solve", lambda *a, **k: None)
+
+    class _FakeLightFrameWithExptime:
+        def __init__(self) -> None:
+            self.user = "observer1"
+            self.exptime = 300.0
+
+    cal_index = {("T24", "Bias", 1, 0.0): [_FakeLightFrame()], ("T24", "Dark", 1, 300.0): [_FakeLightFrame()]}
+    notes: list[str] = []
+    build_group_master(
+        tmp_path, [_FakeLightFrameWithExptime(), _FakeLightFrameWithExptime()], cal_index, "group", "Luminance",
+        "T24", 1, 5.588, -5.391, notes,
+        flat_frames=[], flat_policy=FlatPolicy.SKIP_IF_MISSING,
+    )
+    assert any("no flat applied (policy=skip_if_missing)" in line for line in notes)
+
+
 def test_build_master_debayer_with_a_real_dark_present_still_uses_it(tmp_path: Path, monkeypatch) -> None:
     """If a dark DOES exist for this (telescope, binning) even with
     debayer=True, it must still be used normally (select_dark() called,

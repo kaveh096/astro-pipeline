@@ -222,6 +222,12 @@ def build_group_master(
                 f"(matched {len(flat_frames)} {filter_name} flat frame(s))",
                 notes,
             )
+        else:
+            # Step 6b (plan-flats-v4.md, fixes half of G6): SKIP, no flat
+            # was previously silent here -- no note at all, so a run
+            # proceeding without flat correction left no record of that
+            # fact anywhere in `notes`.
+            _log(f"       {group_name}: no flat applied (policy={flat_policy.value})", notes)
 
     n = len(lights)
     filter_fwhm_pct = 90.0 if n >= 10 else None

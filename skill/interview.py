@@ -40,9 +40,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from astro_pipeline.calibration import CalibrationFramesMissingError, CalibrationMode, select_dark  # noqa: E402
+from astro_pipeline.calibration import CalibrationFramesMissingError, CalibrationMode, FlatPolicy, select_dark  # noqa: E402
 from astro_pipeline.ingest import CALIBRATION_WARNING_RES, IngestReport, scan_session, warning_telescope  # noqa: E402
-from astro_pipeline.calibration_policy import infer_calibration_mode  # noqa: E402
+from astro_pipeline.calibration_policy import infer_calibration_mode, infer_flat_policy  # noqa: E402
 
 # The three fixed templates IngestReport.missing_calibration_warnings()
 # emits today (ingest.py, CALIBRATION_WARNING_RES -- moved there from this
@@ -147,6 +147,86 @@ def precalibrated_telescopes(report: IngestReport) -> set[str]:
     return {t for t in telescopes if infer_calibration_mode(report, t) == CalibrationMode.PRECALIBRATED}
 
 
+def unrecognized_summary(report: IngestReport) -> list[str]:
+    """Step 6a(i) (plan-flats-v4.md, fixes half of G6): "Filenames and
+    FITS header both unrecognized" today just vanishes into
+    `report.unrecognized`, never rendered -- a real telescope's flats
+    can look flat-less and be SKIPped silently with no visible cause.
+    Grouped by `reason` (which already NAMES the real IMAGETYP verbatim
+    wherever the header was readable at all -- see `classify_frame`'s own
+    message text), not a separate IMAGETYP re-read: this is presentation
+    only, and a second header read per unrecognized frame just to
+    duplicate information already embedded in `reason` buys nothing.
+    """
+    from collections import Counter
+
+    counts = Counter(f.reason for f in report.unrecognized)
+    return [
+        f"  {count}x: {reason}"
+        for reason, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
+def consequence_annotations(report: IngestReport, deduped_warnings: list[str]) -> list[str]:
+    """Step 6a(ii): the existing flat-gap lines say WHAT is missing, never
+    the CONSEQUENCE -- darks get [BLOCKED] on a real run
+    (CalibrationFramesMissingError), flats do not, and neither says so
+    today. `_FLAT_RE`/the warning wording itself is untouched -- this
+    only annotates a separate copy of the same deduplicated lines.
+    """
+    annotated: list[str] = []
+    for line in deduped_warnings:
+        telescope = line.split(" BIN", 1)[0]
+        if "no Bias frames" in line or "no Dark frames" in line:
+            annotated.append(f"  [BLOCKED] {line}")
+        elif "no Flat frames" in line:
+            policy = infer_flat_policy(report, telescope)
+            if policy == FlatPolicy.REQUIRE:
+                annotated.append(f"  [BLOCKED] {line}")
+            else:
+                annotated.append(f"  (no flat applied -- proceeding without flat correction) {line}")
+        else:
+            annotated.append(f"  {line}")
+    return annotated
+
+
+def flat_identity_preview(frames: list) -> str:
+    """Step 6a(iii): `N frames (K copies, C collisions)`, using a CHEAP
+    header-identity signal (DATE-OBS, EXPTIME, file size), NOT SHA-256
+    (R3-10) -- the interview makes no copy of the flats the way
+    `run_calibration` does, so re-hashing T21's 330 flats (or T68's 88
+    large frames) on every interview run would be needlessly expensive.
+    The SHA-256-based mechanism stays in Step 3a's `run_calibration`
+    path, which copies the files anyway.
+    """
+    from collections import defaultdict
+
+    from astropy.io import fits
+
+    by_name: dict[str, list] = defaultdict(list)
+    for frame in frames:
+        by_name[frame.path.name].append(frame)
+
+    copies = 0
+    collisions = 0
+    for name, group in by_name.items():
+        if len(group) == 1:
+            continue
+        signatures = set()
+        for frame in group:
+            try:
+                header = fits.getheader(frame.path)
+                size = frame.path.stat().st_size
+                signatures.add((str(header.get("DATE-OBS")), header.get("EXPTIME"), size))
+            except OSError:
+                signatures.add(("unreadable", None, None))
+        if len(signatures) == 1:
+            copies += len(group) - 1
+        else:
+            collisions += 1
+    return f"{len(frames)} frames ({copies} copies, {collisions} collisions)"
+
+
 def session_summary(report: IngestReport) -> dict:
     """Real counts for the interview's "what was found" line -- no
     hardcoded target/telescope/binning assumed, so this generalizes to
@@ -195,6 +275,39 @@ def render(project_dir: Path, report: IngestReport) -> str:
     for line in deduped:
         lines.append(f"  - {line}")
     lines.append("")
+
+    # Step 6a(ii): the consequence of each gap above -- darks/bias always
+    # [BLOCKED]; flats depend on this run's own inferred/overridden
+    # FlatPolicy. A separate section; the gap lines themselves (and their
+    # dedupe-parseable wording) are untouched.
+    if deduped:
+        lines.append("Consequences:")
+        lines.extend(consequence_annotations(report, deduped))
+        lines.append("")
+
+    # Step 6a(iii): a cheap identity preview for every MATCHED flat group
+    # (as opposed to the gaps above, which are about MISSING ones) --
+    # surfaces G1's own class of finding (colliding basenames silently
+    # collapsed by staging) before a real run ever touches Siril.
+    flat_index = report.flat_index()
+    flat_preview_lines = [
+        f"  {telescope} BIN{binning}/{filt}: {flat_identity_preview(frames)}"
+        for (telescope, binning, filt), frames in sorted(flat_index.items())
+        if telescope not in precalibrated
+    ]
+    if flat_preview_lines:
+        lines.append("Matched flats:")
+        lines.extend(flat_preview_lines)
+        lines.append("")
+
+    # Step 6a(i): frames neither a filename pattern nor (if enabled)
+    # header-based fallback could place anywhere -- today's real, silent
+    # failure mode this section exists to end.
+    unrecognized_lines = unrecognized_summary(report)
+    if unrecognized_lines:
+        lines.append(f"Unrecognized frames ({len(report.unrecognized)} total):")
+        lines.extend(unrecognized_lines)
+        lines.append("")
 
     scaling = [
         line for line in dark_scaling_notes(report)
