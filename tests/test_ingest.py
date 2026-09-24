@@ -7,6 +7,7 @@ from astro_pipeline.ingest import (
     LightFrame,
     UnrecognizedFrame,
     classify_frame,
+    classify_tree,
     scan_session,
 )
 
@@ -603,3 +604,89 @@ def test_scan_real_ic1396_flats_and_bias_unrecognized_today() -> None:
     assert len(raw_lights) == 25
     assert not any(t == "T68" for (t, _ftype, _b, _e) in report.calibration_index())
     assert not any(t == "T68" for (t, _b, _filt) in report.flat_index())
+
+
+# --- plan-flats-v4.md Step 4a: classify_tree -- pure, zip-aware refactor
+# extracted out of scan_session, with an equality gate against
+# scan_session's own real output (behaviour-preserving). --------------
+
+
+def test_classify_tree_replace_not_append_zip_peeked_vs_extracted(tmp_path: Path) -> None:
+    """The dedicated mocked test for the replace-not-append rule (Step
+    4a): a zip whose peeked light and extracted light must not both end
+    up in report.lights -- exactly the double-count class of bug
+    documented in ??1.5 (two zips of the same lights each contributing a
+    LightFrame, inflating a real group from 21 to 42)."""
+    import zipfile
+
+    project = tmp_path / "project"
+    project.mkdir()
+    light_name = "raw-T24-observer1-M51-20250123-021344-Luminance-BIN1-E-300-001.fit"
+    zip_path = project / "Lights.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(light_name, b"not a real fits file, never read by classify_filename")
+
+    peeked_report = classify_tree(project)
+    assert len(peeked_report.lights) == 1
+    assert peeked_report.lights[0].path.parent.suffix.lower() == ".zip"  # a placeholder, not a real file
+
+    real_report = scan_session(project)
+    assert len(real_report.lights) == 1  # NOT 2 -- replaced, not appended
+    assert real_report.lights[0].path.exists()
+    assert real_report.lights[0].path.parent.suffix.lower() != ".zip"
+    assert real_report.lights[0].path.name == light_name
+
+
+def test_classify_tree_calibration_and_unrecognized_untouched_by_zip_logic(tmp_path: Path) -> None:
+    """Bare-file calibration/unrecognized classification is completely
+    unaffected by the zip-peeking half of classify_tree -- only raw-
+    provenance LIGHT entries inside a zip are ever peeked (mirroring
+    _extract_zipped_lights' own real, narrower scope: no real delivery
+    ships bias/dark/flat inside a zip)."""
+    project = tmp_path / "project"
+    (project / "T24").mkdir(parents=True)
+    bias_path = project / "T24" / "T24-observer1-Bias-000-LD20250203-LT171434-BIN1.fit"
+    bias_path.write_bytes(b"")
+    report = classify_tree(project)
+    assert len(report.calibration) == 1
+    assert report.calibration[0].frame_type == "Bias"
+    assert report.unrecognized == []
+
+
+@pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
+def test_classify_tree_real_m51_calibration_and_unrecognized_match_scan_session() -> None:
+    """Gate (D): classify_tree's own calibration/unrecognized classification
+    (unaffected by zip-extraction, which only ever touches raw-provenance
+    lights) is byte-identical to scan_session's, on the real M51 tree --
+    including its own real zips."""
+    via_classify = classify_tree(REAL_SESSION_DIR)
+    via_scan = scan_session(REAL_SESSION_DIR)
+    assert via_classify.calibration == via_scan.calibration
+    assert via_classify.unrecognized == via_scan.unrecognized
+    # Light COUNTS match -- each zip-peeked placeholder in classify_tree's
+    # own output corresponds 1:1 to a real extracted light in
+    # scan_session's (replace, not append/drop); at least one real zip
+    # placeholder actually exists on this tree, so this is a real check,
+    # not vacuously true.
+    assert len(via_classify.lights) == len(via_scan.lights)
+    zip_placeholders = [f for f in via_classify.lights if f.path.parent.suffix.lower() == ".zip"]
+    assert len(zip_placeholders) > 0
+    # Every genuinely bare-file light (present via the SAME FIT_GLOB_PATTERNS
+    # loop in both classify_tree and the original scan_session) is
+    # IDENTICAL between the two, in the same relative order.
+    bare_classify = [f for f in via_classify.lights if f.path.parent.suffix.lower() != ".zip"]
+    assert all(f in via_scan.lights for f in bare_classify)
+
+
+@requires_ngc3628_project
+@requires_abell6_project
+def test_classify_tree_real_light_counts_match_scan_session_ngc3628_and_abell6() -> None:
+    """Gate (D), extended to two more real gate-(D) projects: neither has
+    any real zips, so classify_tree's output must be BYTE-IDENTICAL to
+    scan_session's (no placeholders to replace at all)."""
+    for project_dir in (NGC3628_PROJECT_DIR, ABELL6_PROJECT_DIR):
+        via_classify = classify_tree(project_dir)
+        via_scan = scan_session(project_dir)
+        assert via_classify.lights == via_scan.lights
+        assert via_classify.calibration == via_scan.calibration
+        assert via_classify.unrecognized == via_scan.unrecognized

@@ -585,17 +585,61 @@ def _extract_zipped_lights(zip_path: Path, extract_dir: Path) -> list[LightFrame
     return extracted
 
 
-def scan_session(root: str | Path) -> IngestReport:
+def _peek_zipped_lights(zip_path: Path) -> list[LightFrame]:
+    """Classify a zip's raw-provenance light entries BY NAME ONLY, without
+    extracting anything -- the zip-aware half of `classify_tree` (Step 4a,
+    plan-flats-v4.md), mirroring `index._scan_zip`'s own peek-by-name
+    approach. Filters identically to `_extract_zipped_lights` below (raw
+    provenance only -- calibrated/jpeg zip entries are catalog-only
+    duplicates, and no real delivery seen so far ships calibration frames
+    inside a zip), just without the `zipfile.ZipFile...open/write`
+    extraction side effect.
+
+    Each peeked `LightFrame`'s `path` is a PLACEHOLDER, `zip_path / basename`
+    -- not a real, readable file. `scan_session` recognises this shape
+    (`path.parent.suffix.lower() == ".zip"`, which a genuine bare-file
+    light's parent directory can never be) and replaces every one of these
+    placeholders with its real extracted-file equivalent before returning
+    -- never appends both, which would double-count (see ??1.5's real M51
+    duplication bug this exact append-instead-of-replace mistake caused
+    elsewhere: `_instrument_groups_from` merging two zips' worth of
+    identically-named lights into one inflated group).
+    """
+    telescope_hint = _infer_telescope_from_path(zip_path)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+    except (zipfile.BadZipFile, OSError):
+        return []
+
+    peeked: list[LightFrame] = []
+    for inner_name in names:
+        basename = Path(inner_name).name
+        classified = classify_filename(basename, telescope_hint=telescope_hint)
+        if classified is None:
+            continue
+        kind, fields = classified
+        if kind != "light" or fields["provenance"] != "raw":
+            continue
+        peeked.append(LightFrame(path=zip_path / basename, **fields))
+    return peeked
+
+
+def classify_tree(root: str | Path) -> IngestReport:
+    """Pure, zip-aware classification (Step 4a, plan-flats-v4.md):
+    behaviour-preserving refactor extracted out of `scan_session` so its
+    fallback logic (Step 4b) is reviewable independently of this pure
+    classifier, with an exact-equality gate between the two.
+
+    Peeks lights inside zips BY NAME (`_peek_zipped_lights`, mirroring
+    `index._scan_zip`) rather than extracting them -- extraction is a real
+    filesystem side effect (writing into `_extracted_zips/`) that has no
+    place in a "just classify what's here" function. `scan_session` is the
+    only impure caller: it takes this report's zip-peeked placeholders and
+    REPLACES them with their real, extracted-file equivalents.
+    """
     root = Path(root)
     report = IngestReport()
-    # Zip-wrapped lights are extracted into the pipeline's own generated
-    # directory. That is deliberate, not incidental: is_generated() already
-    # excludes everything under GENERATED_DIRNAME from the raw-file scan
-    # below, so the extracted copies can never be re-discovered as if they
-    # were additional raw deliveries on a second run (see is_generated's
-    # docstring for the real bug that exact mistake caused with staged
-    # calibration copies).
-    extract_dir = root / GENERATED_DIRNAME / "_extracted_zips"
 
     seen: set[Path] = set()
     for pattern in FIT_GLOB_PATTERNS:
@@ -616,6 +660,34 @@ def scan_session(root: str | Path) -> IngestReport:
             if path in seen or is_generated(path, root):
                 continue
             seen.add(path)
+            report.lights.extend(_peek_zipped_lights(path))
+
+    return report
+
+
+def scan_session(root: str | Path) -> IngestReport:
+    root = Path(root)
+    # Zip-wrapped lights are extracted into the pipeline's own generated
+    # directory. That is deliberate, not incidental: is_generated() already
+    # excludes everything under GENERATED_DIRNAME from the raw-file scan
+    # below, so the extracted copies can never be re-discovered as if they
+    # were additional raw deliveries on a second run (see is_generated's
+    # docstring for the real bug that exact mistake caused with staged
+    # calibration copies).
+    extract_dir = root / GENERATED_DIRNAME / "_extracted_zips"
+
+    report = classify_tree(root)
+
+    # Replace (never append) each zip-peeked placeholder with its real
+    # extracted-file equivalent -- see classify_tree/_peek_zipped_lights'
+    # own docstrings for why appending both would double-count.
+    report.lights = [
+        light for light in report.lights if light.path.parent.suffix.lower() != ".zip"
+    ]
+    for pattern in ARCHIVE_GLOB_PATTERNS:
+        for path in root.rglob(pattern):
+            if is_generated(path, root):
+                continue
             report.lights.extend(_extract_zipped_lights(path, extract_dir))
 
     return report
