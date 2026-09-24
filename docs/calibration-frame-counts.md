@@ -79,6 +79,22 @@ Rough guidance:
 |---|---|---|---|
 | T24 | 5 per binning | 5 per binning (300s) | **none** — never downloadable, and the subscription has lapsed |
 | T21 | 82 per binning | 25 per binning (900s) | 330 raw sky flats + pre-built masters |
+| T20 (M42) | 50 (BIN1) / 49 (BIN2, +1 truncated) | 10 (BIN1, 180s) + 10 (BIN2, 180s) + 10 (BIN2, 300s) | 70 raw (10 each L/R/G/B/Ha/SII, 9+1 truncated OIII) — **~21 months older than the lights** (real dust/vignetting-drift risk, see `plan-flats-v4.md` §5) |
+| T68 (IC 1396) | 48 (BIN1) | 50 (BIN1, 240s) | 88 raw, all Color/BIN1 — real `DATE-OBS=1970` (camera clock unset) on the calibration frames |
+| T05 (M31) | 15 (BIN1) | 16 (BIN1, 180s, **−15°C** — real, unfixed temperature mismatch vs the lights' −10°C, G15) | 120 raw (40 each R/G/B) — the freshest of the three, 19 days old |
+
+None of T20/T68/T05's calibration frames are recognised by FILENAME
+today (`plan-flats-v4.md`'s own Step 4) — no telescope token anywhere in
+their path. `plan-flats-v4.md` (Steps 0–8, shipped 2026-09-24) added
+opt-in, header-based recognition (`--calibration-header-fallback`) that
+makes these real counts visible in `calibration_index()`/`flat_index()`,
+but deliberately does NOT flip any of these three telescopes off
+`CalibrationMode.PRECALIBRATED` by default (Decision Q2) and does NOT
+reprocess any of their real delivered images (Decision Q9) — recognition
+and reprocessing are two separate decisions, and only the first has
+shipped. The per-target local-flats-vs-iTelescope measurement (whether
+reprocessing any of these three with local flats would actually help) is
+the deliberate next step, not yet done — see `docs/ROADMAP.md` §4.1.
 
 So T24 is the worst case on every axis and T21 should calibrate visibly
 cleaner. When the multi-instrument path lands, that difference is worth

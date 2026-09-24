@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from astro_pipeline.calibration import DEFAULT_PEDESTAL, CalibrationMode  # noqa: E402
+from astro_pipeline.calibration import DEFAULT_PEDESTAL, CalibrationMode, FlatPolicy  # noqa: E402
 from astro_pipeline.narrowband_filters import NARROWBAND_PALETTES  # noqa: E402
 from astro_pipeline.narrowband_orchestrator import run_narrowband  # noqa: E402
 
@@ -43,6 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--calibration-header-fallback", action="store_true",
         help="opt-in header-based recognition of calibration frames a filename pattern can't see (Step 4b)",
     )
+    p.add_argument(
+        "--flat-policy", choices=["require", "skip_if_missing"], default=None,
+        help="override this run's inferred FlatPolicy",
+    )
     return p
 
 
@@ -62,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         force=args.force,
         calibration_mode=CalibrationMode(args.calibration_mode) if args.calibration_mode else None,
         calibration_header_fallback=args.calibration_header_fallback,
+        flat_policy=FlatPolicy(args.flat_policy) if args.flat_policy else None,
     )
 
     print("=== NOTES ===")

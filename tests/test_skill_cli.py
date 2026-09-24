@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skill"))
 
-from astro_pipeline.calibration import CalibrationMode  # noqa: E402
+from astro_pipeline.calibration import CalibrationMode, FlatPolicy  # noqa: E402
 
 
 # --- run_stage.py: repeatable TEL=value dict form ---------------------------
@@ -175,6 +175,7 @@ def argparse_from_boost_main():
     p.add_argument("--no-luminance", action="store_true")
     p.add_argument("--calibration-mode", choices=["raw_local", "precalibrated"], default=None)
     p.add_argument("--calibration-header-fallback", action="store_true")
+    p.add_argument("--flat-policy", choices=["require", "skip_if_missing"], default=None)
     return p
 
 
@@ -291,3 +292,129 @@ def test_interview_main_defaults_calibration_header_fallback_false(monkeypatch) 
     monkeypatch.setattr(interview, "scan_session", fake_scan_session)
     interview.main(["interview.py", "some_project"])
     assert captured.get("calibration_header_fallback") is False
+
+
+# --- Step 8: --flat-policy, added to run_stage.py/run_narrowband.py/
+# run_narrowband_boost.py/interview.py alongside --calibration-mode. ------
+
+
+def test_run_stage_parses_flat_policy() -> None:
+    import run_stage
+
+    args = run_stage.build_parser().parse_args(
+        [
+            "proj", "--telescope", "T24", "--target", "M51",
+            "--ra-hours", "13.4", "--dec-deg", "47.2", "--flat-policy", "require",
+        ]
+    )
+    assert args.flat_policy == "require"
+
+
+def test_run_stage_main_passes_flat_policy_to_run_lrgb(monkeypatch) -> None:
+    import run_stage
+
+    captured = {}
+
+    def fake_run_lrgb(**kwargs):
+        captured.update(kwargs)
+
+        class _Result:
+            notes = []
+            checkpoints = []
+            composite_path = None
+            export_result = None
+
+        return _Result()
+
+    monkeypatch.setattr(run_stage, "run_lrgb", fake_run_lrgb)
+    run_stage.main(
+        [
+            "proj", "--telescope", "T24", "--target", "M51",
+            "--ra-hours", "13.4", "--dec-deg", "47.2", "--flat-policy", "skip_if_missing",
+        ]
+    )
+    assert captured["flat_policy"] == FlatPolicy.SKIP_IF_MISSING
+
+
+def test_run_narrowband_parses_and_passes_flat_policy(monkeypatch) -> None:
+    import run_narrowband
+
+    args = run_narrowband.build_parser().parse_args(
+        [
+            "proj", "--telescope", "T20", "--target", "M42",
+            "--ra-hours", "5.588", "--dec-deg", "-5.391", "--flat-policy", "require",
+        ]
+    )
+    assert args.flat_policy == "require"
+
+    captured = {}
+
+    def fake_run_narrowband(**kwargs):
+        captured.update(kwargs)
+
+        class _Result:
+            notes = []
+            checkpoints = []
+            composite_path = None
+            export_result = None
+
+        return _Result()
+
+    monkeypatch.setattr(run_narrowband, "run_narrowband", fake_run_narrowband)
+    run_narrowband.main(
+        [
+            "proj", "--telescope", "T20", "--target", "M42",
+            "--ra-hours", "5.588", "--dec-deg", "-5.391", "--flat-policy", "require",
+        ]
+    )
+    assert captured["flat_policy"] == FlatPolicy.REQUIRE
+
+
+def test_run_narrowband_boost_parses_flat_policy() -> None:
+    parser = argparse_from_boost_main()
+    args = parser.parse_args(
+        [
+            "proj", "--telescope", "T20", "--target", "M42",
+            "--ra-hours", "5.588", "--dec-deg", "-5.391", "--flat-policy", "skip_if_missing",
+        ]
+    )
+    assert args.flat_policy == "skip_if_missing"
+
+
+def test_interview_main_threads_flat_policy_override(monkeypatch) -> None:
+    import interview
+
+    captured = {}
+    real_render = interview.render
+
+    def spy_render(project_dir, report, flat_policy_override=None):
+        captured["flat_policy_override"] = flat_policy_override
+        return real_render(project_dir, report, flat_policy_override)
+
+    def fake_scan_session(project_dir, **kwargs):
+        class _EmptyReport:
+            lights = []
+            calibration = []
+            unrecognized = []
+
+            def instrument_groups(self):
+                return {}
+
+            def calibration_index(self):
+                return {}
+
+            def calibrated_instrument_groups(self):
+                return {}
+
+            def flat_index(self):
+                return {}
+
+            def missing_calibration_warnings(self):
+                return []
+
+        return _EmptyReport()
+
+    monkeypatch.setattr(interview, "scan_session", fake_scan_session)
+    monkeypatch.setattr(interview, "render", spy_render)
+    interview.main(["interview.py", "some_project", "--flat-policy", "require"])
+    assert captured["flat_policy_override"] == FlatPolicy.REQUIRE

@@ -352,11 +352,19 @@ class ColourContributorBuilder:
         there is nothing to align. Real case: T02 (Abell 6 and HFG1) --
         confirmed genuine undemosaiced Bayer CFA data (RGGB), no local
         Bias/Dark at all, so PRECALIBRATED. RAW_LOCAL + debayer is also
-        real and supported (T68 / IC 1396: local bias, no local dark at
-        all -- see build_group_master()'s bias-only-when-no-dark-exists
-        branch), so `calibration_mode` is not always PRECALIBRATED in
-        general, just for every OSC target seen so far that has no local
-        calibration frames.
+        real and supported (T68 / IC 1396: local bias, no RECOGNIZED
+        local dark at all -- see build_group_master()'s
+        bias-only-when-no-dark-exists branch), so `calibration_mode` is
+        not always PRECALIBRATED in general, just for every OSC target
+        seen so far that has no local calibration frames RECOGNIZED.
+        **Corrected, plan-flats-v4.md**: T68 itself resolves
+        PRECALIBRATED today too (its real bias/dark, and IC 1396's real
+        88-frame flat library, carry no "T68" folder token anywhere in
+        their path, so filename recognition sees none of them at all) --
+        this RAW_LOCAL+debayer branch is real, tested code, but currently
+        unreached for T68 without an explicit `--calibration-mode`
+        override (and, separately, `build_osc`'s own `cal_index={}`
+        `KeyError` bug, deferred).
 
         Returns None -- logging why, rather than raising -- for the same
         reasons build_rgb() does: no OSC lights found, or too few to form

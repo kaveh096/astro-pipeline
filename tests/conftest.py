@@ -148,10 +148,20 @@ requires_abell6_project = pytest.mark.skipif(
 # undemosaiced Bayer CFA data, with REAL LOCAL BIAS (48 subs, in bias2/)
 # but NO real local dark frames at all -- the real fixture for capability
 # B's bias-only + debayer RAW_LOCAL calibration path (2026-09 publish
-# roadmap). Real BAYERPAT header holds a non-standard placeholder
-# ("VALID"), confirmed via direct header inspection, not a real pattern
-# code -- bayer_pattern must be passed explicitly (RGGB=0), never
-# auto-detected from this delivery's header.
+# roadmap), exercised there via MANUALLY-constructed CalibrationFrame
+# objects (a direct glob of bias2/), not via scan_session. **Corrected,
+# plan-flats-v4.md**: via the real ingest pipeline (scan_session), T68 is
+# NOT RAW_LOCAL today -- its real bias/dark carry no "T68" folder token
+# anywhere in their path, so filename-based recognition sees zero local
+# Bias/Dark for T68 at all, and infer_calibration_mode resolves
+# PRECALIBRATED (real calibrated-provenance Color lights exist). RAW_LOCAL
+# OSC is real, tested code (this fixture proves the mechanics work), but
+# unreachable end-to-end for T68 today without an explicit
+# --calibration-mode override AND fixing build_osc's own cal_index={}
+# KeyError bug (deferred, plan-flats-v4.md ??5). Real BAYERPAT header
+# holds a non-standard placeholder ("VALID"), confirmed via direct header
+# inspection, not a real pattern code -- bayer_pattern must be passed
+# explicitly (RGGB=0), never auto-detected from this delivery's header.
 IC1396_PROJECT_DIR = _under(_ITELESCOPE_DIR, "IC 1396 - Elephant Trunk - RGB - T68 - Sep 2021")
 requires_ic1396_project = pytest.mark.skipif(
     not IC1396_PROJECT_DIR.exists(), reason=f"raw project folder not present: {IC1396_PROJECT_DIR}"

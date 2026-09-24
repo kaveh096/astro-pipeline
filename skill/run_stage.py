@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from astro_pipeline.calibration import DEFAULT_PEDESTAL, CalibrationMode  # noqa: E402
+from astro_pipeline.calibration import DEFAULT_PEDESTAL, CalibrationMode, FlatPolicy  # noqa: E402
 from astro_pipeline.lrgb_orchestrator import run_lrgb  # noqa: E402
 
 
@@ -95,6 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--calibration-header-fallback", action="store_true",
         help="opt-in header-based recognition of calibration frames a filename pattern can't see (Step 4b)",
     )
+    p.add_argument(
+        "--flat-policy", choices=["require", "skip_if_missing"], default=None,
+        help="override every telescope's inferred FlatPolicy uniformly for this run",
+    )
     return p
 
 
@@ -116,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         force=set(args.force) or None,
         calibration_mode=_parse_calibration_mode_dict(args.calibration_mode),
         calibration_header_fallback=args.calibration_header_fallback,
+        flat_policy=FlatPolicy(args.flat_policy) if args.flat_policy else None,
     )
 
     print("=== NOTES ===")

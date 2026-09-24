@@ -167,12 +167,20 @@ def unrecognized_summary(report: IngestReport) -> list[str]:
     ]
 
 
-def consequence_annotations(report: IngestReport, deduped_warnings: list[str]) -> list[str]:
+def consequence_annotations(
+    report: IngestReport, deduped_warnings: list[str], flat_policy_override: FlatPolicy | None = None,
+) -> list[str]:
     """Step 6a(ii): the existing flat-gap lines say WHAT is missing, never
     the CONSEQUENCE -- darks get [BLOCKED] on a real run
     (CalibrationFramesMissingError), flats do not, and neither says so
     today. `_FLAT_RE`/the warning wording itself is untouched -- this
     only annotates a separate copy of the same deduplicated lines.
+
+    `flat_policy_override` (Step 8): mirrors `run_lrgb`'s own uniform
+    `--flat-policy` override -- when given, used for EVERY telescope's
+    annotation here instead of each one's own `infer_flat_policy` result,
+    so the interview's preview matches what a run with that same override
+    would actually do.
     """
     annotated: list[str] = []
     for line in deduped_warnings:
@@ -180,7 +188,7 @@ def consequence_annotations(report: IngestReport, deduped_warnings: list[str]) -
         if "no Bias frames" in line or "no Dark frames" in line:
             annotated.append(f"  [BLOCKED] {line}")
         elif "no Flat frames" in line:
-            policy = infer_flat_policy(report, telescope)
+            policy = flat_policy_override if flat_policy_override is not None else infer_flat_policy(report, telescope)
             if policy == FlatPolicy.REQUIRE:
                 annotated.append(f"  [BLOCKED] {line}")
             else:
@@ -241,7 +249,7 @@ def session_summary(report: IngestReport) -> dict:
     }
 
 
-def render(project_dir: Path, report: IngestReport) -> str:
+def render(project_dir: Path, report: IngestReport, flat_policy_override: FlatPolicy | None = None) -> str:
     summary = session_summary(report)
     lines = [f"=== {project_dir.name} ==="]
     lines.append(f"Telescopes found: {', '.join(summary['telescopes']) or '(none)'}")
@@ -282,7 +290,7 @@ def render(project_dir: Path, report: IngestReport) -> str:
     # dedupe-parseable wording) are untouched.
     if deduped:
         lines.append("Consequences:")
-        lines.extend(consequence_annotations(report, deduped))
+        lines.extend(consequence_annotations(report, deduped, flat_policy_override))
         lines.append("")
 
     # Step 6a(iii): a cheap identity preview for every MATCHED flat group
@@ -321,17 +329,24 @@ def render(project_dir: Path, report: IngestReport) -> str:
 
 
 def main(argv: list[str]) -> int:
-    calibration_header_fallback = "--calibration-header-fallback" in argv
-    positional = [a for a in argv[1:] if a != "--calibration-header-fallback"]
-    if len(positional) != 1:
-        print(
-            "usage: python interview.py <project_dir> [--calibration-header-fallback]",
-            file=sys.stderr,
-        )
-        return 2
-    project_dir = Path(positional[0])
-    report = scan_session(project_dir, calibration_header_fallback=calibration_header_fallback)
-    print(render(project_dir, report))
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="interview.py")
+    parser.add_argument("project_dir")
+    parser.add_argument(
+        "--calibration-header-fallback", action="store_true",
+        help="opt-in header-based recognition of calibration frames a filename pattern can't see (Step 4b)",
+    )
+    parser.add_argument(
+        "--flat-policy", choices=["require", "skip_if_missing"], default=None,
+        help="preview consequence annotations as if this FlatPolicy were uniformly overridden",
+    )
+    args = parser.parse_args(argv[1:])
+
+    project_dir = Path(args.project_dir)
+    report = scan_session(project_dir, calibration_header_fallback=args.calibration_header_fallback)
+    flat_policy_override = FlatPolicy(args.flat_policy) if args.flat_policy else None
+    print(render(project_dir, report, flat_policy_override))
     return 0
 
 

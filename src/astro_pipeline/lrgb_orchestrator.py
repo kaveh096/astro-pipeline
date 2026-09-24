@@ -334,9 +334,18 @@ class LRGBOrchestrator:
             # Precalibrated-path plan: a PRECALIBRATED telescope's flats are
             # never consulted at all (already flat-corrected upstream, see
             # stage_precalibrated_lights()'s docstring) -- calling
-            # infer_flat_policy on it would be misleading, since T73 DOES ship
-            # (BIN1-only) flats and would report REQUIRE despite this run path
-            # never using them.
+            # infer_flat_policy on it would be misleading regardless of what
+            # it happens to return. **Corrected, plan-flats-v4.md**: T73's
+            # real on-disk "Master_Flat"/"Master_Bias" files are masters
+            # (CALSTAT=M), correctly rejected by both filename recognition
+            # and Step 4b's header fallback -- flat_index() for T73 is
+            # verified EMPTY (infer_flat_policy would actually report
+            # SKIP_IF_MISSING, not REQUIRE, if it were called here). The
+            # bypass below is still correct and still needed -- a
+            # PRECALIBRATED telescope's flats must never be consulted at
+            # all regardless of what any inferred policy says -- the
+            # original justification (T73 ships real flats infer_flat_policy
+            # would misread as REQUIRE) was simply factually wrong.
             if lum_calibration_mode == CalibrationMode.PRECALIBRATED:
                 lum_flat_frames: list = []
                 lum_flat_policy = FlatPolicy.SKIP_IF_MISSING

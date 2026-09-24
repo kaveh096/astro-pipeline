@@ -36,7 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from astro_pipeline.calibration import CalibrationMode  # noqa: E402
+from astro_pipeline.calibration import CalibrationMode, FlatPolicy  # noqa: E402
 from astro_pipeline.export_image import export  # noqa: E402
 from astro_pipeline.ingest import scan_session  # noqa: E402
 from astro_pipeline.master_builder import build_single_filter_master  # noqa: E402
@@ -85,6 +85,10 @@ def main(argv: list[str] | None = None) -> int:
         "--calibration-header-fallback", action="store_true",
         help="opt-in header-based recognition of calibration frames a filename pattern can't see (Step 4b)",
     )
+    p.add_argument(
+        "--flat-policy", choices=["require", "skip_if_missing"], default=None,
+        help="override this boost filter's inferred FlatPolicy",
+    )
     args = p.parse_args(argv)
 
     project_dir = Path(args.project_dir)
@@ -102,9 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     report = _NarrowbandNormalizingReport(raw_report)
 
     print(f"[run ] building {args.boost_filter} master (BIN{args.binning})")
+    flat_policy = FlatPolicy(args.flat_policy) if args.flat_policy else None
     narrowband_master = build_single_filter_master(
         project_dir, report, args.telescope, args.target, args.boost_filter, args.binning,
-        args.ra_hours, args.dec_deg, notes, calibration_mode=calibration_mode,
+        args.ra_hours, args.dec_deg, notes, calibration_mode=calibration_mode, flat_policy=flat_policy,
     )
     for line in notes:
         print("      ", line)

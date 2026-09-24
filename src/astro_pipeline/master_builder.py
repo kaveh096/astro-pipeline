@@ -177,7 +177,15 @@ def build_group_master(
 
         # OSC + local raw calibration plan (2026-09): a real, not
         # hypothetical, case -- T68 (IC 1396) has real local bias but NO
-        # real local dark frames at all. select_dark() correctly raises
+        # RECOGNIZED local dark frames at all in `cal_index` (**corrected,
+        # plan-flats-v4.md**: 50 real dark frames physically exist on
+        # disk, unrecognized today because no "T68" folder token is
+        # anywhere in their path -- opt-in header-based recognition,
+        # `--calibration-header-fallback`, can see them, but per Decision
+        # Q2 that never flips T68 out of PRECALIBRATED by default, so this
+        # RAW_LOCAL bias-only+debayer branch stays unreached for T68
+        # without an explicit --calibration-mode override). select_dark()
+        # correctly raises
         # CalibrationFramesMissingError when no dark exists at this
         # binning (its own documented case 3) -- appropriate for a mono
         # RAW_LOCAL telescope (dark is always required there), but real,

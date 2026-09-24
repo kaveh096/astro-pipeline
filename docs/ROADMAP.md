@@ -76,6 +76,72 @@ never will for that delivery, so this pass deliberately left T24
 untouched. See Section 4.1 for what "finish the flats work" actually
 means going forward -- this is genuinely partial, not abandoned.
 
+Note: `plan-flats-v3.md` itself was never committed to the repo -- its
+content survives only in the 4 commits above and in docstrings that cite
+it (see `plan-flats-v4.md`'s own "Provenance of v3" note).
+
+### 2.2a Flat-field correctness + ingest recognition (`plan-flats-v4.md` Steps 0-8, shipped 2026-09-24)
+Branch `flats-v4-core`, one commit per step (`git log` on that branch for
+the full list). 8 rounds of adversarial review before implementation
+(`docs/plan-flats-v4-review-round1..8.md`), then finalized (rev 9) with
+Kaveh's decisions recorded in the plan's own ??6.
+
+**What shipped**:
+- **G1/G2 fix (Decision Q1, "fix now"), unconditional**: T21 Luminance's
+  real master flat had two defects -- 10 colliding generic `skyflat<N>`
+  basenames across two twilight sessions silently collapsed 30 matched
+  frames to 20 staged (I5's basename-overwrite behaviour), and the master
+  was stacked with Siril's default normalisation instead of the
+  `-norm=mul` its own bundled reference scripts use. Both fixed:
+  content-aware flat staging (dedupe byte-identical copies, disambiguate
+  genuine name collisions -- all 30 now survive) plus `-norm=mul`. This
+  changes T21's real master-flat pixels the next time the real M51
+  pipeline actually runs.
+- **A mode-aware `calibration_recipe` mechanism** (`ContributorSignature`/
+  `RunSignature`) so this and any future calibration-code behaviour
+  change (flat staging/normalisation, bias/dark normalisation, an OSC
+  calibrate-command shape change) can bump one versioned string instead
+  of adding a new schema field each time.
+- **Ingest recognition** (opt-in, `--calibration-header-fallback`, off by
+  default) of real calibration libraries at M42/T20, IC 1396/T68 and
+  M31/T05 that no filename pattern could see at all -- via `IMAGETYP`
+  header reads, with a telescope-attribution fallback (ancestor-directory
+  token, normalised) and an INSTRUME/NAXIS cross-check. **Decision Q2
+  ("Keep", permanent)**: recognition alone never flips any telescope's
+  `CalibrationMode` -- T20/T68/T05 all stay PRECALIBRATED by default,
+  forever, not just for this round. An explicit `--calibration-mode`
+  override (three distinct CLI shapes per entry point) remains the only
+  way to actually exercise a header-recognised RAW_LOCAL set.
+- Siril's silent `NOT USING FLAT:`/`NOT USING OFFSET:` drops (6+6 real
+  variants, previously only `NOT USING DARK:` was caught) now raise
+  instead of passing unnoticed (exit code 0).
+- Interview visibility (`skill/interview.py`): gap-line consequence
+  annotations (`[BLOCKED]` vs "no flat applied, proceeding"), a matched-
+  flat identity preview (cheap header signal, not SHA-256), and an
+  "Unrecognized frames" section, grouped by reason.
+- Flat sanity notes (level/saturation/exposure/age), warning-only,
+  heuristic, computed on a small sample of RAW flats (never the
+  Siril-normalised master, which is a 32-bit float in `[0, 1]`).
+
+**What did NOT ship (per Decision Q9, deliberately)**: no behaviour
+change to M42/IC 1396/M31's real delivered images -- recognition is
+opt-in and mode-inert. No OSC flats (Q5, `build_osc`'s `cal_index={}`
+`KeyError` still stands). No narrowband master-invalidation tracking
+(Q6, `--force` only, unchanged). See ??4.1 below for what's actually next.
+
+**Event E** (the real M51 pipeline regeneration this fix requires, plus
+recording the new hashes/`STACKCNT`/FWHM here) is a **separate,
+not-yet-run step** -- the duplicate M51 light folders
+(`Uncalibrated Lights - Jan 2025/`, `calibrated Lights - T24 - Feb 2025/`)
+have been deleted (confirmed: real post-deletion counts T24 raw=95,
+T21 raw=2, T24 L bin1=21, T21 L bin1=2, matching the plan's own numbers
+exactly), but the actual `run_lrgb` call that rebuilds M51 under the new
+recipe, checks `luminance_selected`/`colour_reference` didn't flip, and
+re-pins gate (P)'s reference has NOT been run yet. **Whoever picks this
+up next**: read `plan-flats-v4.md` ??4.0's full event-E procedure before
+running it -- it's a snapshot-first, checked procedure, not a bare
+`run_lrgb` call.
+
 ### 2.3 The "5-task publish roadmap" (2026-09-12 -> 2026-09-17, this long session)
 Goal: prepare the repo for public GitHub release. Full blow-by-blow detail
 lives in memory (`project_astro_pipeline_publish_roadmap` -- a Claude Code
@@ -299,15 +365,30 @@ own docstring documents a real past bug from exactly this).
 ## 4. Deferred / not-started work (future tasks, in no particular priority order)
 
 ### 4.1 Finish flat-field calibration for other telescopes
-Only T21 has real flat frames wired in (Section 2.2). T24 structurally
-never will for the M51 delivery, but this was never revisited for other
-telescopes as new data comes in (T73, T59, T02, T68, or any future
-telescope). If/when flat frames exist for one of those, the
-`build_master_flat()`/`calibration_index()` machinery already generalizes
--- confirm by reading `plan-flats-v3.md`'s own commits (`git log
-46ce43f..0314e47`) for what's already generic vs. T21-specific before
-assuming a from-scratch design is needed. Kaveh: **explicitly asked to
-keep this on the roadmap, wants to get to it eventually.**
+**Updated by `plan-flats-v4.md` Steps 0-8 (Section 2.2a)**: ingest can now
+SEE real flat/bias/dark libraries at M42/T20, IC 1396/T68 and M31/T05
+(opt-in `--calibration-header-fallback`), and the `build_master_flat()`/
+`calibration_index()` machinery already generalizes to them (confirmed:
+real gate-(D) counts match exactly) -- but recognition alone changes
+nothing (Decision Q2, PRECALIBRATED stays the default for all three,
+permanently). The **actual next step, per Kaveh's decision (Q3/Q9)**,
+is the per-target local-flats-vs-iTelescope measurement, NOT reprocessing
+blind:
+- M42/T20, IC 1396/T68 and M31/T05 EACH get their own measurement (same
+  corner/centre-ratio or half-split method T21's own real measurement
+  used) -- not one shared verdict.
+- Needs only Step 4b's recognition + Step 2's `calibration_recipe_parts`
+  mechanism -- not Steps 3b/6/7 or the CLI flags.
+- **Reprocess only where a target's own measurement shows a genuine,
+  quantified improvement.** Real risk per target argues against blind
+  reprocessing: M42's flat library is 21 months older than its lights
+  (dust/vignetting-drift risk); IC 1396's calibration timestamps are
+  corrupted (`DATE-OBS=1970`) and has no RAW_LOCAL OSC code path at all
+  (see 4.3); M31's flats are the freshest (19 days) but its darks are at
+  the wrong temperature (-15C vs -10C lights) -- **fix that (G15) before
+  or as part of measuring M31**, or the measurement itself is unreliable.
+- Full mechanics/cost-reduction notes in `plan-flats-v4.md` ??5's own
+  measurement bullet -- read that before starting, don't re-derive it.
 
 ### 4.2 Multi-instrument RGB/colour discovery generalization
 Luminance discovery was generalized across telescopes in `plan-rev4`
@@ -329,6 +410,16 @@ through real SPCC colour calibration today would raise
 `UnknownInstrumentError`. Needs T68's real sensor identified and a
 profile added (same shape as `T02_OSC_PROFILE`) before IC 1396 can get a
 real finished colour composite.
+
+Related, not the same gap: `plan-flats-v4.md` (Decision Q5, deferred)
+separately found `build_osc` passes `cal_index={}`, which raises
+`KeyError` before RAW_LOCAL OSC calibration is ever reached at all --
+i.e. even with a real SPCC profile added here, T68 still can't reach
+RAW_LOCAL OSC flat correction without that `KeyError` fixed too. Revisit
+both together only if IC 1396's own future per-target measurement
+(Section 4.1) shows a real benefit -- IC 1396 is the lowest-priority of
+the three per-target candidates given its corrupted calibration
+timestamps, so neither gap is being picked up speculatively ahead of that.
 
 ### 4.4 M42 (Orion)'s Green-bin2 registration failure -- unresolved, real data quality issue
 Real Siril registration fails ("Found 0 stars in reference") because 2 of
@@ -383,6 +474,13 @@ functions. Not needed today; noted for completeness.
   cropping, colour-grading, or Photoshop automation of any kind. This is
   a repeatedly-reinforced design boundary, not a one-off preference (see
   Section 6 for why it was explicitly rejected once already).
+- **T24 (M51) has zero flats, permanently, by binding decision -- not
+  reopened by `plan-flats-v4.md`.** Documented fact, not a scope change
+  (Decision Q8, 2026-09-24): jmwill's `calibrated-` T24 BIN1 copies are
+  `CALSTAT=BDF` -- already flat-corrected server-side by iTelescope. This
+  is a fact about the existing delivery (T24's OWN local calibration
+  still has no flats of any kind), surfaced for completeness, not a
+  reason to revisit the "no T24 flats" decision from ??2.2.
 
 ---
 

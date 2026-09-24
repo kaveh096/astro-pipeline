@@ -7,20 +7,24 @@ version: 2.0.0
 # Astro Pipeline: run wrapper
 
 Interviews the user about a project folder, then drives the pipeline
-(`src/astro_pipeline/pipeline.py`) one stage at a time via the `skill/run_*.py`
-scripts, stopping at real control-flow boundaries to show what happened and
-let a human Proceed / Adjust / Abort. This skill adds no pipeline behaviour
-of its own -- it calls the pipeline, reads back `result.notes` /
-`result.checkpoints`, and presents them. If this file disagrees with the
-code, trust the code.
+(`src/astro_pipeline/lrgb_orchestrator.py`/`narrowband_orchestrator.py` --
+`pipeline.py` no longer exists, split apart in Task 5's OOP refactor) one
+stage at a time via the `skill/run_*.py` scripts, stopping at real
+control-flow boundaries to show what happened and let a human Proceed /
+Adjust / Abort. This skill adds no pipeline behaviour of its own -- it
+calls the pipeline, reads back `result.notes` / `result.checkpoints`, and
+presents them. If this file disagrees with the code, trust the code.
 
-**Scope reminder (do not exceed this)**: no flats (deferred, separate pass),
-no automatic override of which telescope's Luminance drives the composite
-(surface the numbers, never silently pick against them), no cross-telescope
-Luminance blending, no touching Photoshop -- every path below ends the
-moment a TIFF path exists. Optional post-processing (denoise/star-removal/
-black-point/narrowband-boost) never overwrites or auto-recombines anything;
-it only ever adds new, separately-named files next to what's already there.
+**Scope reminder (do not exceed this)**: flats are supported for mono
+Luminance/R/G/B/narrowband groups calibrated locally (RAW_LOCAL) --
+see the "Flats" section below for what that actually covers and what it
+deliberately does not (no automatic override of which telescope's
+Luminance drives the composite (surface the numbers, never silently pick
+against them), no cross-telescope Luminance blending, no touching
+Photoshop) -- every path below ends the moment a TIFF path exists.
+Optional post-processing (denoise/star-removal/black-point/narrowband-boost)
+never overwrites or auto-recombines anything; it only ever adds new,
+separately-named files next to what's already there.
 
 **Which flow does the user want?**
 | Data | Flow |
@@ -158,12 +162,19 @@ with a full R/G/B set for the primary telescope.
   Red/Green/Blue ones. OSC lights are genuine undemosaiced Bayer-mosaic
   sensor data, debayered automatically as part of building that
   contributor -- nothing to ask about there either. Two real cases: T02
-  (Abell 6 and HFG1, PRECALIBRATED, no local frames at all) and T68
-  (IC 1396, RAW_LOCAL -- local bias but NO local dark at all; calibrates
-  bias-only + debayer automatically rather than raising, since darks may
-  legitimately not exist for an OSC delivery -- a real dark at that
-  binning, if one DOES exist, is still used normally). A target with BOTH
-  a full mono R/G/B set AND `Color` data
+  (Abell 6 and HFG1, PRECALIBRATED, no local frames at all) and T68 (IC
+  1396) -- **corrected, plan-flats-v4.md**: T68 is PRECALIBRATED TODAY,
+  not RAW_LOCAL as an earlier version of this doc claimed. Its real local
+  bias (48 subs) and darks (50 subs) are NOT recognised at all by
+  filename (no `T68` folder token anywhere in their path), so
+  `infer_calibration_mode` sees zero local Bias/Dark and falls back to
+  PRECALIBRATED via its real `calibrated-` provenance lights. RAW_LOCAL
+  OSC (bias-only + debayer, as the retired claim described) is real code
+  (`build_group_master`'s bias-only-when-no-dark branch) but currently
+  UNREACHABLE for T68 in practice: `build_osc`'s own `cal_index={}` bug
+  means RAW_LOCAL OSC raises `KeyError` before ever reaching that branch
+  -- deferred, see "Flats" below. A target with BOTH a full mono R/G/B set
+  AND `Color` data
   at the same (telescope, binning) raises `NotImplementedError` instead
   of silently combining them (channel-order parity between Siril's
   debayer output and the mono path's `rgbcomp` has never been verified) --
@@ -435,6 +446,93 @@ unreliable on low-VRAM/older-GPU machines (see "Known gaps" below) --
 default to CPU denoise unless the user specifically wants to try GPU.
 Resumable: if `<target>_starless.fit`/`_stars.fit` already exist under
 `final/_intermediate/`, star removal is skipped and reused.
+
+## Flats (plan-flats-v4.md, 2026-09)
+
+**Discovery**: flats are matched on `(telescope, binning, filter_name)`,
+exact string, for mono Luminance/R/G/B and narrowband groups calibrated
+locally (`CalibrationMode.RAW_LOCAL`) -- nothing to ask the user about,
+it's automatic once a matching flat is found. Real names/folders vary by
+telescope: T21's real flats are `scope_<Filter>_<b>x<b>_skyflat<N>.fit`
+under a `.../T21/Flats/...` path (telescope inferred from the directory,
+not the filename); other telescopes' calibration frames often carry the
+telescope directly in the filename (`<telescope>-<user>-Flat-...`).
+
+**The one real, flat-corrected path today is T21 Luminance on M51.**
+Its master flat had two real, fixed defects (both shipped in
+plan-flats-v4.md): two twilight sessions' worth of colliding generic
+`skyflat<N>` basenames used to collapse 30 matched frames to 20 staged
+(now deduped+uniquified, all 30 survive, staged under disambiguated names
+when they collide); and the master was stacked with Siril's default
+normalisation instead of the `-norm=mul` its own bundled reference
+scripts use (now fixed). Both fixes ship unconditionally, not behind a
+flag -- nothing to ask about, and no consequence for any other telescope
+(inert everywhere else since no other real flat-corrected master exists
+yet, see below).
+
+**`REQUIRE` vs `SKIP_IF_MISSING`**: a telescope with ANY flat at all
+defaults to `REQUIRE` (missing a flat for one of its filters is then a
+real, blocking gap -- see the interview's `[BLOCKED]` annotation below); a
+telescope with zero flats of any kind (T24's real, permanent situation)
+defaults to `SKIP_IF_MISSING`. Override uniformly for a whole run via
+`--flat-policy require|skip_if_missing` on `run_stage.py`/
+`run_narrowband.py`/`run_narrowband_boost.py` if you ever need to (also
+available on `interview.py`, to preview the consequence annotations as if
+that override were in effect).
+
+**Interview visibility** (`skill/interview.py`): the interview now shows
+three things this skill previously left invisible --
+- **Consequences**: each calibration-gap line is annotated `[BLOCKED]`
+  (Bias/Dark, or a REQUIRE'd Flat -- these actually stop a real run) or
+  "no flat applied, proceeding" (a SKIP'd Flat -- informational, the run
+  continues without correction for that filter).
+- **Matched flats**: `N frames (K copies, C collisions)` per matched
+  (telescope, binning, filter) group, using a cheap header-identity
+  signal -- surfaces a colliding-basename problem like T21's own (now
+  fixed) BEFORE a real run ever touches Siril.
+- **Unrecognized frames**: grouped by reason, so a telescope's real
+  calibration library that no filename pattern (and, if enabled, no
+  header fallback) could place anywhere is now visible, instead of
+  silently vanishing.
+
+**Header-based recognition, opt-in, OFF by default**
+(`--calibration-header-fallback` on `run_stage.py`/`run_narrowband.py`/
+`run_narrowband_boost.py`/`interview.py`): M42/T20, IC 1396/T68 and
+M31/T05 each have a real local bias/dark/flat library that no filename
+pattern recognises today (no telescope token anywhere in their path).
+Passing this flag lets `IMAGETYP`-based header recognition find them --
+but recognition ALONE never changes any telescope's `CalibrationMode`
+(T20/T68/T05 all stay PRECALIBRATED by default, permanently, not just for
+now) and never changes any other real telescope's behaviour. To actually
+exercise a header-recognised RAW_LOCAL flat/bias/dark set, pair the
+fallback flag with an explicit `--calibration-mode` override:
+- `run_stage.py`: `--calibration-mode TEL=raw_local` (repeatable, one
+  `TEL=value` per occurrence -- a genuine multi-telescope override).
+- `run_narrowband.py` / `run_narrowband_boost.py`: a plain
+  `--calibration-mode raw_local` (no `TEL=` prefix -- these entry points
+  already pin exactly one `--telescope`).
+
+**What this does NOT do (stated plainly, so a reader doesn't assume more
+happened than did)**:
+- **No OSC flats.** `build_osc`'s own `cal_index={}` bug means RAW_LOCAL
+  OSC raises `KeyError` regardless of any flag above -- deferred, not
+  committed to. Revisit only if IC 1396's own future per-target
+  measurement shows a real benefit.
+- **No narrowband master invalidation on a flat/recipe change.**
+  Narrowband (`run_narrowband.py`) has no `RunSignature`-based staleness
+  tracking at all (a pre-existing, non-flat-specific gap) -- pass
+  `--force` explicitly after changing anything upstream, same as before
+  this plan.
+- **No behaviour change to M42, IC 1396 or M31 in this plan.** Ingest can
+  now SEE their real calibration libraries (opt-in) and the mode-decoupling
+  keeps that recognition safely inert by default, but nothing here
+  reprocesses any of their real data with local flats. That measurement
+  (per target, corner/centre-ratio method) is the deliberate NEXT step,
+  not something this skill does automatically -- and reprocessing itself
+  is recommended only where a target's own measurement shows a genuine,
+  quantified improvement, never blind (M42's flat library is 21 months
+  older than its lights; IC 1396's calibration timestamps are corrupted;
+  M31's flats are fresh but its darks are at the wrong temperature).
 
 ## Known gaps, honestly
 
