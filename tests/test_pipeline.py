@@ -1335,6 +1335,7 @@ def _run_m51(**kwargs):
     return run_lrgb(REAL_SESSION_DIR, telescope="T24", target="M51", ra_hours=M51_RA_HOURS, dec_deg=M51_DEC_DEG, **kwargs)
 
 
+@pytest.mark.m51_pipeline
 @requires(FINAL_DIR / "lrgb_final.fit")
 def test_run_lrgb_stop_after_masters_stops_before_reconciliation() -> None:
     """The real Slice 4.3 claim: stop_after='masters' returns honestly,
@@ -1353,6 +1354,7 @@ def test_run_lrgb_stop_after_masters_stops_before_reconciliation() -> None:
     assert (FINAL_DIR / "lrgb_final.fit").stat().st_mtime == final_before
 
 
+@pytest.mark.m51_pipeline
 @requires(FINAL_DIR / "lrgb_final.fit")
 def test_run_lrgb_stop_after_reconciled_resumes_without_rebuilding_masters() -> None:
     """A second call with stop_after='reconciled' after a first call with
@@ -1383,6 +1385,7 @@ def test_run_lrgb_stop_after_reconciled_resumes_without_rebuilding_masters() -> 
         assert (FINAL_DIR / "lum_bg.fits").stat().st_mtime == lum_bg_before_first_call
 
 
+@pytest.mark.m51_pipeline
 @requires(FINAL_DIR / "lrgb_final.fit")
 def test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output() -> None:
     """Slice 4 must not change what's rendered -- only Slice 3 was allowed
@@ -1405,6 +1408,7 @@ def test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output() -> None
     assert sha(tiff) == before_tiff
 
 
+@pytest.mark.m51_pipeline
 @requires(FINAL_DIR / "lrgb_final.fit")
 def test_run_lrgb_force_final_only_touches_final_not_reconciled_or_masters() -> None:
     """force={"final"} must invalidate exactly lrgb_final.fit -- NOT

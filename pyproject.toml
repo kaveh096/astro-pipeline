@@ -22,6 +22,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "m51_pipeline: real Siril run against the live M51 project; excluded by default, see docs/plan-flats-v4.md §4.0",
+]
+addopts = ["-m", "not m51_pipeline"]
 
 [build-system]
 requires = ["setuptools>=68"]
