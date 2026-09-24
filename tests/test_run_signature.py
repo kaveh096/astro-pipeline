@@ -24,6 +24,8 @@ from astro_pipeline.run_signature import (
     load_run_signature,
     save_run_signature,
 )
+from astro_pipeline.calibration import CalibrationMode
+from astro_pipeline.contributor_staleness import calibration_recipe_parts
 
 
 def _sig(
@@ -685,3 +687,351 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
         load_run_signature(out / "run_signature.json"),
         "colour", "T99_bin2", real_colour_frame_hash, 0.1, passed_flat_hash,
     ) is True
+
+
+# --- plan-flats-v4.md Step 2: calibration_recipe -- ContributorSignature's
+# new field, contributor_stale's new parameter, and the mode-aware
+# calibration_recipe_parts() helper. Mirrors this file's own existing
+# flat_frame_hash test set exactly (round 4/R4-1's own instruction: this
+# file's docstring already warns a keyword-default is NOT enough on its
+# own for a first field -- the same applies to a second one). -------------
+
+
+class _FakeFlat:
+    def __init__(self, path_name: str) -> None:
+        from pathlib import Path
+        self.path = Path(path_name)
+
+
+def test_calibration_recipe_parts_precalibrated_with_flats_is_empty() -> None:
+    """PRECALIBRATED never consults flats at all (already flat-corrected
+    upstream) -- ("", "") regardless of a non-empty flat set."""
+    flats = [_FakeFlat("a.fit"), _FakeFlat("b.fit")]
+    assert calibration_recipe_parts(CalibrationMode.PRECALIBRATED, flats) == ("", "")
+
+
+def test_calibration_recipe_parts_raw_local_empty_flats_is_empty() -> None:
+    assert calibration_recipe_parts(CalibrationMode.RAW_LOCAL, []) == ("", "")
+
+
+def test_calibration_recipe_parts_raw_local_with_flats_returns_hash_and_empty_recipe() -> None:
+    """Today's unversioned baseline (before Step 3b): a real hash, but the
+    recipe half stays "" until an actual behaviour change ships."""
+    flats = [_FakeFlat("a.fit"), _FakeFlat("b.fit")]
+    frame_hash, recipe = calibration_recipe_parts(CalibrationMode.RAW_LOCAL, flats)
+    assert frame_hash == frame_identity_hash(["a.fit", "b.fit"])
+    assert recipe == ""
+
+
+def test_contributor_stale_true_on_calibration_recipe_change_direct_call() -> None:
+    """Direct check of the mechanism itself: same light frame_hash, same
+    pedestal, same flat_frame_hash, only calibration_recipe differs --
+    must be caught."""
+    old = RunSignature(
+        stretch_method="autostretch",
+        pedestal=0.1,
+        luminance_selected="T21_bin1",
+        luminance={
+            "T21_bin1": ContributorSignature(
+                key="T21_bin1", stackcnt=2, frame_hash="hL", flat_frame_hash="flat-hash-1",
+                calibration_recipe="flat:v1",
+            )
+        },
+    )
+    assert old.contributor_stale(
+        "luminance", "T21_bin1", "hL", pedestal=0.1, flat_frame_hash="flat-hash-1", calibration_recipe="flat:v1",
+    ) is False
+    assert old.contributor_stale(
+        "luminance", "T21_bin1", "hL", pedestal=0.1, flat_frame_hash="flat-hash-1", calibration_recipe="flat:v2:dedup+uniq+mul",
+    ) is True
+
+
+def test_contributor_stale_defaults_calibration_recipe_to_empty_string() -> None:
+    """A caller that doesn't pass calibration_recipe at all (e.g. an old
+    test, or code that hasn't been updated) must not raise -- the
+    parameter has a default -- but see the call-site-exercising tests
+    below for why a default alone is NOT sufficient for the real
+    Luminance/colour loop call sites."""
+    old = RunSignature(
+        stretch_method="autostretch",
+        pedestal=0.1,
+        luminance_selected="T21_bin1",
+        luminance={
+            "T21_bin1": ContributorSignature(key="T21_bin1", stackcnt=2, frame_hash="hL"),
+        },
+    )
+    assert old.contributor_stale("luminance", "T21_bin1", "hL", pedestal=0.1) is False
+
+
+def test_old_format_run_signature_json_without_calibration_recipe_still_loads(tmp_path) -> None:
+    """The real, currently-persisted _pipeline/run_signature.json on the
+    M51 project predates this field entirely, exactly like
+    flat_frame_hash's own equivalent test above. Write out exactly that
+    shape (no "calibration_recipe" key anywhere) and confirm from_dict()
+    both loads it AND that the resulting ContributorSignature reads back
+    calibration_recipe="" -- which then correctly mismatches any real,
+    freshly-computed non-empty recipe on the next run, forcing exactly
+    one rebuild (Step 3b's own one-time T21_bin1 promise)."""
+    import json
+
+    old_format = {
+        "stretch_method": "autostretch",
+        "pedestal": 0.1,
+        "luminance_selected": "T21_bin1",
+        "luminance": {
+            "T21_bin1": {
+                "key": "T21_bin1",
+                "stackcnt": 2,
+                "frame_hash": "c2b76b333110b4a6",
+                "spcc_profile": None,
+                "flat_frame_hash": "349469062e57762c",
+                "calibration_mode": "raw_local",
+                # deliberately no "calibration_recipe" key -- matches the
+                # real, currently-persisted file on disk before Step 2.
+            }
+        },
+        "colour_reference": "T24_bin2",
+        "colour": {},
+        "quality_filter_policy": "filter_fwhm_pct=filter_round_pct=90.0 if n>=10 else None",
+    }
+    path = tmp_path / "run_signature.json"
+    path.write_text(json.dumps(old_format), encoding="utf-8")
+
+    loaded = load_run_signature(path)
+    assert loaded is not None
+    assert loaded.luminance["T21_bin1"].calibration_recipe == ""
+    assert loaded.contributor_stale(
+        "luminance", "T21_bin1", "c2b76b333110b4a6", pedestal=0.1,
+        flat_frame_hash="349469062e57762c", calibration_recipe="flat:v2:dedup+uniq+mul",
+    ) is True
+
+
+def test_calibration_recipe_round_trips_through_to_dict_from_dict(tmp_path) -> None:
+    """Round-trip test (round 6, major) -- the missing half of the
+    old-JSON test above: a NON-EMPTY calibration_recipe must actually
+    survive to_dict()/from_dict() (and a real json.dumps/json.loads round
+    trip), not just live in the in-memory object. Without this, Step 3b's
+    non-empty recipe would be correctly detected as a change on the run
+    right after it ships, but to_dict() would silently drop it, so the
+    NEXT run's from_dict() would load it back as "" -- permanently
+    mismatching the freshly-computed value forever, forcing a full
+    real-Siril T21 rebuild on every run, not the one-time rebuild Step 3b
+    explicitly promises."""
+    import json
+
+    sig = ContributorSignature(
+        key="T21_bin1", stackcnt=2, frame_hash="hL", flat_frame_hash="hF",
+        calibration_recipe="flat:v2:dedup+uniq+mul",
+    )
+    as_dict = sig.to_dict()
+    assert as_dict["calibration_recipe"] == "flat:v2:dedup+uniq+mul"
+    round_tripped = ContributorSignature.from_dict(json.loads(json.dumps(as_dict)))
+    assert round_tripped.calibration_recipe == "flat:v2:dedup+uniq+mul"
+    assert round_tripped == sig
+
+    path = tmp_path / "run_signature.json"
+    run_sig = RunSignature(
+        stretch_method="autostretch", pedestal=0.1, luminance_selected="T21_bin1",
+        luminance={"T21_bin1": sig},
+    )
+    save_run_signature(run_sig, path)
+    loaded = load_run_signature(path)
+    assert loaded.luminance["T21_bin1"].calibration_recipe == "flat:v2:dedup+uniq+mul"
+
+
+def test_run_lrgb_luminance_call_site_actually_passes_calibration_recipe_to_contributor_stale(
+    tmp_path, monkeypatch
+) -> None:
+    """Same shape/rationale as
+    test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale
+    above, aimed at the NEW calibration_recipe parameter specifically:
+    confirms the Luminance loop's real call site passes a 6th positional
+    argument (calibration_recipe), not just the 5th (flat_frame_hash) --
+    a defaulted parameter alone would compile and pass every existing
+    test while never actually reaching contributor_stale's comparison."""
+    import astro_pipeline.run_signature as run_signature_module
+
+    calls: list[tuple] = []
+    real_contributor_stale = run_signature_module.RunSignature.contributor_stale
+
+    def spy(self, section, key, frame_hash, pedestal, *args, **kwargs):
+        calls.append((section, key, frame_hash, pedestal, args, kwargs))
+        return real_contributor_stale(self, section, key, frame_hash, pedestal, *args, **kwargs)
+
+    monkeypatch.setattr(run_signature_module.RunSignature, "contributor_stale", spy)
+
+    import json
+    from astro_pipeline.workspace import pipeline_dir
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    out = pipeline_dir(project_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    lum_light = _FakeLightFrame("SAME-LIGHTS-UNCHANGED.fit")
+    lum_light2 = _FakeLightFrame("SAME-LIGHTS-UNCHANGED-2.fit")
+    real_light_frame_hash = frame_identity_hash([lum_light.path.name, lum_light2.path.name])
+    persisted = {
+        "stretch_method": "autostretch",
+        "pedestal": 0.1,
+        "luminance_selected": "T99_bin1",
+        "luminance": {
+            "T99_bin1": {
+                "key": "T99_bin1",
+                "stackcnt": 2,
+                "frame_hash": real_light_frame_hash,
+                "spcc_profile": None,
+            }
+        },
+        "colour_reference": "",
+        "colour": {},
+        "quality_filter_policy": "x",
+    }
+    (out / "run_signature.json").write_text(json.dumps(persisted), encoding="utf-8")
+
+    class _FakeReport:
+        def calibration_index(self):
+            return {}
+
+        def instrument_groups(self):
+            return {("T99", "M51", "Luminance", 1): [lum_light, lum_light2]}
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def flat_index(self):
+            return {}
+
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+
+    def fake_build_master(*args, **kwargs):
+        raise RuntimeError("stop-after-build-master-call-site")
+
+    monkeypatch.setattr(lrgb_orchestrator_module, "build_group_master", fake_build_master)
+
+    try:
+        lrgb_orchestrator_module.run_lrgb(
+            project_dir, telescope="T99", target="M51", ra_hours=1.0, dec_deg=1.0,
+        )
+    except RuntimeError as exc:
+        assert "stop-after-build-master-call-site" in str(exc)
+
+    lum_calls = [c for c in calls if c[0] == "luminance" and c[1] == "T99_bin1"]
+    assert lum_calls, "contributor_stale was never called for the Luminance contributor at all"
+    section, key, frame_hash, pedestal, extra_args, extra_kwargs = lum_calls[0]
+    assert len(extra_args) == 2 or "calibration_recipe" in extra_kwargs, (
+        "contributor_stale's real Luminance-loop call site did not pass a "
+        "calibration_recipe argument at all -- it compiles and runs (the "
+        "parameter has a default) but the freshly-computed recipe never "
+        "reaches the comparison, exactly the round-2-class regression "
+        "flat_frame_hash's own call-site test already guards against."
+    )
+
+
+def test_run_lrgb_colour_call_site_actually_passes_calibration_recipe_to_contributor_stale(
+    tmp_path, monkeypatch
+) -> None:
+    """Colour-loop counterpart of the Luminance test above."""
+    import json
+
+    import numpy as np
+    from astropy.io import fits as fits_module
+
+    import astro_pipeline.run_signature as run_signature_module
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
+    from astro_pipeline.workspace import pipeline_dir
+
+    calls: list[tuple] = []
+    real_contributor_stale = run_signature_module.RunSignature.contributor_stale
+
+    def spy(self, section, key, frame_hash, pedestal, *args, **kwargs):
+        calls.append((section, key, frame_hash, pedestal, args, kwargs))
+        return real_contributor_stale(self, section, key, frame_hash, pedestal, *args, **kwargs)
+
+    monkeypatch.setattr(run_signature_module.RunSignature, "contributor_stale", spy)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    out = pipeline_dir(project_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    lum_light = _FakeLightFrame("lum_unchanged.fit")
+    real_colour_frame_hash = frame_identity_hash([])
+
+    class _FakeReport:
+        def calibration_index(self):
+            return {}
+
+        def instrument_groups(self):
+            return {("T99", "M51", "Luminance", 1): [lum_light]}
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def flat_index(self):
+            return {}
+
+    persisted = {
+        "stretch_method": "autostretch",
+        "pedestal": 0.1,
+        "luminance_selected": "T99_bin1",
+        "luminance": {
+            "T99_bin1": {
+                "key": "T99_bin1", "stackcnt": 1,
+                "frame_hash": frame_identity_hash([lum_light.path.name]),
+                "spcc_profile": None,
+            }
+        },
+        "colour_reference": "T99_bin2",
+        "colour": {
+            "T99_bin2": {
+                "key": "T99_bin2", "stackcnt": 0,
+                "frame_hash": real_colour_frame_hash,
+                "spcc_profile": None,
+            }
+        },
+        "quality_filter_policy": "x",
+    }
+    (out / "run_signature.json").write_text(json.dumps(persisted), encoding="utf-8")
+
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+
+    stub_master = tmp_path / "stub_master.fit"
+    fits_module.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
+    monkeypatch.setattr(lrgb_orchestrator_module, "build_group_master", lambda *a, **k: stub_master)
+
+    def fake_build_rgb(self, *args, **kwargs):
+        raise RuntimeError("stop-after-colour-call-site")
+
+    from astro_pipeline.colour_contributor import ColourContributorBuilder
+
+    monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
+
+    try:
+        lrgb_orchestrator_module.run_lrgb(
+            project_dir, telescope="T99", target="M51", ra_hours=1.0, dec_deg=1.0,
+        )
+    except RuntimeError as exc:
+        assert "stop-after-colour-call-site" in str(exc)
+
+    colour_calls = [c for c in calls if c[0] == "colour" and c[1] == "T99_bin2"]
+    assert colour_calls, "contributor_stale was never called for the colour contributor at all"
+    section, key, frame_hash, pedestal, extra_args, extra_kwargs = colour_calls[0]
+    assert len(extra_args) == 2 or "calibration_recipe" in extra_kwargs, (
+        "contributor_stale's real colour-loop call site did not pass a "
+        "calibration_recipe argument at all."
+    )

@@ -132,11 +132,11 @@ from .colour_contributor import ColourContributor, ColourContributorBuilder
 from .contributor_staleness import (
     _clear_colour_contributor_products,
     _clear_osc_contributor_products,
-    _colour_contributor_flat_frame_hash,
+    _colour_contributor_flat_frames,
     _colour_contributor_frame_hash,
     _delete_if_exists,
-    _flat_frame_hash,
     _osc_contributor_frame_hash,
+    calibration_recipe_parts,
 )
 from .export_image import export
 from .filter_constants import LUMINANCE_FILTER, OSC_FILTER, RGB_FILTERS
@@ -286,6 +286,7 @@ class LRGBOrchestrator:
         lum_candidates: list[LumCandidate] = []
         lum_frame_hashes: dict[str, str] = {}
         lum_flat_frame_hashes: dict[str, str] = {}
+        lum_calibration_recipes: dict[str, str] = {}
         lum_stackcnt: dict[str, int] = {}
         lum_calibration_modes: dict[str, str] = {}
         for lum_telescope, contrib_lum_binning in lum_contributors:
@@ -344,8 +345,14 @@ class LRGBOrchestrator:
                 lum_flat_policy = (
                     self.flat_policy if self.flat_policy is not None else infer_flat_policy(report, lum_telescope)
                 )
-            lum_flat_frame_hash = _flat_frame_hash(lum_flat_frames)
+            # plan-flats-v4.md Step 2: one mode-aware helper computes BOTH
+            # the existing flat-set hash AND the new calibration_recipe
+            # string -- replaces the old mode-blind `_flat_frame_hash` call
+            # here (this branch was already mode-aware via the PRECALIBRATED
+            # guard above; the helper generalises that same guard).
+            lum_flat_frame_hash, lum_recipe = calibration_recipe_parts(lum_calibration_mode, lum_flat_frames)
             lum_flat_frame_hashes[contributor_key] = lum_flat_frame_hash
+            lum_calibration_recipes[contributor_key] = lum_recipe
 
             # Slice 4.1: usable() only knows whether master_luminance.fit
             # exists and reads clean -- it has zero notion of which lights
@@ -354,14 +361,15 @@ class LRGBOrchestrator:
             # on-disk proof this gap is not hypothetical) would otherwise never
             # trigger a rebuild. Delete the stale master here so usable()'s own
             # skip-if-present gate inside build_group_master naturally regenerates it.
-            # Slice 2.3: `flat_frame_hash` is now also passed here -- omitting
-            # it (or leaving contributor_stale's own parameter at its default)
-            # would silently defeat the whole point of tracking it at all, see
-            # ContributorSignature/contributor_stale in run_signature.py.
+            # Slice 2.3/Step 2: `flat_frame_hash`/`calibration_recipe` are now
+            # also passed here -- omitting either (or leaving contributor_stale's
+            # own parameters at their defaults) would silently defeat the whole
+            # point of tracking them, see ContributorSignature/contributor_stale
+            # in run_signature.py.
             stale = force_masters or (
                 self.old_signature is not None
                 and self.old_signature.contributor_stale(
-                    "luminance", contributor_key, frame_hash, self.pedestal, lum_flat_frame_hash
+                    "luminance", contributor_key, frame_hash, self.pedestal, lum_flat_frame_hash, lum_recipe
                 )
             )
             if stale:
@@ -519,29 +527,42 @@ class LRGBOrchestrator:
         self.contributors: list[ColourContributor] = []
         colour_frame_hashes: dict[str, str] = {}
         colour_flat_frame_hashes: dict[str, str] = {}
+        colour_calibration_recipes: dict[str, str] = {}
         for binning in rgb_binnings:
             contributor_key = f"{self.telescope}_bin{binning}"
             contrib_dir = contributor_dir(self.final, self.telescope, binning, self.rgb_binning)
             frame_hash = _colour_contributor_frame_hash(report, self.telescope, self.target, binning)
             colour_frame_hashes[contributor_key] = frame_hash
-            colour_flat_frame_hash = _colour_contributor_flat_frame_hash(report, self.telescope, binning)
+            # plan-flats-v4.md Step 2 (fixes G10): mode-aware, replacing the
+            # old mode-BLIND `_colour_contributor_flat_frame_hash` call here
+            # -- that helper hashed whatever flats matched with no regard
+            # for calibration_mode at all. Verified inert on every real
+            # persisted colour hash today (every one is already ""), but a
+            # real gap nonetheless: computed here via the same
+            # `calibration_recipe_parts` helper the Luminance loop above
+            # uses, over the raw merged R+G+B flat list.
+            colour_flats = _colour_contributor_flat_frames(report, self.telescope, binning)
+            colour_flat_frame_hash, colour_recipe = calibration_recipe_parts(colour_calibration_mode, colour_flats)
             colour_flat_frame_hashes[contributor_key] = colour_flat_frame_hash
+            colour_calibration_recipes[contributor_key] = colour_recipe
 
             # Slice 4.1: same gap as the Luminance loop above, plus SPCC
             # profile identity -- neither is visible to usable()'s file-only
             # gate. A frame/pedestal change forces a full rebuild (raw R/G/B
             # masters and every downstream product); an SPCC-profile-only
             # change only needs the colour-calibrated output redone, since the
-            # profile has no effect on calibration/stacking. Slice 2.3: the
-            # matched flat set is now also part of what "full rebuild" means --
-            # contributor_stale's own `flat_frame_hash` parameter is passed
-            # explicitly here, not left at its default (see run_signature.py's
-            # ContributorSignature/contributor_stale docstrings for exactly why
-            # a default alone would silently defeat this).
+            # profile has no effect on calibration/stacking. Slice 2.3/Step 2:
+            # the matched flat set and calibration recipe are now also part
+            # of what "full rebuild" means -- contributor_stale's own
+            # `flat_frame_hash`/`calibration_recipe` parameters are passed
+            # explicitly here, not left at their defaults (see
+            # run_signature.py's ContributorSignature/contributor_stale
+            # docstrings for exactly why a default alone would silently
+            # defeat this).
             needs_full_rebuild = force_masters or (
                 self.old_signature is not None
                 and self.old_signature.contributor_stale(
-                    "colour", contributor_key, frame_hash, self.pedestal, colour_flat_frame_hash
+                    "colour", contributor_key, frame_hash, self.pedestal, colour_flat_frame_hash, colour_recipe
                 )
             )
             if needs_full_rebuild:
@@ -612,10 +633,20 @@ class LRGBOrchestrator:
             frame_hash = _osc_contributor_frame_hash(report, self.telescope, self.target, binning, colour_calibration_mode)
             colour_frame_hashes[contributor_key] = frame_hash
             colour_flat_frame_hashes[contributor_key] = ""  # OSC never consults flats -- see build_group_master docstring
+            # plan-flats-v4.md Step 2: left at literal "" deliberately, not
+            # by omission -- RAW_LOCAL OSC is structurally unreachable while
+            # build_osc's cal_index={} KeyError stands (G7/I1, deferred to
+            # ??5), and calibration_recipe_parts(mode, flats=[]) always
+            # returns ("", "") anyway (empty flat set, and every real OSC
+            # contributor today is PRECALIBRATED besides) -- verified inert
+            # today, for the same reason as G10/R4-4. Whoever lifts that
+            # KeyError later must also wire a real calibration_recipe (and
+            # flat_frame_hash) into this call site -- see ??5's OSC bullet.
+            colour_calibration_recipes[contributor_key] = ""
 
             needs_full_rebuild = force_masters or (
                 self.old_signature is not None
-                and self.old_signature.contributor_stale("colour", contributor_key, frame_hash, self.pedestal, "")
+                and self.old_signature.contributor_stale("colour", contributor_key, frame_hash, self.pedestal, "", "")
             )
             if needs_full_rebuild:
                 deleted = _clear_osc_contributor_products(
@@ -694,6 +725,7 @@ class LRGBOrchestrator:
                     key=key, stackcnt=lum_stackcnt[key], frame_hash=lum_frame_hashes[key],
                     flat_frame_hash=lum_flat_frame_hashes[key],
                     calibration_mode=lum_calibration_modes[key],
+                    calibration_recipe=lum_calibration_recipes[key],
                 )
                 for key in lum_frame_hashes
             },
@@ -704,6 +736,7 @@ class LRGBOrchestrator:
                     flat_frame_hash=colour_flat_frame_hashes[c.key],
                     spcc_profile=profile_tuple,
                     calibration_mode=colour_calibration_mode.value,
+                    calibration_recipe=colour_calibration_recipes[c.key],
                 )
                 for c in self.contributors
             },

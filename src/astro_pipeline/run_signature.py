@@ -138,6 +138,21 @@ class ContributorSignature:
     # change to the inference/override logic would at least be documented
     # against real recorded values, not silently invisible.
     calibration_mode: str = "raw_local"
+    # plan-flats-v4.md Step 2: a versioned string describing HOW this
+    # contributor's calibration frames were actually used -- flat staging/
+    # normalisation today, and potentially bias/dark normalisation or an
+    # OSC calibrate-command shape change later (see
+    # contributor_staleness.calibration_recipe_parts()'s own docstring for
+    # the full rationale). Stays "" until Step 3b's fix ships (the first
+    # behaviour change to bump it); an empty string here is therefore not
+    # a placeholder bug, it is the real, verified value for every
+    # persisted signature today. Additive with a default so a
+    # pre-existing run_signature.json (predating this field) still loads
+    # and reads back "" -- which then correctly mismatches a real,
+    # freshly-computed non-empty recipe on the very next run, forcing
+    # exactly one rebuild (the same one-time, correct-not-silent
+    # transition `flat_frame_hash` itself already documents above).
+    calibration_recipe: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -147,6 +162,7 @@ class ContributorSignature:
             "spcc_profile": list(self.spcc_profile) if self.spcc_profile else None,
             "flat_frame_hash": self.flat_frame_hash,
             "calibration_mode": self.calibration_mode,
+            "calibration_recipe": self.calibration_recipe,
         }
 
     @classmethod
@@ -159,6 +175,7 @@ class ContributorSignature:
             spcc_profile=tuple(profile) if profile else None,
             flat_frame_hash=d.get("flat_frame_hash", ""),
             calibration_mode=d.get("calibration_mode", "raw_local"),
+            calibration_recipe=d.get("calibration_recipe", ""),
         )
 
 
@@ -221,38 +238,54 @@ class RunSignature:
         frame_hash: str,
         pedestal: float,
         flat_frame_hash: str = "",
+        calibration_recipe: str = "",
     ) -> bool:
         """Does contributor `key` in `section` ("luminance" or "colour")
         need its raw master(s) rebuilt via Siril, given a freshly computed
-        `frame_hash`/`flat_frame_hash` and the current call's `pedestal`?
+        `frame_hash`/`flat_frame_hash`/`calibration_recipe` and the current
+        call's `pedestal`?
 
         True if the light set changed (added/removed/replaced -- a
         different `frame_hash`), if the MATCHED FLAT set changed (Slice
         2.3 -- a different `flat_frame_hash`, e.g. a flat re-shot, a new
         filter's flats added, or a telescope's FlatPolicy flipping from
-        SKIP_IF_MISSING to REQUIRE), if the contributor is new (not
-        present in this persisted signature at all), or if `pedestal`
-        itself changed (it is baked into every calibrated light BEFORE
-        registration/stacking -- see calibration.py -- so it affects
-        every master, Luminance and colour alike, regardless of whether
-        any light or flat set changed).
+        SKIP_IF_MISSING to REQUIRE), if the CALIBRATION RECIPE changed
+        (plan-flats-v4.md Step 2 -- a different `calibration_recipe`, e.g.
+        Step 3b's flat dedupe+`-norm=mul` fix bumping it from "" to a real
+        versioned string), if the contributor is new (not present in this
+        persisted signature at all), or if `pedestal` itself changed (it
+        is baked into every calibrated light BEFORE registration/stacking
+        -- see calibration.py -- so it affects every master, Luminance and
+        colour alike, regardless of whether any light or flat set
+        changed).
 
-        `flat_frame_hash` defaults to "" for backward compatibility with
-        any caller/test constructing a call without it -- but see
-        pipeline.run_lrgb's own two real call sites (the Luminance loop
-        and the colour loop): BOTH must pass the freshly-computed value
-        explicitly, or this parameter's default silently means the
-        comparison below can never actually fire on a genuine flat-set
-        change, defeating the entire point of tracking it (this exact
-        failure mode is why plan-flats-v3.md's round-2 review flagged this
-        as the one place a keyword-default is NOT enough on its own).
+        `flat_frame_hash`/`calibration_recipe` each default to "" for
+        backward compatibility with any caller/test constructing a call
+        without them -- but see pipeline.run_lrgb's own real call sites
+        (the Luminance loop and the mono-RGB colour loop): BOTH must pass
+        the freshly-computed values explicitly, or these parameters'
+        defaults silently mean the comparison below can never actually
+        fire on a genuine flat-set/recipe change, defeating the entire
+        point of tracking them (this exact failure mode is why
+        plan-flats-v3.md's round-2 review flagged `flat_frame_hash` as the
+        one place a keyword-default is NOT enough on its own -- the same
+        applies to `calibration_recipe`, added by plan-flats-v4.md Step 2).
+        The OSC colour loop's own third call site is the one, deliberately
+        documented exception: it passes literal "" for both, since OSC's
+        flat set is always empty and every real OSC contributor is
+        PRECALIBRATED -- see lrgb_orchestrator.py's own colour-contributor
+        discovery loop.
         """
         if self.pedestal != pedestal:
             return True
         existing = getattr(self, section).get(key)
         if existing is None:
             return True
-        return existing.frame_hash != frame_hash or existing.flat_frame_hash != flat_frame_hash
+        return (
+            existing.frame_hash != frame_hash
+            or existing.flat_frame_hash != flat_frame_hash
+            or existing.calibration_recipe != calibration_recipe
+        )
 
 
 def load_run_signature(path: str | Path) -> RunSignature | None:

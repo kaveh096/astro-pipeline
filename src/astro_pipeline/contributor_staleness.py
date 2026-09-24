@@ -82,6 +82,18 @@ def _flat_frame_hash(flat_frames: list) -> str:
     return frame_identity_hash([f.path.name for f in flat_frames])
 
 
+def _colour_contributor_flat_frames(report, telescope: str, binning: int) -> list:
+    """Every matched flat CalibrationFrame across a colour contributor's
+    whole R+G+B set (Slice 2.3), merged into one flat list -- the raw
+    material both _colour_contributor_flat_frame_hash (below) and
+    plan-flats-v4.md Step 2's mode-aware calibration_recipe_parts() need,
+    factored out so neither has to re-walk RGB_FILTERS independently."""
+    flats: list = []
+    for filter_name in RGB_FILTERS:
+        flats.extend(report.flat_index().get((telescope, binning, filter_name), []))
+    return flats
+
+
 def _colour_contributor_flat_frame_hash(report, telescope: str, binning: int) -> str:
     """Slice 2.3's flat-aware sibling of _colour_contributor_frame_hash
     above: one hash for a colour contributor's entire matched flat set
@@ -91,13 +103,44 @@ def _colour_contributor_flat_frame_hash(report, telescope: str, binning: int) ->
     does. See _flat_frame_hash for why an entirely empty matched flat set
     (T24's real, permanent situation) hashes to "" rather than
     frame_identity_hash([])'s own non-empty constant."""
-    names: list[str] = []
-    for filter_name in RGB_FILTERS:
-        flats = report.flat_index().get((telescope, binning, filter_name), [])
-        names.extend(f.path.name for f in flats)
-    if not names:
-        return ""
-    return frame_identity_hash(names)
+    return _flat_frame_hash(_colour_contributor_flat_frames(report, telescope, binning))
+
+
+def calibration_recipe_parts(calibration_mode: CalibrationMode, flats: list) -> tuple[str, str]:
+    """plan-flats-v4.md Step 2: one mode-aware helper computing BOTH halves
+    of a contributor's calibration identity -- the existing frame-identity
+    hash over a matched flat set (unchanged mechanism, `frame_identity_hash`
+    over sorted basenames) AND a versioned "recipe" string describing HOW
+    those flats (or any other future calibration-code behaviour: bias/dark
+    normalisation, an OSC calibrate-command shape change) were actually
+    used -- so a future behaviour change can bump one string instead of
+    adding a new ContributorSignature field every time.
+
+    Named `..._parts` (not `calibration_recipe`) so this function is never
+    confused with the single `calibration_recipe` field its second return
+    value feeds -- the first return value feeds the EXISTING
+    `flat_frame_hash` field, unchanged.
+
+    Returns `("", "")` for `CalibrationMode.PRECALIBRATED` (its flats are
+    never consulted at all, see `stage_precalibrated_lights`'s docstring)
+    OR for an empty flat set (T24's real, permanent situation) -- in
+    either case there is no matched-flat identity to track, and stability
+    of "" against a pre-existing persisted "" (see `_flat_frame_hash`'s
+    own docstring) matters here exactly as much as it did there.
+
+    Otherwise returns `(frame_identity_hash(flat_basenames), "")` -- the
+    recipe half stays "" until an actual behaviour change ships (Step 3b's
+    `-norm=mul`+dedupe-staging fix is the first one to bump it); this
+    function existing does not, by itself, change any persisted value on
+    any real project today (verified: every real flat/colour
+    `flat_frame_hash` today is already computed via this same
+    `frame_identity_hash`-over-basenames mechanism, just via the
+    now-superseded ad hoc `_flat_frame_hash`/`_colour_contributor_flat_frame_hash`
+    call sites this helper replaces).
+    """
+    if calibration_mode == CalibrationMode.PRECALIBRATED or not flats:
+        return "", ""
+    return _flat_frame_hash(flats), ""
 
 
 def _clear_colour_contributor_products(
