@@ -196,6 +196,15 @@ class CalibrationFrame:
     # leaves this None -- flat_index() drops those defensively rather than
     # guessing a filter (see flat_index()'s docstring).
     filter_name: str | None = None
+    # Step 4b (plan-flats-v4.md, G4/G5): "filename" (the default, and every
+    # frame classified above this point) or "header" for a frame recovered
+    # ONLY via classify_tree's opt-in calibration_header_fallback -- never
+    # populated any other way. Read via `getattr(f, "source", "filename")`
+    # everywhere it's consulted (calibration_policy.infer_calibration_mode),
+    # not `f.source` directly, so the ~20 pre-existing test fakes that
+    # return plain strings (not CalibrationFrame objects) from
+    # calibration_index()/flat_index() keep working unchanged.
+    source: str = "filename"
 
 
 @dataclass(frozen=True)
@@ -625,7 +634,236 @@ def _peek_zipped_lights(zip_path: Path) -> list[LightFrame]:
     return peeked
 
 
-def classify_tree(root: str | Path) -> IngestReport:
+# Step 4b (plan-flats-v4.md): telescope attribution rule (b) -- a token
+# T<1-3 digits>, delimited by non-alphanumerics (or string edges), inside
+# an ancestor DIRECTORY name (never the file's own name). Real, load-
+# bearing case: M31/T05's project root is literally named
+# "M31 - Andromeda - T5 - RGB - Aug 2021" -- normalising "T5" to "T05"
+# here is what lets it match the T05 token its own real bias/dark/flat
+# filenames and folder structure otherwise use. Real ambiguous case: M51's
+# root "M51 - Whirlpool galaxy - T24 & T21 - Jan 2025" carries TWO distinct
+# tokens -- rule (b) refuses rather than guessing.
+_TELESCOPE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])T(\d{1,3})(?![A-Za-z0-9])")
+
+
+def _attribute_telescope_for_fallback(path: Path, root: Path, raw_telescopes: set[str]) -> str | None:
+    """Attribution rules (a)/(b)/(c), in order, for a header-fallback
+    candidate calibration frame (Step 4b). None if none of the three
+    succeed (rule (b) ambiguous: more than one distinct token in the same
+    ancestor name; rule (c): more than one telescope's raw lights exist,
+    with nothing to disambiguate)."""
+    # (a) a strict "^T<digits>$" ancestor folder -- the existing, filename-
+    # side helper already implements exactly this rule.
+    hint = _infer_telescope_from_path(path)
+    if hint is not None:
+        return hint
+
+    # (b) nearest ancestor directory name, up to and including the root,
+    # containing exactly one distinct T<digits> token.
+    ancestors: list[Path] = []
+    current = path.parent
+    while True:
+        ancestors.append(current)
+        if current == root or current.parent == current:
+            break
+        current = current.parent
+    for parent in ancestors:
+        tokens = {f"T{int(m):02d}" for m in _TELESCOPE_TOKEN_RE.findall(parent.name)}
+        if len(tokens) > 1:
+            return None
+        if len(tokens) == 1:
+            return next(iter(tokens))
+
+    # (c) the root's raw lights (bare or zip-peeked) come from exactly one
+    # telescope.
+    if len(raw_telescopes) == 1:
+        return next(iter(raw_telescopes))
+    return None
+
+
+def _raw_light_reference(report: IngestReport) -> dict[tuple[str, int], Path]:
+    """First BARE (never a zip-peek placeholder -- those aren't real,
+    readable files) raw light's path per (telescope, binning), for Step
+    4b's INSTRUME/NAXIS1/NAXIS2 cross-check. Real ambiguous case this
+    guards against: T68 (IC 1396) shipped a genuinely different camera in
+    2023 (NGC 3628, 4944x3284) under the identical INSTRUME string used in
+    2021 (6248x4176) -- NAXIS is the only real discriminator (see
+    ingest.py's own module docstring / plan ??2.1) -- never a production
+    trigger today since the two deliveries are never co-scanned in one
+    `scan_session` call, but this cross-check is what would catch it if
+    they ever were."""
+    ref: dict[tuple[str, int], Path] = {}
+    for light in report.lights:
+        if light.provenance != "raw":
+            continue
+        if light.path.parent.suffix.lower() == ".zip":
+            continue
+        key = (light.telescope, light.binning)
+        if key not in ref:
+            ref[key] = light.path
+    return ref
+
+
+def _filename_only_calibration_fields(name: str) -> tuple[str, int] | None:
+    """Re-derives (frame_type, binning) from a TELESCOPE-LESS calibration
+    filename pattern (camera-model bias/dark, or skyflat), WITHOUT
+    requiring a telescope hint -- `classify_filename` itself refuses to
+    return anything for these two patterns without one (`and
+    telescope_hint`), which is exactly why a file matching one of them but
+    with no hint lands in `report.unrecognized` in the first place (see
+    `classify_frame`'s own early-return). Used only for the "filename vs
+    header" disagreement check below -- None if neither pattern matches at
+    all (the far more common real case: no filename pattern matched
+    anything, so there is nothing to disagree with)."""
+    match = _CAL_RE_CAMERA.match(name)
+    if match:
+        return match.group("frametype").capitalize(), int(match.group("bin"))
+    match = _FLAT_RE_SKYFLAT.match(name)
+    if match:
+        return "Flat", int(match.group("binx"))
+    return None
+
+
+def _classify_calibration_via_header(
+    frame: UnrecognizedFrame,
+    root: Path,
+    raw_telescopes: set[str],
+    raw_light_ref: dict[tuple[str, int], Path],
+    filename_recognized_types: set[tuple[str, str]],
+) -> CalibrationFrame | UnrecognizedFrame:
+    """Step 4b's actual fallback rule set, applied to ONE already-
+    unrecognized frame (no filename pattern matched at all, OR a
+    telescope-less calibration pattern matched with no telescope hint --
+    both land in `report.unrecognized` from the filename pass above, and
+    both need this fresh header read). Returns the original `frame`
+    unchanged for every rejection EXCEPT the two the plan calls out by
+    name (shadowing; no readable raw light to cross-check), which get a
+    specific, actionable reason instead of the filename pass's generic one.
+    """
+    path = frame.path
+    try:
+        header = fits.getheader(path)
+    except Exception:
+        return frame  # unreadable/truncated header -- rejected
+
+    calstat = header.get("CALSTAT")
+    if calstat and "M" in str(calstat):
+        return frame  # a master (CALSTAT contains 'M') -- rejected
+
+    imagetyp = str(header.get("IMAGETYP") or "").lower()
+    if "bias" in imagetyp:
+        frame_type = "Bias"
+    elif "dark" in imagetyp:
+        frame_type = "Dark"
+    elif "flat" in imagetyp:
+        frame_type = "Flat"
+    else:
+        # Includes "Light Frame" (lights are NEVER classified this way --
+        # a real, present case: IC 1396's own unparsed calibrated- lights)
+        # and anything else unrecognized.
+        return frame
+
+    xbinning, ybinning = header.get("XBINNING"), header.get("YBINNING")
+    if xbinning is None or ybinning is None:
+        return frame
+    try:
+        xbinning, ybinning = int(xbinning), int(ybinning)
+    except (TypeError, ValueError):
+        return frame
+    if xbinning != ybinning:
+        return frame
+    binning = xbinning
+
+    # Filename vs header: the filename wins. A file that matched a
+    # telescope-less pattern (camera-model bias/dark, skyflat) already
+    # told us its OWN frame_type/binning from the name -- if the header
+    # disagrees, refuse rather than trust the header over an already-
+    # parsed filename.
+    filename_fields = _filename_only_calibration_fields(path.name)
+    if filename_fields is not None and filename_fields != (frame_type, binning):
+        return frame
+
+    telescope = _attribute_telescope_for_fallback(path, root, raw_telescopes)
+    if telescope is None:
+        return frame
+
+    if (telescope, frame_type) in filename_recognized_types:
+        return UnrecognizedFrame(
+            path=path,
+            reason=(
+                f"Header suggests a {telescope} {frame_type} frame, but "
+                f"{telescope} already has filename-recognised {frame_type} "
+                "frames -- shadowed by filename-recognised frames of this "
+                "type, never merged into the same index entry."
+            ),
+        )
+
+    ref_path = raw_light_ref.get((telescope, binning))
+    if ref_path is None:
+        return UnrecognizedFrame(
+            path=path,
+            reason=(
+                f"Header suggests a {telescope} BIN{binning} {frame_type} frame, "
+                "but no readable raw light to cross-check."
+            ),
+        )
+    try:
+        ref_header = fits.getheader(ref_path)
+    except Exception:
+        return frame
+    if header.get("INSTRUME") != ref_header.get("INSTRUME"):
+        return frame
+    if (header.get("NAXIS1"), header.get("NAXIS2")) != (ref_header.get("NAXIS1"), ref_header.get("NAXIS2")):
+        return frame
+
+    if frame_type == "Bias":
+        exptime = 0.0
+    elif frame_type == "Dark":
+        raw_exptime = header.get("EXPTIME")
+        if raw_exptime is None:
+            return frame
+        exptime = round(float(raw_exptime), 1)
+    else:
+        exptime = 0.0
+
+    filter_name: str | None = None
+    if frame_type == "Flat":
+        raw_filter = header.get("FILTER")
+        if not raw_filter:
+            return frame
+        filter_name = str(raw_filter)
+
+    return CalibrationFrame(
+        path=path, telescope=telescope, frame_type=frame_type, binning=binning,
+        exptime=exptime, filter_name=filter_name, source="header",
+    )
+
+
+def _apply_calibration_header_fallback(report: IngestReport, root: Path) -> None:
+    """Mutates `report` in place: every remaining `unrecognized` entry
+    gets one shot at header-based reclassification (Step 4b). Computed
+    once per `classify_tree` call, not per-frame: which telescopes have
+    ANY raw light at all (rule (c)), one reference raw light per
+    (telescope, binning) (the cross-check), and which (telescope,
+    frame_type) pairs are already filename-recognised (the shadowing
+    rule) -- all from the filename pass that already ran above."""
+    raw_telescopes = {f.telescope for f in report.lights if f.provenance == "raw"}
+    raw_light_ref = _raw_light_reference(report)
+    filename_recognized_types = {(f.telescope, f.frame_type) for f in report.calibration}
+
+    still_unrecognized: list[UnrecognizedFrame] = []
+    for frame in report.unrecognized:
+        result = _classify_calibration_via_header(
+            frame, root, raw_telescopes, raw_light_ref, filename_recognized_types,
+        )
+        if isinstance(result, CalibrationFrame):
+            report.calibration.append(result)
+        else:
+            still_unrecognized.append(result)
+    report.unrecognized = still_unrecognized
+
+
+def classify_tree(root: str | Path, *, calibration_header_fallback: bool = False) -> IngestReport:
     """Pure, zip-aware classification (Step 4a, plan-flats-v4.md):
     behaviour-preserving refactor extracted out of `scan_session` so its
     fallback logic (Step 4b) is reviewable independently of this pure
@@ -637,6 +875,19 @@ def classify_tree(root: str | Path) -> IngestReport:
     place in a "just classify what's here" function. `scan_session` is the
     only impure caller: it takes this report's zip-peeked placeholders and
     REPLACES them with their real, extracted-file equivalents.
+
+    `calibration_header_fallback` (Step 4b, G4/G5): default False, so this
+    function's own default behaviour is completely unchanged. When True,
+    every file that no filename pattern matched AT ALL, plus every file
+    that matched a telescope-less calibration pattern (skyflat/camera-
+    model) with no telescope hint (both land in `report.unrecognized` from
+    the filename pass above), gets one shot at header-based
+    reclassification into a real `CalibrationFrame` with `source="header"`
+    -- see `_classify_calibration_via_header`'s own docstring for the full
+    rule set (IMAGETYP normalisation, CALSTAT/binning/exptime/filter
+    handling, telescope attribution, the INSTRUME/NAXIS cross-check, and
+    the shadowing rule). Lights are NEVER classified this way, whatever
+    IMAGETYP says.
     """
     root = Path(root)
     report = IngestReport()
@@ -662,10 +913,18 @@ def classify_tree(root: str | Path) -> IngestReport:
             seen.add(path)
             report.lights.extend(_peek_zipped_lights(path))
 
+    if calibration_header_fallback:
+        _apply_calibration_header_fallback(report, root)
+
     return report
 
 
-def scan_session(root: str | Path) -> IngestReport:
+def scan_session(root: str | Path, *, calibration_header_fallback: bool = False) -> IngestReport:
+    """`calibration_header_fallback` (Step 4b, plan-flats-v4.md): threaded
+    straight through to `classify_tree`, unchanged from its own meaning
+    there -- default False, so this function's own default behaviour is
+    completely unchanged. Step 5 wires this up to `run_lrgb`/
+    `run_narrowband`/`run_narrowband_boost`/the interview CLI."""
     root = Path(root)
     # Zip-wrapped lights are extracted into the pipeline's own generated
     # directory. That is deliberate, not incidental: is_generated() already
@@ -676,7 +935,7 @@ def scan_session(root: str | Path) -> IngestReport:
     # calibration copies).
     extract_dir = root / GENERATED_DIRNAME / "_extracted_zips"
 
-    report = classify_tree(root)
+    report = classify_tree(root, calibration_header_fallback=calibration_header_fallback)
 
     # Replace (never append) each zip-peeked placeholder with its real
     # extracted-file equivalent -- see classify_tree/_peek_zipped_lights'

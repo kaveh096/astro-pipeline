@@ -484,6 +484,62 @@ def test_infer_calibration_mode_raw_local_when_only_dark_missing() -> None:
     assert infer_calibration_mode(report, "T99") == CalibrationMode.RAW_LOCAL
 
 
+# --- Step 4b (plan-flats-v4.md), Decision Q2 ("Keep", permanent): header-
+# sourced bias/dark must NEVER flip infer_calibration_mode's default,
+# for any telescope, ever. -----------------------------------------------
+
+
+def test_infer_calibration_mode_header_sourced_bias_dark_does_not_flip_to_precalibrated() -> None:
+    """A telescope with ONLY header-sourced Bias/Dark (source='header',
+    Step 4b's opt-in fallback) and real calibrated-provenance lights must
+    still resolve PRECALIBRATED -- exactly as if those header frames did
+    not exist at all. This is the real M42/T20, IC 1396/T68, M31/T05 case
+    once Step 4b recognises their real bias/dark by header: recognition
+    alone must not silently flip any of them to RAW_LOCAL."""
+    from astro_pipeline.ingest import CalibrationFrame
+
+    header_bias = CalibrationFrame(
+        path=Path("bias.fit"), telescope="T20", frame_type="Bias", binning=1, exptime=0.0, source="header",
+    )
+    header_dark = CalibrationFrame(
+        path=Path("dark.fit"), telescope="T20", frame_type="Dark", binning=1, exptime=180.0, source="header",
+    )
+    report = _FakeCalReport(
+        cal_index={("T20", "Bias", 1, 0.0): [header_bias], ("T20", "Dark", 1, 180.0): [header_dark]},
+        calibrated_groups={("T20", "M42", "Luminance", 1): ["light"]},
+    )
+    assert infer_calibration_mode(report, "T20") == CalibrationMode.PRECALIBRATED
+
+
+def test_infer_calibration_mode_filename_sourced_bias_dark_still_raw_local_alongside_header_ones() -> None:
+    """A telescope with BOTH filename- and header-sourced frames present
+    (not a real shape today due to the shadowing rule, but the function
+    itself must not care) -- any filename-sourced Bias+Dark is enough for
+    RAW_LOCAL, regardless of what else is mixed into the same key."""
+    from astro_pipeline.ingest import CalibrationFrame
+
+    filename_bias = CalibrationFrame(path=Path("b.fit"), telescope="T24", frame_type="Bias", binning=1, exptime=0.0)
+    filename_dark = CalibrationFrame(path=Path("d.fit"), telescope="T24", frame_type="Dark", binning=1, exptime=300.0)
+    report = _FakeCalReport(
+        cal_index={("T24", "Bias", 1, 0.0): [filename_bias], ("T24", "Dark", 1, 300.0): [filename_dark]},
+        calibrated_groups={("T24", "M51", "Luminance", 1): ["light"]},
+    )
+    assert infer_calibration_mode(report, "T24") == CalibrationMode.RAW_LOCAL
+
+
+def test_infer_calibration_mode_getattr_fallback_against_plain_string_fakes_unchanged() -> None:
+    """R3-8's own regression guard, re-verified for Step 4b: the ~20
+    pre-existing test fakes that return plain strings (not CalibrationFrame
+    objects) from calibration_index() must keep working unchanged --
+    getattr(f, "source", "filename") on a plain string has no .source
+    attribute, so it defaults to "filename", exactly today's behaviour."""
+    report = _FakeCalReport(
+        cal_index={("T99", "Bias", 1, 0.0): ["b"], ("T99", "Dark", 1, 300.0): ["d"]},
+        calibrated_groups={},
+    )
+    assert infer_calibration_mode(report, "T99") == CalibrationMode.RAW_LOCAL
+
+
 @requires_ngc3628_project
 def test_infer_calibration_mode_real_data_t73_precalibrated_t24_raw_local() -> None:
     """The actual real-data claim this plan exists to satisfy: T73 (NGC

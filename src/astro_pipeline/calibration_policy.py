@@ -61,10 +61,29 @@ def infer_calibration_mode(report, telescope: str) -> CalibrationMode:
     can safely infer its way out of, so it stays on the path that fails
     loudly (`CalibrationFramesMissingError`) instead of silently
     resolving to a mode with no real data behind it either.
+
+    Step 4b/G5, Decision Q2 ("Keep", permanent): counts only
+    `source == "filename"` bias/dark frames -- header-recognised bias/dark
+    (`CalibrationFrame.source == "header"`, opt-in via
+    `calibration_header_fallback`) never flips this default for ANY
+    telescope, ever. Read via `getattr(f, "source", "filename")`, not
+    `f.source` directly, so the ~20 pre-existing test fakes that return
+    plain strings (not `CalibrationFrame` objects) from
+    `calibration_index()` keep working unchanged -- a plain string has no
+    `.source` attribute, so the default applies and it counts as
+    filename-sourced, exactly today's behaviour.
     """
     cal_index = report.calibration_index()
-    has_bias = any(key[0] == telescope and key[1] == "Bias" for key in cal_index)
-    has_dark = any(key[0] == telescope and key[1] == "Dark" for key in cal_index)
+
+    def _has_filename_sourced(frame_type: str) -> bool:
+        return any(
+            key[0] == telescope and key[1] == frame_type
+            and any(getattr(f, "source", "filename") == "filename" for f in frames)
+            for key, frames in cal_index.items()
+        )
+
+    has_bias = _has_filename_sourced("Bias")
+    has_dark = _has_filename_sourced("Dark")
     has_calibrated_lights = any(
         key[0] == telescope for key in report.calibrated_instrument_groups()
     )

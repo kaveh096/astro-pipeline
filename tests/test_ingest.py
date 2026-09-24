@@ -1,6 +1,8 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
+from astropy.io import fits
 
 from astro_pipeline.ingest import (
     CalibrationFrame,
@@ -690,3 +692,403 @@ def test_classify_tree_real_light_counts_match_scan_session_ngc3628_and_abell6()
         assert via_classify.lights == via_scan.lights
         assert via_classify.calibration == via_scan.calibration
         assert via_classify.unrecognized == via_scan.unrecognized
+
+
+# --- plan-flats-v4.md Step 4b: opt-in header-based calibration
+# recognition, without a mode flip (G4/G5). Mocked rule-by-rule tests,
+# then real gate-(D) flag-on checks. -------------------------------------
+
+
+def _write_cal_fits(
+    path: Path,
+    *,
+    imagetyp: str | None = None,
+    xbinning: int | None = None,
+    ybinning: int | None = None,
+    exptime: float | None = None,
+    filter_name: str | None = None,
+    instrume: str | None = None,
+    naxis1: int = 8,
+    naxis2: int = 8,
+    calstat: str | None = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    hdu = fits.PrimaryHDU(data=np.zeros((naxis2, naxis1), dtype=np.uint16))
+    if imagetyp is not None:
+        hdu.header["IMAGETYP"] = imagetyp
+    if xbinning is not None:
+        hdu.header["XBINNING"] = xbinning
+    if ybinning is not None:
+        hdu.header["YBINNING"] = ybinning
+    if exptime is not None:
+        hdu.header["EXPTIME"] = exptime
+    if filter_name is not None:
+        hdu.header["FILTER"] = filter_name
+    if instrume is not None:
+        hdu.header["INSTRUME"] = instrume
+    if calstat is not None:
+        hdu.header["CALSTAT"] = calstat
+    hdu.writeto(path)
+
+
+def _setup_project_with_one_raw_light(tmp_path: Path, telescope: str = "T20", instrume: str = "CAM1") -> Path:
+    """A minimal project with exactly one bare raw light for `telescope`
+    (used as the cross-check reference every fallback candidate needs) --
+    no filename-recognised calibration frames of any kind, so nothing is
+    ever shadowed."""
+    project = tmp_path / "project"
+    light_path = project / "lights" / f"raw-{telescope}-observer1-Target-20260101-000000-Luminance-BIN1-E-300-001.fit"
+    _write_cal_fits(light_path, instrume=instrume, xbinning=1, ybinning=1, naxis1=8, naxis2=8)
+    return project
+
+
+def test_classify_tree_fallback_off_by_default_leaves_unrecognized(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path)
+    unrec_path = project / "cal" / "unknown_bias.fit"
+    _write_cal_fits(unrec_path, imagetyp="Bias Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report_off = classify_tree(project)
+    assert not any(f.frame_type == "Bias" for f in report_off.calibration)
+
+    report_on = classify_tree(project, calibration_header_fallback=True)
+    assert any(f.frame_type == "Bias" and f.source == "header" for f in report_on.calibration)
+
+
+def test_classify_tree_fallback_imagetyp_normalises_bias_dark_flat(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path)
+    for i, (imagetyp, expected) in enumerate([
+        ("Bias Frame", "Bias"), ("BIAS", "Bias"),
+        ("Dark Frame", "Dark"), ("dark", "Dark"),
+        ("FLAT", "Flat"), ("Flat Field", "Flat"),
+    ]):
+        p = project / "cal" / f"frame_{i}.fit"
+        kwargs = dict(imagetyp=imagetyp, xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+        if expected == "Dark":
+            kwargs["exptime"] = 300.0
+        if expected == "Flat":
+            kwargs["filter_name"] = "Luminance"
+        _write_cal_fits(p, **kwargs)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    types = {f.path.name: f.frame_type for f in report.calibration if f.source == "header"}
+    assert types["frame_0.fit"] == "Bias"
+    assert types["frame_1.fit"] == "Bias"
+    assert types["frame_2.fit"] == "Dark"
+    assert types["frame_3.fit"] == "Dark"
+    assert types["frame_4.fit"] == "Flat"
+    assert types["frame_5.fit"] == "Flat"
+
+
+def test_classify_tree_fallback_never_classifies_a_light_frame(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path)
+    p = project / "cal" / "sneaky.fit"
+    _write_cal_fits(p, imagetyp="Light Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert report.calibration == [] or all(f.path != p for f in report.calibration)
+    assert any(f.path == p for f in report.unrecognized)
+
+
+def test_classify_tree_fallback_rejects_calstat_containing_m(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path)
+    p = project / "cal" / "master_bias.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8, calstat="M")
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == p for f in report.calibration)
+    assert any(f.path == p for f in report.unrecognized)
+
+
+def test_classify_tree_fallback_rejects_unreadable_header(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path)
+    p = project / "cal" / "corrupt.fit"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"not a real fits file")
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == p for f in report.calibration)
+
+
+def test_classify_tree_fallback_rejects_xbinning_ybinning_mismatch(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path)
+    p = project / "cal" / "asym_bias.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=1, ybinning=2, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == p for f in report.calibration)
+    assert any(f.path == p for f in report.unrecognized)
+
+
+def test_classify_tree_fallback_bias_exptime_forced_to_zero(tmp_path: Path) -> None:
+    """A non-zero-exptime bias (real cameras sometimes record a nonzero
+    EXPTIME on a bias frame) still gets exptime=0.0 -- matching the exact
+    key master_builder.py's bias lookup uses."""
+    project = _setup_project_with_one_raw_light(tmp_path)
+    p = project / "cal" / "bias_nonzero.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=1, ybinning=1, exptime=0.037, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    matches = [f for f in report.calibration if f.path == p]
+    assert len(matches) == 1
+    assert matches[0].exptime == 0.0
+
+
+def test_classify_tree_fallback_dark_exptime_rounds_to_one_decimal(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path)
+    p = project / "cal" / "dark_239_999.fit"
+    _write_cal_fits(p, imagetyp="Dark Frame", xbinning=1, ybinning=1, exptime=239.999, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    matches = [f for f in report.calibration if f.path == p]
+    assert len(matches) == 1
+    assert matches[0].exptime == 240.0
+
+
+def test_classify_tree_fallback_flat_requires_filter(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path)
+    p = project / "cal" / "flat_no_filter.fit"
+    _write_cal_fits(p, imagetyp="FLAT", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == p for f in report.calibration)
+
+
+def test_classify_tree_fallback_flat_filter_from_header(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path)
+    p = project / "cal" / "flat_ok.fit"
+    _write_cal_fits(p, imagetyp="FLAT", xbinning=1, ybinning=1, filter_name="Ha", instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    matches = [f for f in report.calibration if f.path == p]
+    assert len(matches) == 1
+    assert matches[0].filter_name == "Ha"
+    assert matches[0].source == "header"
+
+
+def test_classify_tree_fallback_no_readable_raw_light_to_cross_check(tmp_path: Path) -> None:
+    """A telescope attributable via rule (c) (the project's only raw
+    lights) but at a BINNING with no raw light at all -- refused, with the
+    specific documented reason."""
+    project = _setup_project_with_one_raw_light(tmp_path)  # BIN1 only
+    p = project / "cal" / "bias_bin2.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=2, ybinning=2, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == p for f in report.calibration)
+    match = next(f for f in report.unrecognized if f.path == p)
+    assert "no readable raw light to cross-check" in match.reason
+
+
+def test_classify_tree_fallback_instrume_mismatch_rejected(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path, instrume="CAM1")
+    p = project / "cal" / "bias_wrong_cam.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=1, ybinning=1, instrume="CAM2", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == p for f in report.calibration)
+
+
+def test_classify_tree_fallback_naxis_mismatch_rejected(tmp_path: Path) -> None:
+    """The real T68 2021-vs-2023 case (??2.1): identical INSTRUME string,
+    genuinely different sensor resolution -- NAXIS is the discriminator."""
+    project = _setup_project_with_one_raw_light(tmp_path, instrume="CAM1")
+    p = project / "cal" / "bias_wrong_size.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=16, naxis2=16)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == p for f in report.calibration)
+
+
+def test_classify_tree_fallback_telescope_attribution_rule_a_strict_folder(tmp_path: Path) -> None:
+    project = _setup_project_with_one_raw_light(tmp_path, telescope="T99")
+    p = project / "T99" / "Bias" / "bias0.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    match = next((f for f in report.calibration if f.path == p), None)
+    assert match is not None
+    assert match.telescope == "T99"
+
+
+def test_classify_tree_fallback_telescope_attribution_rule_b_ancestor_token_normalised(tmp_path: Path) -> None:
+    """M31/T05's real shape: the project ROOT name itself carries a 'T5'
+    token (surrounded by non-alphanumerics) that must normalise to 'T05',
+    matching the same telescope its raw lights use."""
+    project = tmp_path / "M31 - Andromeda - T5 - RGB"
+    light_path = project / "lights" / "raw-T05-observer1-M31-20260101-000000-Red-BIN1-E-300-001.fit"
+    _write_cal_fits(light_path, instrume="CAM1", xbinning=1, ybinning=1, naxis1=8, naxis2=8)
+    p = project / "bias" / "bias0.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    match = next((f for f in report.calibration if f.path == p), None)
+    assert match is not None
+    assert match.telescope == "T05"
+
+
+def test_classify_tree_fallback_telescope_attribution_rule_b_ambiguous_multi_token_refused(tmp_path: Path) -> None:
+    """M51's real shape: a root name with TWO distinct T<digits> tokens
+    ("... T24 & T21 ...") is ambiguous -- refused, not guessed."""
+    project = tmp_path / "M51 - Whirlpool - T24 & T21"
+    light_path = project / "lights" / "raw-T24-observer1-M51-20260101-000000-Red-BIN1-E-300-001.fit"
+    _write_cal_fits(light_path, instrume="CAM1", xbinning=1, ybinning=1, naxis1=8, naxis2=8)
+    p = project / "cal" / "bias0.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == p for f in report.calibration)
+
+
+def test_classify_tree_fallback_telescope_attribution_rule_c_multiple_telescopes_refused(tmp_path: Path) -> None:
+    """Rule (c) needs EXACTLY one telescope's worth of raw lights -- two
+    telescopes present with no folder/token attribution is ambiguous."""
+    project = tmp_path / "project"
+    _write_cal_fits(
+        project / "lights" / "raw-T20-observer1-X-20260101-000000-Red-BIN1-E-300-001.fit",
+        instrume="CAM1", xbinning=1, ybinning=1, naxis1=8, naxis2=8,
+    )
+    _write_cal_fits(
+        project / "lights" / "raw-T21-observer1-X-20260101-000000-Red-BIN1-E-300-001.fit",
+        instrume="CAM1", xbinning=1, ybinning=1, naxis1=8, naxis2=8,
+    )
+    p = project / "cal" / "bias0.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == p for f in report.calibration)
+
+
+def test_classify_tree_fallback_shadowing_rule(tmp_path: Path) -> None:
+    """A telescope with a REAL filename-recognised Bias must never absorb
+    a header-only Bias candidate too -- shadowed, listed unrecognized with
+    the documented reason, never merged into the same index entry."""
+    project = tmp_path / "project"
+    light_path = project / "lights" / "raw-T24-observer1-M51-20260101-000000-Red-BIN1-E-300-001.fit"
+    _write_cal_fits(light_path, instrume="CAM1", xbinning=1, ybinning=1, naxis1=8, naxis2=8)
+    # A real, filename-recognised T24 bias (T24-style convention).
+    filename_bias = project / "T24-observer1-Bias-000-LD20260101-LT000000-BIN1.fit"
+    _write_cal_fits(filename_bias, instrume="CAM1", xbinning=1, ybinning=1, naxis1=8, naxis2=8)
+    # A header-only candidate bias for the SAME telescope+type.
+    header_bias = project / "cal" / "extra_bias.fit"
+    _write_cal_fits(header_bias, imagetyp="Bias Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == header_bias for f in report.calibration)
+    match = next(f for f in report.unrecognized if f.path == header_bias)
+    assert "shadowed" in match.reason
+
+
+def test_classify_tree_fallback_filename_vs_header_disagreement_refused(tmp_path: Path) -> None:
+    """A telescope-less camera-model filename says 'dark', but the header
+    says 'Bias Frame' -- the filename wins; disagreement leaves it
+    unrecognized rather than trusting the header."""
+    project = _setup_project_with_one_raw_light(tmp_path, telescope="T99")
+    # "<camera>-<index>dark<exptime>secBin<n>.fit" -- matches _CAL_RE_CAMERA
+    # as a Dark, but with no telescope hint (no T<digits> folder above it).
+    p = project / "cal" / "CAM1-0001dark300secBin1.fit"
+    _write_cal_fits(p, imagetyp="Bias Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+
+    report = classify_tree(project, calibration_header_fallback=True)
+    assert not any(f.path == p for f in report.calibration)
+
+
+@requires_m42_project
+def test_classify_tree_fallback_real_m42_counts_match_known_numbers() -> None:
+    """Real gate (D), flag-on: M42/T20's real bias/dark/flat counts,
+    exactly as plan-flats-v4.md ??2.1 documents (verified directly against
+    this real delivery before writing this test): bias 50 (BIN1) + 49
+    (BIN2, +1 truncated/unreadable), darks 10 (BIN1, 180s) + 10 (BIN2,
+    180s) + 10 (BIN2, 300s), flats 10 each of L/R/G/B/Ha/SII (BIN1 or
+    BIN2) + 9 OIII (+1 truncated)."""
+    report = classify_tree(M42_PROJECT_DIR, calibration_header_fallback=True)
+    cal_index = report.calibration_index()
+    assert len(cal_index.get(("T20", "Bias", 1, 0.0), [])) == 50
+    assert len(cal_index.get(("T20", "Bias", 2, 0.0), [])) == 49
+    assert len(cal_index.get(("T20", "Dark", 1, 180.0), [])) == 10
+    assert len(cal_index.get(("T20", "Dark", 2, 180.0), [])) == 10
+    assert len(cal_index.get(("T20", "Dark", 2, 300.0), [])) == 10
+    assert all(getattr(f, "source", "filename") == "header" for f in cal_index[("T20", "Bias", 1, 0.0)])
+
+    flat_index = report.flat_index()
+    for filt in ("Luminance", "Red", "Green", "Blue", "Ha", "SII"):
+        binning = 1 if filt == "Luminance" else 2
+        assert len(flat_index.get(("T20", binning, filt), [])) == 10
+    assert len(flat_index.get(("T20", 2, "OIII"), [])) == 9
+
+
+@requires_ic1396_project
+def test_classify_tree_fallback_real_ic1396_counts_match_known_numbers() -> None:
+    """Real gate (D), flag-on: IC 1396/T68's real bias 48, darks 50, flats
+    88 (all Color, BIN1) -- plan ??2.1's own numbers."""
+    report = classify_tree(IC1396_PROJECT_DIR, calibration_header_fallback=True)
+    cal_index = report.calibration_index()
+    assert len(cal_index.get(("T68", "Bias", 1, 0.0), [])) == 48
+    assert len(cal_index.get(("T68", "Dark", 1, 240.0), [])) == 50
+    flat_index = report.flat_index()
+    assert len(flat_index.get(("T68", 1, "Color"), [])) == 88
+
+
+@requires_m31_project
+def test_classify_tree_fallback_real_m31_counts_match_known_numbers() -> None:
+    """Real gate (D), flag-on: M31/T05's real bias 15, darks 16, flats 40
+    each of R/G/B (BIN1) -- plan ??2.1's own numbers. The T5->T05
+    ancestor-token normalisation is load-bearing here (the project root is
+    literally named "M31 - Andromeda - T5 - RGB - Aug 2021")."""
+    report = classify_tree(M31_PROJECT_DIR, calibration_header_fallback=True)
+    cal_index = report.calibration_index()
+    assert len(cal_index.get(("T05", "Bias", 1, 0.0), [])) == 15
+    assert len(cal_index.get(("T05", "Dark", 1, 180.0), [])) == 16
+    flat_index = report.flat_index()
+    assert len(flat_index.get(("T05", 1, "Red"), [])) == 40
+    assert len(flat_index.get(("T05", 1, "Green"), [])) == 40
+    assert len(flat_index.get(("T05", 1, "Blue"), [])) == 40
+
+
+@pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
+def test_classify_tree_fallback_real_m51_indexes_unchanged() -> None:
+    """Behaviour change: none by default, and none in MODE even with the
+    flag on (Decision Q2). M51's own indexes (already fully filename-
+    recognised) must be byte-identical with the flag on or off."""
+    report_off = scan_session(REAL_SESSION_DIR)
+    report_on = scan_session(REAL_SESSION_DIR, calibration_header_fallback=True)
+    assert report_off.calibration_index() == report_on.calibration_index()
+    assert report_off.flat_index() == report_on.flat_index()
+
+
+@requires_ngc3628_project
+def test_classify_tree_fallback_real_ngc3628_indexes_unchanged() -> None:
+    report_off = scan_session(NGC3628_PROJECT_DIR)
+    report_on = scan_session(NGC3628_PROJECT_DIR, calibration_header_fallback=True)
+    assert report_off.calibration_index() == report_on.calibration_index()
+    assert report_off.flat_index() == report_on.flat_index()
+
+
+@pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
+@requires_ngc3628_project
+@requires_abell6_project
+@requires_abell31_project
+@requires_m42_project
+@requires_ic1396_project
+@requires_m31_project
+def test_infer_calibration_mode_unchanged_flag_on_for_every_telescope_all_seven_projects() -> None:
+    """Decision Q2 ("Keep", permanent): with the flag on, infer_calibration_mode
+    must be UNCHANGED for every telescope in all seven gate-(D) projects --
+    T20/T68/T05 stay PRECALIBRATED by default, exactly as with the flag off."""
+    from astro_pipeline.calibration_policy import infer_calibration_mode
+
+    projects = [
+        REAL_SESSION_DIR, NGC3628_PROJECT_DIR, ABELL6_PROJECT_DIR, ABELL31_PROJECT_DIR,
+        M42_PROJECT_DIR, IC1396_PROJECT_DIR, M31_PROJECT_DIR,
+    ]
+    for project_dir in projects:
+        report_off = scan_session(project_dir)
+        report_on = scan_session(project_dir, calibration_header_fallback=True)
+        telescopes = {k[0] for k in report_off.instrument_groups()} | {
+            k[0] for k in report_off.calibrated_instrument_groups()
+        }
+        for telescope in telescopes:
+            assert infer_calibration_mode(report_off, telescope) == infer_calibration_mode(report_on, telescope), (
+                f"{project_dir.name}/{telescope}: infer_calibration_mode changed when the "
+                "calibration_header_fallback flag was toggled on -- Decision Q2 requires it "
+                "stay unchanged, permanently."
+            )
