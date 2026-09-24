@@ -15,7 +15,7 @@ survive, so a green run actually means real data was exercised.
 Real personal paths (where YOUR OWN raw data/project folders live) are
 NOT hardcoded here -- this repo is public. Configure them via
 `tests/local_paths.py` (gitignored -- copy `local_paths.py.example` to
-get started) or the `ASTRO_PIPELINE_DESKTOP_DIR`/
+get started) or the `ASTRO_PIPELINE_PROJECT_DIR_BASE`/
 `ASTRO_PIPELINE_ITELESCOPE_DIR` environment variables. Every real-data
 test is gated by a `pytest.mark.skipif` that checks whether its fixture
 actually exists, so running this suite with neither configured just
@@ -53,7 +53,7 @@ def _under(base: Path | None, subpath: str) -> Path:
     return (base / subpath) if base is not None else Path("/__unconfigured_test_data__") / subpath
 
 
-_DESKTOP_DIR = _configured_dir("ASTRO_PIPELINE_DESKTOP_DIR", "DESKTOP_DIR")
+_PROJECT_DIR_BASE = _configured_dir("ASTRO_PIPELINE_PROJECT_DIR_BASE", "PROJECT_DIR_BASE")
 _ITELESCOPE_DIR = _configured_dir("ASTRO_PIPELINE_ITELESCOPE_DIR", "ITELESCOPE_DIR")
 LUM_USER = getattr(local_paths, "LUM_USER", None) or os.environ.get("ASTRO_PIPELINE_LUM_USER", "observer1")
 RGB_USER = getattr(local_paths, "RGB_USER", None) or os.environ.get("ASTRO_PIPELINE_RGB_USER", "observer1")
@@ -64,7 +64,7 @@ RGB_USER = getattr(local_paths, "RGB_USER", None) or os.environ.get("ASTRO_PIPEL
 # stop matching real disk data once a different local_paths.py is used.
 LUM_USERS = frozenset(LUM_USER.split("+"))
 
-PROJECT_DIR = _under(_DESKTOP_DIR, "M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
+PROJECT_DIR = _under(_PROJECT_DIR_BASE, "M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
 PIPELINE_DIR = PROJECT_DIR / "_pipeline"
 FINAL_DIR = PIPELINE_DIR / "final"
 

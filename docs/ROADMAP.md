@@ -4,42 +4,50 @@ Living project roadmap. Update this file (don't create a new one) whenever
 priorities change, a task finishes, or a decision gets made. This is the
 first thing a new session should read after `README.md`/`SKILL.md`.
 
-Last updated: 2026-09-17. Current `main` HEAD: `3688de0`, pushed and
-up to date with `origin/main`.
+Last updated: 2026-09-21. Current `main` HEAD: pushed and up to date with
+`origin/main` (naming-cleanup commit on top of `3688de0`).
 
 ---
 
 ## 1. Immediate next step (do this first)
 
-**Task 5 (the OOP refactor) is done except for Step 17**, the final,
-human-only gate:
+**Task 5 (the OOP refactor) is fully done, Steps 0-17, including Step 17**
+(2026-09-21): a real, full `run_lrgb` run against the real M51 project on
+Kaveh's own machine completed successfully end to end (real Siril
+calibration/stacking, real GraXpert background extraction, real SPCC on
+both colour contributors, real gain/offset match + combine), followed by
+the actual real-data verification tests --
+`test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output`'s
+SHA-256 byte-identity check passed (a full untouched resumed run
+reproduced byte-for-byte identical `lrgb_final.fit`/`M51_lrgb.tif`), along
+with the 3 other real `stop_after`/`force` resumability tests. This is the
+actual "did 17 steps of refactoring change a single output byte" proof for
+the whole task, and it passed clean.
 
-1. **Step 17 -- manual real-data verification**, on Kaveh's own machine
-   only (cannot be done from this dev environment: the M51 "Desktop"
-   fixture is genuinely absent here, confirmed repeatedly across this
-   whole task). With `ASTRO_PIPELINE_DESKTOP_DIR`/
-   `ASTRO_PIPELINE_ITELESCOPE_DIR` configured (copy
-   `tests/local_paths.py.example` to `tests/local_paths.py` and fill in
-   real paths if not already done), run the full suite and confirm:
-   - no fixture-gated test newly fails or newly skips versus the 288/35
-     baseline;
-   - `test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output`'s
-     SHA-256 byte-identity check still passes -- the actual
-     "did 17 steps of refactoring change a single output byte" oracle for
-     the whole task.
-   This is the one check nothing else in this task substitutes for.
-2. Once Step 17 passes (or if a real discrepancy shows up and needs
-   triage), Task 5 is fully closed out. At that point, revisit Section 4
-   below (deferred work) and Section 6 (previously-rejected ideas worth
-   re-asking about) for what to prioritize next -- both have gone
-   unrevisited for a while and this task's own convention is to
-   periodically re-question them rather than assume they're settled.
-3. Full test suite baseline to hold: **288 passed, 35 skipped, 0 failed**
-   (`.venv/Scripts/python.exe -m pytest tests/ -q`, ~5-8 minutes; timing
-   varied 3.5-8 minutes across this session's own runs with identical
-   pass/skip counts each time -- confirmed as ordinary system load
-   variance, not a regression signal, so don't over-read wall-clock alone
-   without also checking the skip count matches).
+Along the way, `tests/local_paths.py`'s `DESKTOP_DIR` was found to be a
+stale/misleading name -- despite the name, it was never actually pointing
+at a literal Desktop folder, and Desktop turned out to hold only finished
+TIFF exports (deliverable copies), not the pipeline's real working data.
+Renamed to `PROJECT_DIR_BASE` (env var `ASTRO_PIPELINE_PROJECT_DIR_BASE`)
+across `tests/conftest.py`/`tests/local_paths.py.example`/
+`tests/local_paths.py` to name what it actually holds: the base directory
+under which the M51 project folder (raw lights + its own `_pipeline/`
+working copy) lives -- which on Kaveh's own machine is the same iTelescope
+raw-backup drive `ITELESCOPE_DIR` already pointed at, not a separate
+"Desktop" location.
+
+**Next**: revisit Section 4 below (deferred work) and Section 6
+(previously-rejected ideas worth re-asking about) for what to prioritize
+next -- both have gone unrevisited for a while and this task's own
+convention is to periodically re-question them rather than assume they're
+settled.
+
+Full test suite baseline to hold: **288 passed, 35 skipped, 0 failed**
+(`.venv/Scripts/python.exe -m pytest tests/ -q`, ~5-8 minutes; timing
+varied 3.5-8 minutes across this session's own runs with identical
+pass/skip counts each time -- confirmed as ordinary system load variance,
+not a regression signal, so don't over-read wall-clock alone without also
+checking the skip count matches).
 
 ---
 
@@ -263,13 +271,18 @@ entirely, into the new `lrgb_orchestrator.py` (~1020 lines including the
   external callers (skill/run_post_process.py, colour_contributor.py,
   lrgb_orchestrator.py) needed zero changes.
 
-**Remaining: Step 17 only** -- **manual real-data verification** on
-Kaveh's own machine (`ASTRO_PIPELINE_DESKTOP_DIR`/
-`ASTRO_PIPELINE_ITELESCOPE_DIR` configured) -- the actual final
-behavior-preservation gate, especially the SHA-256 byte-identity check in
-`test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output`. This
-can only run on one machine; it is not a CI-able step, and nothing in this
-session could substitute for it.
+- Step 17 (2026-09-21, no commit -- real-data-only, not code): **manual
+  real-data verification**, done on Kaveh's own machine with
+  `ASTRO_PIPELINE_PROJECT_DIR_BASE`/`ASTRO_PIPELINE_ITELESCOPE_DIR`
+  configured -- the actual final behavior-preservation gate. A real, full
+  `run_lrgb` run against the real M51 project completed successfully
+  (real Siril/GraXpert/SPCC throughout, both colour contributors), then
+  the SHA-256 byte-identity check in
+  `test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output`
+  passed, along with the 3 other real `stop_after`/`force` resumability
+  tests. This could only run on one machine; it is not a CI-able step,
+  and nothing earlier in this task substituted for it. **Task 5 is now
+  fully complete.**
 
 **Risks to keep re-checking at every remaining step** (full detail in the
 plan doc's Section 3): monkeypatch-target drift (a moved function's test
@@ -335,9 +348,13 @@ project. Blocked on 4.4 (needs a complete real LRGB composite to run
 against) unless a different real narrowband+broadband target becomes
 available first.
 
-### 4.6 Task 5's optional Steps 15/16 (reconciliation.py / background_color.py splits)
-Deferred by the plan itself as lower-priority than the `pipeline.py`
-split -- see Section 3.
+### 4.6 ~~Task 5's optional Steps 15/16~~ -- done, stale entry
+Both optional splits (`reconciliation.py` -> package, `background_color.py`
+-> `color_calibration.py`/`background_extraction.py`) shipped 2026-09-21
+(commits `3b0741e`/`3688de0`) -- see Section 3. Kept here crossed-out
+rather than deleted, as a reminder this section needs occasional
+re-reading against Section 2/3's actual commit history, not just trusted
+as always current.
 
 ### 4.7 `calibration.py`'s own optional internal split
 The refactor plan explicitly recommends leaving `calibration.py` as one
