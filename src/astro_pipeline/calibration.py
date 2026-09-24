@@ -561,6 +561,77 @@ def classify_flat_identity(flat_frames: list[CalibrationFrame]) -> FlatIdentityR
     )
 
 
+# Step 3b (plan-flats-v4.md): the FIRST non-empty calibration_recipe this
+# mechanism ever produces (Step 2 built the plumbing; this constant is the
+# actual behaviour-change trigger, per contributor_staleness.
+# calibration_recipe_parts()). Lives here, next to the functions whose
+# behaviour it describes (stage_flat_frames' dedupe+uniquify and
+# build_master_flat's -norm=mul), so a future recipe bump changes this
+# constant in the same commit as the code it names.
+FLAT_RECIPE_VERSION = "flat:v2:dedup+uniq+mul"
+
+_NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
+
+
+def stage_flat_frames(flat_frames: list[CalibrationFrame], dest_dir: str | Path) -> Path:
+    """Flat-only content-aware staging (Step 3b, fixes G1) -- unlike the
+    generic `stage_frames` every other calibration frame kind still uses
+    unchanged (lights, bias, dark -- I5 is deliberately not touched for
+    those), a flat's matched set can contain real, DISTINCT exposures that
+    happen to share a generic basename across different session folders
+    (T21 L's real case: 10 colliding 'skyflat<N>' names across two
+    twilight sessions). The plain basename-collapsing copy every other
+    frame kind uses would silently keep only whichever one `rglob`'s
+    iteration order happened to copy last, discarding a real, distinct
+    exposure with zero indication anything was lost.
+
+    Per basename:
+    - a single matched frame is copied as-is, unchanged from `stage_frames`;
+    - multiple frames sharing a basename are first deduplicated by CONTENT
+      (SHA-256): byte-identical copies are dropped, keeping the first by
+      sorted path -- these are the same bytes, so which one survives
+      doesn't matter;
+    - if more than one DISTINCT-content frame remains under that basename
+      after dedup, every survivor is renamed to
+      `<sanitised parent>_<8-hex path hash>__<name>` so all of them are
+      staged, not just one -- the sanitiser strips everything but
+      alphanumerics from the parent directory name, and the path hash
+      disambiguates same-named parents.
+    """
+    dest_dir = Path(dest_dir)
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir)
+    dest_dir.mkdir(parents=True)
+
+    by_name: dict[str, list[CalibrationFrame]] = defaultdict(list)
+    for frame in flat_frames:
+        by_name[frame.path.name].append(frame)
+
+    for name, frames in by_name.items():
+        if len(frames) == 1:
+            shutil.copy2(frames[0].path, dest_dir / name)
+            continue
+
+        by_hash: dict[str, list[CalibrationFrame]] = defaultdict(list)
+        for frame in frames:
+            by_hash[_sha256_file(frame.path)].append(frame)
+        # Keep the first by sorted path within each content-identical group.
+        survivors = [sorted(group, key=lambda f: str(f.path))[0] for group in by_hash.values()]
+
+        if len(survivors) == 1:
+            # All byte-identical -- one survives under its original name.
+            shutil.copy2(survivors[0].path, dest_dir / name)
+        else:
+            # A genuine name collision between distinct frames -- stage
+            # every survivor under a disambiguated name.
+            for survivor in survivors:
+                sanitised_parent = _NON_ALNUM_RE.sub("", survivor.path.parent.name)
+                path_hash = hashlib.sha256(str(survivor.path.parent).encode("utf-8")).hexdigest()[:8]
+                new_name = f"{sanitised_parent}_{path_hash}__{name}"
+                shutil.copy2(survivor.path, dest_dir / new_name)
+    return dest_dir
+
+
 def build_master_bias(bias_frames: list[CalibrationFrame], work_dir: str | Path) -> Path:
     return build_master([f.path for f in bias_frames], "bias", work_dir)
 
@@ -612,7 +683,12 @@ def build_master_flat(
 
     basename = "flat"
     stage_dir = Path(work_dir) / basename
-    stage_frames([f.path for f in flat_frames], stage_dir)
+    # Step 3b: flat-only content-aware staging (dedupe byte-identical
+    # copies, uniquify genuine name collisions) -- NOT the generic
+    # `stage_frames` every other frame kind still uses; see
+    # stage_flat_frames' own docstring for why flats are the one kind that
+    # needs this (G1).
+    stage_flat_frames(flat_frames, stage_dir)
 
     seq = sequence_name(basename)
     run_script([f"convert {basename}"], workdir=stage_dir, script_name="convert.ssf")
@@ -629,8 +705,13 @@ def build_master_flat(
         prefix="bc_",
     )
     bias_calibrated_seq = f"bc_{seq}"
+    # Step 3b (fixes G2): Siril's bundled reference scripts stack flats
+    # with `-norm=mul`, not the default "additive with scale" normalisation
+    # this call used before -- verified against Siril's own help text and
+    # bundled .ssf scripts. Bias/dark masters are unchanged (I6 is a
+    # separate, Q7-gated measurement, not this step).
     result = run_script(
-        [command, f"stack {bias_calibrated_seq} rej 3.0 3.0 -out=master"],
+        [command, f"stack {bias_calibrated_seq} rej 3.0 3.0 -norm=mul -out=master"],
         workdir=stage_dir,
         script_name="calibrate.ssf",
     )

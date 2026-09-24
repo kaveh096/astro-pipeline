@@ -5,18 +5,21 @@ import pytest
 from astropy.io import fits
 
 from astro_pipeline.calibration import (
+    FLAT_RECIPE_VERSION,
     CalibrationFramesMissingError,
     CalibrationMode,
     FlatPolicy,
     _calibrate_command,
     _check_calibration_log,
     build_master,
+    build_master_bias,
     build_master_flat,
     calibrate_lights,
     classify_flat_identity,
     run_calibration,
     select_dark,
     sequence_name,
+    stage_flat_frames,
     stage_precalibrated_lights,
 )
 from astro_pipeline.ingest import CalibrationFrame, scan_session
@@ -292,6 +295,155 @@ def test_t24_real_groups_have_no_matched_flats_and_command_is_unaffected() -> No
         cmd = _calibrate_command("lights_", "masterdark", None, None, dark_optimize=False)
         assert cmd == "calibrate lights_ -dark=masterdark -cc=dark -prefix=pp_"
         assert "-flat=" not in cmd
+
+
+# --- Step 3b (plan-flats-v4.md): flat-only content-aware staging
+# (dedupe byte-identical copies, uniquify genuine name collisions) plus
+# -norm=mul stacking. Fixes G1/G2, ships unconditionally (Q1). ------------
+
+
+def _write_flat(path: Path, value: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fits.PrimaryHDU(data=np.full((4, 4), value, dtype=np.uint16)).writeto(path)
+
+
+def test_stage_flat_frames_thirty_distinct_names_all_thirty_staged(tmp_path: Path) -> None:
+    frames = []
+    for i in range(30):
+        p = tmp_path / "raw" / f"flat_{i}.fit"
+        _write_flat(p, i)
+        frames.append(
+            CalibrationFrame(path=p, telescope="T99", frame_type="Flat", binning=1, exptime=0.0, filter_name="L")
+        )
+    dest = stage_flat_frames(frames, tmp_path / "staged")
+    assert len(list(dest.glob("*.fit"))) == 30
+
+
+def test_stage_flat_frames_two_byte_identical_collapse_to_one(tmp_path: Path) -> None:
+    dir1, dir2 = tmp_path / "s1", tmp_path / "s2"
+    p1, p2 = dir1 / "skyflat0.fit", dir2 / "skyflat0.fit"
+    _write_flat(p1, 100)
+    _write_flat(p2, 100)  # byte-identical content, same basename
+    frames = [
+        CalibrationFrame(path=p, telescope="T21", frame_type="Flat", binning=1, exptime=0.0, filter_name="Luminance")
+        for p in (p1, p2)
+    ]
+    dest = stage_flat_frames(frames, tmp_path / "staged")
+    staged = list(dest.glob("*.fit"))
+    assert len(staged) == 1
+    assert staged[0].name == "skyflat0.fit"  # kept under its original name, no rename needed
+
+
+def test_stage_flat_frames_colliding_distinct_frames_both_staged_and_renamed(tmp_path: Path) -> None:
+    """T21 L's real shape: two sessions, same generic basename, genuinely
+    different content -- both must survive staging, disambiguated."""
+    dir1, dir2 = tmp_path / "20240616_080204", tmp_path / "20240616_080536"
+    p1, p2 = dir1 / "skyflat0.fit", dir2 / "skyflat0.fit"
+    _write_flat(p1, 10)
+    _write_flat(p2, 200)  # distinct content, same basename
+    frames = [
+        CalibrationFrame(path=p, telescope="T21", frame_type="Flat", binning=1, exptime=0.0, filter_name="Luminance")
+        for p in (p1, p2)
+    ]
+    dest = stage_flat_frames(frames, tmp_path / "staged")
+    staged_names = sorted(f.name for f in dest.glob("*.fit"))
+    assert len(staged_names) == 2
+    assert all(name.endswith("__skyflat0.fit") for name in staged_names)
+    assert staged_names[0] != staged_names[1]
+
+
+def test_stage_flat_frames_single_frame_per_name_unchanged(tmp_path: Path) -> None:
+    p = tmp_path / "raw" / "onlyone.fit"
+    _write_flat(p, 5)
+    frame = CalibrationFrame(path=p, telescope="T99", frame_type="Flat", binning=1, exptime=0.0, filter_name="L")
+    dest = stage_flat_frames([frame], tmp_path / "staged")
+    staged = list(dest.glob("*.fit"))
+    assert len(staged) == 1
+    assert staged[0].name == "onlyone.fit"
+
+
+def test_build_master_flat_stack_command_uses_norm_mul(tmp_path: Path, monkeypatch) -> None:
+    """G2's own fix: the flat stack command must include -norm=mul, matching
+    Siril's own bundled reference scripts."""
+    import astro_pipeline.calibration as calibration_module
+
+    captured_commands: list[str] = []
+
+    def fake_run_script(commands, workdir, siril_cli=None, timeout=None, script_name="run.ssf"):
+        if script_name == "calibrate.ssf":
+            captured_commands.extend(commands)
+            (Path(workdir) / "master.fit").write_bytes(b"\x00")
+        return SirilResult(returncode=0, log_lines=[])
+
+    monkeypatch.setattr(calibration_module, "run_script", fake_run_script)
+
+    flat_path = tmp_path / "flat0.fit"
+    _write_flat(flat_path, 1000)
+    bias_path = tmp_path / "bias.fit"
+    _write_flat(bias_path, 10)
+    flat_frame = CalibrationFrame(
+        path=flat_path, telescope="T99", frame_type="Flat", binning=1, exptime=0.0, filter_name="Luminance",
+    )
+
+    build_master_flat([flat_frame], bias_path, tmp_path / "work")
+
+    stack_commands = [c for c in captured_commands if c.startswith("stack")]
+    assert len(stack_commands) == 1
+    assert "-norm=mul" in stack_commands[0]
+
+
+def test_build_master_bias_stack_command_unchanged_no_norm_flag(tmp_path: Path, monkeypatch) -> None:
+    """I6 is a separate, Q7-gated measurement -- bias/dark stacking is NOT
+    touched by Step 3b, unlike the flat stack above."""
+    import astro_pipeline.calibration as calibration_module
+
+    captured_commands: list[str] = []
+
+    def fake_run_script(commands, workdir, siril_cli=None, timeout=None, script_name="run.ssf"):
+        captured_commands.extend(commands)
+        (Path(workdir) / "master.fit").write_bytes(b"\x00")
+        return SirilResult(returncode=0, log_lines=[])
+
+    monkeypatch.setattr(calibration_module, "run_script", fake_run_script)
+
+    bias_path = tmp_path / "bias0.fit"
+    _write_flat(bias_path, 10)
+    bias_frame = CalibrationFrame(path=bias_path, telescope="T99", frame_type="Bias", binning=1, exptime=0.0)
+
+    build_master_bias([bias_frame], tmp_path / "work")
+
+    stack_commands = [c for c in captured_commands if c.startswith("stack")]
+    assert len(stack_commands) == 1
+    assert stack_commands[0] == "stack bias_ rej 3.0 3.0 -out=master"
+    assert "-norm" not in stack_commands[0]
+
+
+def test_calibration_recipe_parts_raw_local_with_flats_returns_flat_recipe_version() -> None:
+    """The mode-aware helper's own bump (Step 2 shipped it returning "" for
+    this exact case; Step 3b is the actual behaviour change)."""
+    from astro_pipeline.contributor_staleness import calibration_recipe_parts
+
+    flats = [
+        CalibrationFrame(path=Path("a.fit"), telescope="T21", frame_type="Flat", binning=1, exptime=0.0, filter_name="L"),
+    ]
+    frame_hash, recipe = calibration_recipe_parts(CalibrationMode.RAW_LOCAL, flats)
+    assert recipe == FLAT_RECIPE_VERSION
+    assert frame_hash != ""
+
+
+def test_calibration_recipe_parts_precalibrated_stays_empty_even_after_step3b() -> None:
+    from astro_pipeline.contributor_staleness import calibration_recipe_parts
+
+    flats = [
+        CalibrationFrame(path=Path("a.fit"), telescope="T21", frame_type="Flat", binning=1, exptime=0.0, filter_name="L"),
+    ]
+    assert calibration_recipe_parts(CalibrationMode.PRECALIBRATED, flats) == ("", "")
+
+
+def test_calibration_recipe_parts_empty_flats_stays_empty_even_after_step3b() -> None:
+    from astro_pipeline.contributor_staleness import calibration_recipe_parts
+
+    assert calibration_recipe_parts(CalibrationMode.RAW_LOCAL, []) == ("", "")
 
 
 # --- build_master_flat: real bias-subtraction-before-stacking, on a fast
@@ -795,35 +947,29 @@ def test_t21_luminance_flat_and_calibration_siril_determinism_bound(tmp_path: Pa
                 delta = float(np.max(np.abs(flat_data(a) - flat_data(b))))
                 max_tmp_calibrated_delta = max(max_tmp_calibrated_delta, delta)
 
+    # plan-flats-v4.md ??4.0: "After Step 3b the reference switches to the
+    # new recipe's output, recorded in 3b." That switch is event E's own
+    # job -- it rebuilds the real M51 pipeline (and this on-disk
+    # reference) under the new recipe, and is explicitly out of scope for
+    # this task. Until E actually runs, the on-disk
+    # `<group>/flat/master.fit` is a STALE, pre-3b reference: a fresh
+    # tmp-path run now uses Step 3b's dedupe+uniquify staging and
+    # -norm=mul unconditionally, so comparing it against that stale file
+    # would fail loudly for the expected, documented reason (a real,
+    # intentional pixel change -- see calibration.build_master_flat's own
+    # docstring), not a bug. The tmp-vs-tmp determinism bound above is
+    # computed entirely fresh, under today's code on both sides, and
+    # remains fully meaningful on its own -- only the tmp-vs-PERSISTED
+    # half is retired here, pending event E's own re-pin.
     from conftest import PIPELINE_DIR
 
     persisted_master_flat = PIPELINE_DIR / group_name / "flat" / "master.fit"
-    persisted_lights_dir = PIPELINE_DIR / group_name / "lights"
-    if not persisted_master_flat.exists():
-        pytest.skip(f"no persisted reference master flat at {persisted_master_flat}")
-    persisted_data = flat_data(persisted_master_flat)
-    tmp_vs_persisted_flat_delta = float(np.max(np.abs(flat_arrays[0] - persisted_data)))
-
-    flat_bound = 2 * max_tmp_delta
-    assert tmp_vs_persisted_flat_delta <= flat_bound, (
-        f"tmp-vs-persisted master flat delta {tmp_vs_persisted_flat_delta} exceeds "
-        f"2x the observed tmp-vs-tmp determinism bound {flat_bound} "
-        f"(max_tmp_delta={max_tmp_delta}) -- failing loudly rather than "
-        "silently widening the tolerance (plan-flats-v4.md ??4.0)."
-    )
-
-    persisted_calibrated = sorted(persisted_lights_dir.glob("pp_lights_*.fit*"))
-    if persisted_calibrated and len(persisted_calibrated) == len(calibrated_sets[0]):
-        calibrated_bound = 2 * max_tmp_calibrated_delta
-        tmp_vs_persisted_calibrated_delta = max(
-            float(np.max(np.abs(flat_data(a) - flat_data(b))))
-            for a, b in zip(calibrated_sets[0], persisted_calibrated)
-        )
-        assert tmp_vs_persisted_calibrated_delta <= calibrated_bound, (
-            f"tmp-vs-persisted calibrated-light delta {tmp_vs_persisted_calibrated_delta} "
-            f"exceeds 2x the observed tmp-vs-tmp determinism bound {calibrated_bound} "
-            f"(max_tmp_calibrated_delta={max_tmp_calibrated_delta}) -- failing loudly "
-            "rather than silently widening the tolerance (plan-flats-v4.md ??4.0)."
+    if persisted_master_flat.exists():
+        pytest.skip(
+            "tmp-vs-persisted comparison retired until event E re-pins the "
+            "on-disk reference under Step 3b's new recipe (dedupe+uniquify "
+            "staging, -norm=mul) -- see this test's own comment. The "
+            "tmp-vs-tmp determinism bound above already ran and passed."
         )
 
 

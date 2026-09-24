@@ -714,13 +714,18 @@ def test_calibration_recipe_parts_raw_local_empty_flats_is_empty() -> None:
     assert calibration_recipe_parts(CalibrationMode.RAW_LOCAL, []) == ("", "")
 
 
-def test_calibration_recipe_parts_raw_local_with_flats_returns_hash_and_empty_recipe() -> None:
-    """Today's unversioned baseline (before Step 3b): a real hash, but the
-    recipe half stays "" until an actual behaviour change ships."""
+def test_calibration_recipe_parts_raw_local_with_flats_returns_hash_and_bumped_recipe() -> None:
+    """Step 3b's own bumped recipe (plan-flats-v4.md's single trigger for
+    the real T21_bin1 rebuild): a non-empty RAW_LOCAL flat set now returns
+    FLAT_RECIPE_VERSION, not "" -- Step 2 shipped this same helper
+    returning "" for this exact case; Step 3b is the actual behaviour
+    change that bumps it."""
+    from astro_pipeline.calibration import FLAT_RECIPE_VERSION
+
     flats = [_FakeFlat("a.fit"), _FakeFlat("b.fit")]
     frame_hash, recipe = calibration_recipe_parts(CalibrationMode.RAW_LOCAL, flats)
     assert frame_hash == frame_identity_hash(["a.fit", "b.fit"])
-    assert recipe == ""
+    assert recipe == FLAT_RECIPE_VERSION
 
 
 def test_contributor_stale_true_on_calibration_recipe_change_direct_call() -> None:

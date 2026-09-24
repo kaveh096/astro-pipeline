@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .calibration import CalibrationMode
+from .calibration import FLAT_RECIPE_VERSION, CalibrationMode
 from .filter_constants import OSC_FILTER, RGB_FILTERS
 from .logging_utils import log as _log
 from .master_builder import resolve_lights
@@ -128,19 +128,17 @@ def calibration_recipe_parts(calibration_mode: CalibrationMode, flats: list) -> 
     of "" against a pre-existing persisted "" (see `_flat_frame_hash`'s
     own docstring) matters here exactly as much as it did there.
 
-    Otherwise returns `(frame_identity_hash(flat_basenames), "")` -- the
-    recipe half stays "" until an actual behaviour change ships (Step 3b's
-    `-norm=mul`+dedupe-staging fix is the first one to bump it); this
-    function existing does not, by itself, change any persisted value on
-    any real project today (verified: every real flat/colour
-    `flat_frame_hash` today is already computed via this same
-    `frame_identity_hash`-over-basenames mechanism, just via the
-    now-superseded ad hoc `_flat_frame_hash`/`_colour_contributor_flat_frame_hash`
-    call sites this helper replaces).
+    Otherwise returns `(frame_identity_hash(flat_basenames), FLAT_RECIPE_VERSION)`
+    -- `FLAT_RECIPE_VERSION` (`calibration.py`, `"flat:v2:dedup+uniq+mul"`)
+    is Step 3b's own behaviour-change trigger: the flat dedupe+uniquify
+    staging fix plus `-norm=mul` stacking (fixes G1/G2). This is the
+    SINGLE trigger for the real T21_bin1 Luminance rebuild Step 3b
+    promises -- every flat-less or PRECALIBRATED contributor stays at
+    `("", "")`, unaffected.
     """
     if calibration_mode == CalibrationMode.PRECALIBRATED or not flats:
         return "", ""
-    return _flat_frame_hash(flats), ""
+    return _flat_frame_hash(flats), FLAT_RECIPE_VERSION
 
 
 def _clear_colour_contributor_products(
