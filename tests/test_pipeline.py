@@ -1125,7 +1125,7 @@ def test_run_narrowband_raises_with_real_filter_diagnostic_when_no_match(tmp_pat
         def calibrated_instrument_groups(self):
             return {}
 
-    monkeypatch.setattr(narrowband_orchestrator_module, "scan_session", lambda project_dir: _FakeReportWrongSpelling())
+    monkeypatch.setattr(narrowband_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReportWrongSpelling())
 
     with pytest.raises(RuntimeError, match="SomeWeirdSpelling"):
         run_narrowband(tmp_path, "T20", "M42", 5.588, -5.391, palette="sho")
@@ -1163,7 +1163,7 @@ def test_run_narrowband_exports_with_palette_named_stem(tmp_path: Path, monkeypa
         def calibrated_instrument_groups(self):
             return {}
 
-    monkeypatch.setattr(narrowband_orchestrator_module, "scan_session", lambda pd: _FakeReportSHO())
+    monkeypatch.setattr(narrowband_orchestrator_module, "scan_session", lambda pd, **kw: _FakeReportSHO())
 
     def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *args, **kwargs):
         p = tmp_path / f"master_{filter_name}.fit"
@@ -1537,7 +1537,7 @@ def test_run_lrgb_rgb_only_full_run_no_luminance_no_crash(tmp_path: Path, monkey
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     # A real, tiny, readable 3-channel FITS -- what a real ColourContributor's
     # composite_path would point to (rgb_colour_calibrated.fit shape).
@@ -1625,7 +1625,7 @@ def test_run_lrgb_rgb_only_multi_contributor_raises_not_implemented(tmp_path: Pa
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     stub_composite = tmp_path / "stub.fit"
     data = np.zeros((3, 4, 4), dtype=np.float32)
@@ -1687,7 +1687,7 @@ def test_run_lrgb_mixed_osc_and_rgb_same_binning_raises_not_implemented(tmp_path
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -1757,7 +1757,7 @@ def test_run_lrgb_stop_after_masters_returns_before_reconciliation_MOCKED(
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     build_master_calls = {"n": 0}
 
@@ -1852,7 +1852,7 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     build_master_calls = {"n": 0}
 
@@ -2000,7 +2000,7 @@ def test_run_lrgb_multi_contributor_reconciliation_end_to_end_MOCKED(tmp_path: P
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *a, **k):
         master_path = (
@@ -2167,7 +2167,7 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     call_counts = {"build_master": 0, "build_colour": 0, "graxpert": 0, "reproject": 0, "stretch": 0}
 

@@ -208,11 +208,16 @@ def render(project_dir: Path, report: IngestReport) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: python interview.py <project_dir>", file=sys.stderr)
+    calibration_header_fallback = "--calibration-header-fallback" in argv
+    positional = [a for a in argv[1:] if a != "--calibration-header-fallback"]
+    if len(positional) != 1:
+        print(
+            "usage: python interview.py <project_dir> [--calibration-header-fallback]",
+            file=sys.stderr,
+        )
         return 2
-    project_dir = Path(argv[1])
-    report = scan_session(project_dir)
+    project_dir = Path(positional[0])
+    report = scan_session(project_dir, calibration_header_fallback=calibration_header_fallback)
     print(render(project_dir, report))
     return 0
 

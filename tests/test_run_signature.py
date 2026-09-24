@@ -435,7 +435,7 @@ def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
         def flat_index(self):
             return {("T99", 1, "Luminance"): new_flats}
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     def fake_build_master(*args, **kwargs):
         # Stop run_lrgb right after the Luminance-loop call site we care
@@ -649,7 +649,7 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
     }
     (out / "run_signature.json").write_text(json.dumps(persisted), encoding="utf-8")
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     # A real, tiny, readable FITS file so the Luminance loop's own
     # `fits.getheader(lum_master_path).get("STACKCNT", ...)` call (right
@@ -915,7 +915,7 @@ def test_run_lrgb_luminance_call_site_actually_passes_calibration_recipe_to_cont
         def flat_index(self):
             return {}
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     def fake_build_master(*args, **kwargs):
         raise RuntimeError("stop-after-build-master-call-site")
@@ -1013,7 +1013,7 @@ def test_run_lrgb_colour_call_site_actually_passes_calibration_recipe_to_contrib
     }
     (out / "run_signature.json").write_text(json.dumps(persisted), encoding="utf-8")
 
-    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir: _FakeReport())
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
 
     stub_master = tmp_path / "stub_master.fit"
     fits_module.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32)).writeto(stub_master)
@@ -1040,3 +1040,61 @@ def test_run_lrgb_colour_call_site_actually_passes_calibration_recipe_to_contrib
         "contributor_stale's real colour-loop call site did not pass a "
         "calibration_recipe argument at all."
     )
+
+
+# --- plan-flats-v4.md Step 5: RunSignature.calibration_header_fallback --
+# a top-level, purely diagnostic flag (not on ContributorSignature, where
+# dict equality would cascade -- R2-12). ----------------------------------
+
+
+def test_calibration_header_fallback_round_trips_through_to_dict_from_dict() -> None:
+    """Mirrors Step 2's own round-trip test: a True value must actually
+    survive to_dict()/from_dict(), not just live in the in-memory object."""
+    import json
+
+    sig = RunSignature(
+        stretch_method="autostretch", pedestal=0.1, luminance_selected="T21_bin1",
+        calibration_header_fallback=True,
+    )
+    as_dict = sig.to_dict()
+    assert as_dict["calibration_header_fallback"] is True
+    round_tripped = RunSignature.from_dict(json.loads(json.dumps(as_dict)))
+    assert round_tripped.calibration_header_fallback is True
+    assert round_tripped == sig
+
+
+def test_old_format_run_signature_json_without_calibration_header_fallback_still_loads(tmp_path) -> None:
+    """A pre-Step-5 run_signature.json (no key at all) must still load and
+    read back the documented default, False."""
+    import json
+
+    old_format = {
+        "stretch_method": "autostretch",
+        "pedestal": 0.1,
+        "luminance_selected": "T21_bin1",
+        "luminance": {},
+        "colour_reference": "",
+        "colour": {},
+        "quality_filter_policy": "x",
+        # deliberately no "calibration_header_fallback" key.
+    }
+    path = tmp_path / "run_signature.json"
+    path.write_text(json.dumps(old_format), encoding="utf-8")
+
+    loaded = load_run_signature(path)
+    assert loaded is not None
+    assert loaded.calibration_header_fallback is False
+
+
+def test_diff_invalidation_ignores_calibration_header_fallback_toggle_alone() -> None:
+    """Toggling ONLY this flag must invalidate nothing -- it's purely
+    diagnostic (see the field's own docstring)."""
+    old = RunSignature(
+        stretch_method="autostretch", pedestal=0.1, luminance_selected="T21_bin1",
+        calibration_header_fallback=False,
+    )
+    new = RunSignature(
+        stretch_method="autostretch", pedestal=0.1, luminance_selected="T21_bin1",
+        calibration_header_fallback=True,
+    )
+    assert diff_invalidation(old, new) == set()

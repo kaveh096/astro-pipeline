@@ -49,6 +49,7 @@ def run_narrowband(
     force: bool = False,
     flat_policy: FlatPolicy | None = None,
     calibration_mode: CalibrationMode | None = None,
+    calibration_header_fallback: bool = False,
 ) -> PipelineResult:
     """Build a pure narrowband false-colour composite (capability A,
     2026-09) -- SHO ("Hubble palette": SII->R, Ha->G, OIII->B) or HOO
@@ -95,6 +96,10 @@ def run_narrowband(
     Output: `<target>_sho.tif`/`<target>_hoo.tif` (never `_lrgb`/`_rgb` --
     a narrowband composite exported under those names would misrepresent
     what produced it).
+
+    `calibration_header_fallback` (Step 5, plan-flats-v4.md): threaded
+    straight through to `scan_session`, same meaning as `run_lrgb`'s own
+    parameter -- default False, unchanged default behaviour.
     """
     if palette not in NARROWBAND_PALETTES:
         raise ValueError(f"palette={palette!r} is not one of {sorted(NARROWBAND_PALETTES)}")
@@ -111,7 +116,7 @@ def run_narrowband(
     checkpoints_path = checkpoint_dir / f"checkpoints_narrowband_{palette}.json"
 
     _log(f"=== scanning {project_dir.name} (narrowband, palette={palette}) ===", notes)
-    raw_report = scan_session(project_dir)
+    raw_report = scan_session(project_dir, calibration_header_fallback=calibration_header_fallback)
     report = _NarrowbandNormalizingReport(raw_report)
 
     resolved_calibration_mode = calibration_mode or infer_calibration_mode(raw_report, telescope)

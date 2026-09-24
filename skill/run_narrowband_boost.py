@@ -36,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from astro_pipeline.calibration import CalibrationMode  # noqa: E402
 from astro_pipeline.export_image import export  # noqa: E402
 from astro_pipeline.ingest import scan_session  # noqa: E402
 from astro_pipeline.master_builder import build_single_filter_master  # noqa: E402
@@ -76,6 +77,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--binning", type=int, default=2)
     p.add_argument("--stretch-method", default="autostretch")
     p.add_argument("--no-luminance", action="store_true", help="RGB-only target: stretch the boosted RGB alone")
+    p.add_argument(
+        "--calibration-mode", choices=["raw_local", "precalibrated"], default=None,
+        help="override this run's single telescope's inferred CalibrationMode",
+    )
+    p.add_argument(
+        "--calibration-header-fallback", action="store_true",
+        help="opt-in header-based recognition of calibration frames a filename pattern can't see (Step 4b)",
+    )
     args = p.parse_args(argv)
 
     project_dir = Path(args.project_dir)
@@ -86,14 +95,16 @@ def main(argv: list[str] | None = None) -> int:
     rgb_reconciled = _find_existing(final_dir, "rgb_reconciled.fit")
     print(f"[run ] source reconciled RGB: {rgb_reconciled}")
 
+    calibration_mode = CalibrationMode(args.calibration_mode) if args.calibration_mode else None
+
     notes: list[str] = []
-    raw_report = scan_session(project_dir)
+    raw_report = scan_session(project_dir, calibration_header_fallback=args.calibration_header_fallback)
     report = _NarrowbandNormalizingReport(raw_report)
 
     print(f"[run ] building {args.boost_filter} master (BIN{args.binning})")
     narrowband_master = build_single_filter_master(
         project_dir, report, args.telescope, args.target, args.boost_filter, args.binning,
-        args.ra_hours, args.dec_deg, notes,
+        args.ra_hours, args.dec_deg, notes, calibration_mode=calibration_mode,
     )
     for line in notes:
         print("      ", line)

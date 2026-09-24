@@ -207,6 +207,17 @@ class RunSignature:
     colour_reference: str = ""
     colour: dict[str, ContributorSignature] = field(default_factory=dict)
     quality_filter_policy: str = "filter_fwhm_pct=filter_round_pct=90.0 if n>=10 else None"
+    # Step 5 (plan-flats-v4.md): a top-level, purely DIAGNOSTIC flag --
+    # deliberately NOT placed on ContributorSignature, where dict equality
+    # would cascade a rebuild (R2-12). Records whether this run passed
+    # calibration_header_fallback=True to its scan, so which calibration
+    # frames were actually visible to it is documented in
+    # run_signature.json -- diff_invalidation deliberately ignores this
+    # field entirely (see its own docstring): toggling it changes no
+    # persisted hash/recipe on any of the seven gate-(D) projects (Step
+    # 4b's mode decoupling already means recognition alone never changes
+    # what a contributor's frame_hash/calibration_recipe resolve to there).
+    calibration_header_fallback: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -217,6 +228,7 @@ class RunSignature:
             "colour_reference": self.colour_reference,
             "colour": {k: v.to_dict() for k, v in self.colour.items()},
             "quality_filter_policy": self.quality_filter_policy,
+            "calibration_header_fallback": self.calibration_header_fallback,
         }
 
     @classmethod
@@ -229,6 +241,7 @@ class RunSignature:
             colour_reference=d.get("colour_reference", ""),
             colour={k: ContributorSignature.from_dict(v) for k, v in d.get("colour", {}).items()},
             quality_filter_policy=d.get("quality_filter_policy", ""),
+            calibration_header_fallback=bool(d.get("calibration_header_fallback", False)),
         )
 
     def contributor_stale(
@@ -330,6 +343,10 @@ def diff_invalidation(old: RunSignature | None, new: RunSignature) -> set[str]:
     pass that decides whether a raw master needs rebuilding via Siril at
     all -- that pass necessarily runs before STACKCNT exists, so it
     cannot see the reference-flip case; this function is what does.
+
+    Deliberately does NOT compare `calibration_header_fallback` (Step 5)
+    -- it is a purely diagnostic, top-level flag; toggling it never
+    invalidates anything on its own (see the field's own docstring).
     """
     if old is None:
         return set()

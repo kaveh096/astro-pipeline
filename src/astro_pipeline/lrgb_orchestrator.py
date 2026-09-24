@@ -207,6 +207,7 @@ class LRGBOrchestrator:
         force: set[str] | None = None,
         flat_policy: FlatPolicy | None = None,
         calibration_mode: dict[str, CalibrationMode] | None = None,
+        calibration_header_fallback: bool = False,
     ) -> None:
         if stop_after is not None and stop_after not in STAGE_ORDER:
             raise ValueError(f"stop_after={stop_after!r} is not one of {STAGE_ORDER}")
@@ -228,6 +229,7 @@ class LRGBOrchestrator:
         self.force = force
         self.flat_policy = flat_policy
         self.calibration_mode = calibration_mode
+        self.calibration_header_fallback = calibration_header_fallback
 
         self.project_dir = Path(project_dir)
         self.out = pipeline_dir(self.project_dir)
@@ -260,7 +262,7 @@ class LRGBOrchestrator:
         too; until then `run_lrgb` reads these directly off the instance).
         """
         _log(f"=== scanning {self.project_dir.name} ===", self.notes)
-        report = scan_session(self.project_dir)
+        report = scan_session(self.project_dir, calibration_header_fallback=self.calibration_header_fallback)
 
         # --- luminance masters: every (telescope, binning) that has Luminance
         # data for this target gets its own master built here -- NOT scoped to
@@ -712,6 +714,7 @@ class LRGBOrchestrator:
         new_signature = RunSignature(
             stretch_method=self.stretch_method,
             pedestal=self.pedestal,
+            calibration_header_fallback=self.calibration_header_fallback,
             # RGB-only mode: selected_key is None (no Luminance exists for this
             # target on any telescope) -- "" mirrors this dataclass's own existing
             # empty-string sentinel for "nothing selected" (colour_reference's
@@ -1060,6 +1063,7 @@ def run_lrgb(
     force: set[str] | None = None,
     flat_policy: FlatPolicy | None = None,
     calibration_mode: dict[str, CalibrationMode] | None = None,
+    calibration_header_fallback: bool = False,
 ) -> PipelineResult:
     """`lum_source`, if given, names an explicit `(telescope, binning)`
     among the discovered Luminance contributors to drive the composite --
@@ -1139,10 +1143,23 @@ def run_lrgb(
     provenance lights to fall back to (real case: NGC 3628/T73); every
     telescope with real Bias+Dark (T24, T21) is unaffected, unconditionally
     RAW_LOCAL.
+
+    `calibration_header_fallback` (Step 5, plan-flats-v4.md), when True,
+    threads straight through to `scan_session`/`classify_tree`'s own
+    opt-in header-based calibration recognition (Step 4b) -- real bias/
+    dark/flat libraries with no recognisable telescope token in their
+    path (M42/T20, IC 1396/T68, M31/T05) become visible in
+    `calibration_index()`/`flat_index()`, but recognising them does NOT,
+    by itself, flip any telescope's `CalibrationMode` (Decision Q2,
+    `infer_calibration_mode` only ever counts filename-sourced frames) --
+    pair this with an explicit `calibration_mode` override to actually
+    exercise a header-recognised RAW_LOCAL flat/bias/dark set. Default
+    False, so this function's own default behaviour is unchanged.
     """
     return LRGBOrchestrator(
         project_dir, telescope, target, ra_hours, dec_deg,
         lum_binning=lum_binning, rgb_binning=rgb_binning, stretch_method=stretch_method,
         lum_source=lum_source, pedestal=pedestal, stop_after=stop_after, force=force,
         flat_policy=flat_policy, calibration_mode=calibration_mode,
+        calibration_header_fallback=calibration_header_fallback,
     ).run()

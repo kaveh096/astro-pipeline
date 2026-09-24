@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from astro_pipeline.calibration import DEFAULT_PEDESTAL  # noqa: E402
+from astro_pipeline.calibration import DEFAULT_PEDESTAL, CalibrationMode  # noqa: E402
 from astro_pipeline.lrgb_orchestrator import run_lrgb  # noqa: E402
 
 
@@ -46,6 +46,25 @@ def _parse_lum_source(value: str | None) -> tuple[str, int] | None:
             f"--lum-source must be TELESCOPE:BINNING (e.g. T21:1), got {value!r}"
         )
     return telescope, int(binning)
+
+
+def _parse_calibration_mode_dict(values: list[str]) -> dict[str, CalibrationMode] | None:
+    """`--calibration-mode TEL=raw_local|precalibrated`, repeatable, one
+    TEL=value pair per occurrence (Step 5, plan-flats-v4.md) -- a genuine
+    multi-telescope override, since one LRGB run can have a different
+    Luminance telescope and colour telescope. `run_lrgb`/`LRGBOrchestrator`
+    already accept exactly this `dict[str, CalibrationMode]` shape."""
+    if not values:
+        return None
+    result: dict[str, CalibrationMode] = {}
+    for item in values:
+        telescope, sep, mode = item.partition("=")
+        if not sep:
+            raise argparse.ArgumentTypeError(
+                f"--calibration-mode must be TEL=raw_local|precalibrated, got {item!r}"
+            )
+        result[telescope] = CalibrationMode(mode)
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,6 +87,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="append", default=[], choices=["masters", "reconciled", "final"],
         help="repeatable; invalidates the named stage and every stage after it",
     )
+    p.add_argument(
+        "--calibration-mode", action="append", default=[], metavar="TEL=raw_local|precalibrated",
+        help="repeatable per-telescope override, e.g. --calibration-mode T20=raw_local",
+    )
+    p.add_argument(
+        "--calibration-header-fallback", action="store_true",
+        help="opt-in header-based recognition of calibration frames a filename pattern can't see (Step 4b)",
+    )
     return p
 
 
@@ -87,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         pedestal=args.pedestal,
         stop_after=args.stop_after,
         force=set(args.force) or None,
+        calibration_mode=_parse_calibration_mode_dict(args.calibration_mode),
+        calibration_header_fallback=args.calibration_header_fallback,
     )
 
     print("=== NOTES ===")
