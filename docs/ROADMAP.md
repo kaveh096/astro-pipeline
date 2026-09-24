@@ -535,3 +535,55 @@ re-questioned in a future session rather than assumed permanent.
    `tests/local_paths.py` and fill in real local paths (gitignored,
    never committed) if working on Kaveh's own machine; otherwise those
    tests will just skip, which is expected and fine.
+
+---
+
+## 8. Running long or memory-heavy processes from a Claude Code session
+
+Anything that runs for a long time or uses a lot of memory -- a real
+Siril/GraXpert/ASTAP call against full-resolution data, or the full
+pytest suite once `tests/local_paths.py` makes real-data-gated tests
+reachable (~35-40 minutes with real data present, vs. ~5-8 minutes
+without) -- must **not** run as a normal foreground or
+`run_in_background` call inside a Claude Code session on this machine.
+
+**Why**: the harness has its own idle-timeout and memory-pressure reaper
+that can kill a long `run_in_background` shell command outright while the
+session is otherwise idle waiting on it -- this has happened more than
+once (a real verification pytest run killed mid-run, 2026-09-21; a full
+real-data suite run killed the same way, 2026-09-24). It is not a failure
+of the command itself, just the harness protecting the host machine, but
+it silently loses the run's progress and its output.
+
+**The fix, confirmed working**: spawn the process as a genuinely detached
+OS-level child, outside the Claude Code process tree/job object entirely,
+so the harness's own reaper has nothing to kill:
+
+```powershell
+$py = "C:\dev\astro-pipeline\.venv\Scripts\python.exe"
+# For a driver script: python -u <script> > <log> 2>&1
+# For pytest directly: -m pytest tests/ -q > <log> 2>&1
+$inner = '"' + $py + '" -u "<script-or--m-pytest-args>" > "<log path>" 2>&1'
+$cmdLine = 'cmd.exe /c "' + $inner + '"'
+Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
+    -Arguments @{ CommandLine = $cmdLine; CurrentDirectory = "C:\dev\astro-pipeline" }
+```
+
+`Invoke-CimMethod`/`Win32_Process::Create` spawns the process as a child
+of the WMI provider host service, not of the calling shell -- this is
+what makes it survive independently of the session's own job object.
+Confirm it's really detached with
+`Get-CimInstance Win32_Process -Filter "ParentProcessId=<wrapper PID>"`.
+
+**Then poll, don't block**: use `CronCreate` (a recurring job, ~10 minute
+interval is reasonable for a multi-hour run, shorter for a ~40-minute
+test suite run) to check the PID and tail the log periodically, rather
+than a foreground wait or a `run_in_background` shell call. **Always
+`CronDelete` the job once the watched process finishes** -- confirm with
+`CronList` returning no scheduled jobs left over.
+
+This applies to any future multi-hour pipeline run or any full-suite run
+with real data reachable, not just the two cases that have already hit
+this failure mode -- default to detached+poll for both, don't retry the
+normal foreground/background path and hope it doesn't get reaped this
+time.
