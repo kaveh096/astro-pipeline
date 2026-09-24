@@ -66,8 +66,10 @@ unchanged by this slice.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -485,6 +487,80 @@ def build_master(
     return master_path
 
 
+def _sha256_file(path: Path) -> str:
+    """Streamed SHA-256 of a file's content -- cheap next to the copy
+    `stage_frames` already does for every frame (Step 3a, plan-flats-v4.md)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@dataclass
+class FlatIdentityReport:
+    matched: int
+    byte_identical_copies: int
+    name_collisions: int
+    staged: int
+
+    def summary(self) -> str:
+        return (
+            f"{self.matched} matched; {self.byte_identical_copies} byte-identical "
+            f"copies; {self.name_collisions} name collisions between distinct "
+            f"frames; staged {self.staged}"
+        )
+
+
+def classify_flat_identity(flat_frames: list[CalibrationFrame]) -> FlatIdentityReport:
+    """G1's own real finding (plan-flats-v4.md ??1.3.5/Step 3a), made
+    reportable: classify a matched flat set by CONTENT identity, not just
+    name, and report what today's basename-collapsing `stage_frames` (I5)
+    actually keeps.
+
+    Report-only, never raises -- this step's own scope (3a) is observation;
+    the actual staging fix (dedupe + uniquify collisions) is Step 3b.
+
+    For each basename shared by more than one matched frame:
+    - if every frame under that name is byte-identical (same SHA-256), the
+      extras are BYTE-IDENTICAL COPIES (`byte_identical_copies` counts the
+      ones beyond the first) -- today's collapse silently keeps one, which
+      is harmless, since they're the same bytes;
+    - otherwise, the name is shared by genuinely DISTINCT frames -- a NAME
+      COLLISION (`name_collisions` counts the colliding basename itself,
+      not the frame count) -- today's collapse silently keeps only
+      whichever one `stage_frames`' `rglob` iteration order happens to
+      copy last, discarding real, distinct data (T21 L's real case: 10
+      colliding basenames, 0 byte-identical copies, 30 matched -> 20
+      staged).
+
+    `staged` mirrors today's `stage_frames` basename-collapse count (one
+    survivor per distinct basename), NOT Step 3b's future dedupe+uniquify
+    count -- this step observes today's behaviour, it does not change it.
+    """
+    by_name: dict[str, list[CalibrationFrame]] = defaultdict(list)
+    for frame in flat_frames:
+        by_name[frame.path.name].append(frame)
+
+    byte_identical_copies = 0
+    name_collisions = 0
+    for frames in by_name.values():
+        if len(frames) == 1:
+            continue
+        hashes = {_sha256_file(f.path) for f in frames}
+        if len(hashes) == 1:
+            byte_identical_copies += len(frames) - 1
+        else:
+            name_collisions += 1
+
+    return FlatIdentityReport(
+        matched=len(flat_frames),
+        byte_identical_copies=byte_identical_copies,
+        name_collisions=name_collisions,
+        staged=len(by_name),
+    )
+
+
 def build_master_bias(bias_frames: list[CalibrationFrame], work_dir: str | Path) -> Path:
     return build_master([f.path for f in bias_frames], "bias", work_dir)
 
@@ -802,6 +878,14 @@ def run_calibration(
             "No flat frames available and flat_policy=REQUIRE; "
             "pass flat_policy=SKIP_IF_MISSING to proceed without flat correction."
         )
+
+    if flat_frames:
+        # Step 3a (plan-flats-v4.md, report only, never raises): classify
+        # the matched flats by CONTENT identity before staging collapses
+        # any colliding basenames -- G1's real T21 L finding (30 matched,
+        # 20 staged) made visible rather than silently absorbed.
+        identity = classify_flat_identity(flat_frames)
+        _log(f"       flat: {identity.summary()}", notes)
 
     work_dir = Path(work_dir)
     master_bias = build_master_bias(bias_frames, work_dir)

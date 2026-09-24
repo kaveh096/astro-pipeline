@@ -13,6 +13,7 @@ from astro_pipeline.calibration import (
     build_master,
     build_master_flat,
     calibrate_lights,
+    classify_flat_identity,
     run_calibration,
     select_dark,
     sequence_name,
@@ -437,6 +438,127 @@ def test_build_master_flat_raises_on_not_using_offset_in_its_own_log(tmp_path: P
 
     with pytest.raises(SirilError):
         build_master_flat([flat_frame], bias_path, tmp_path / "work")
+
+
+# --- Step 3a (plan-flats-v4.md): classify_flat_identity -- report-only,
+# never raises, content-identity classification of a matched flat set
+# BEFORE staging's own basename collapse. ------------------------------
+
+
+def test_classify_flat_identity_byte_identical_and_colliding_distinct(tmp_path: Path) -> None:
+    """Two byte-identical folders (same content, same name, different
+    paths -- e.g. the same physical exposure catalogued twice) plus two
+    colliding distinct frames (same name, genuinely different content --
+    T21 L's real shape)."""
+    data_a = np.zeros((4, 4), dtype=np.uint16)
+    data_b = np.ones((4, 4), dtype=np.uint16) * 100
+
+    dir1 = tmp_path / "session1"
+    dir2 = tmp_path / "session2"
+    dir1.mkdir()
+    dir2.mkdir()
+
+    # Byte-identical copies: "identical.fit" in both folders, same content.
+    identical1 = dir1 / "identical.fit"
+    identical2 = dir2 / "identical.fit"
+    fits.PrimaryHDU(data=data_a).writeto(identical1)
+    fits.PrimaryHDU(data=data_a).writeto(identical2)
+
+    # Colliding, DISTINCT frames: "skyflat0.fit" in both folders, different content.
+    collide1 = dir1 / "skyflat0.fit"
+    collide2 = dir2 / "skyflat0.fit"
+    fits.PrimaryHDU(data=data_a).writeto(collide1)
+    fits.PrimaryHDU(data=data_b).writeto(collide2)
+
+    # One frame with a unique name -- no collision, no duplicate.
+    unique = dir1 / "skyflat1.fit"
+    fits.PrimaryHDU(data=data_b).writeto(unique)
+
+    frames = [
+        CalibrationFrame(path=p, telescope="T21", frame_type="Flat", binning=1, exptime=0.0, filter_name="Luminance")
+        for p in (identical1, identical2, collide1, collide2, unique)
+    ]
+    report = classify_flat_identity(frames)
+    assert report.matched == 5
+    assert report.byte_identical_copies == 1  # one extra copy of "identical.fit"
+    assert report.name_collisions == 1  # one colliding basename ("skyflat0.fit")
+    assert report.staged == 3  # identical.fit (1) + skyflat0.fit (1) + skyflat1.fit (1)
+
+
+def test_classify_flat_identity_no_frames_is_all_zero() -> None:
+    report = classify_flat_identity([])
+    assert report.matched == 0
+    assert report.byte_identical_copies == 0
+    assert report.name_collisions == 0
+    assert report.staged == 0
+
+
+@requires_real_session
+def test_classify_flat_identity_real_t21_luminance_matches_known_numbers() -> None:
+    """Real gate (D)/(P): T21's real Luminance flat set -- 30 matched, 0
+    byte-identical copies, 10 name collisions between distinct frames
+    (two twilight sessions' worth of colliding 'skyflat<N>' basenames),
+    20 staged -- plan-flats-v4.md ??1.3.5/Step 3a's own real numbers."""
+    report_ing = scan_session(REAL_SESSION_DIR)
+    t21_l_flats = report_ing.flat_index()[("T21", 1, "Luminance")]
+    report = classify_flat_identity(t21_l_flats)
+    assert report.matched == 30
+    assert report.byte_identical_copies == 0
+    assert report.name_collisions == 10
+    assert report.staged == 20
+
+
+def test_run_calibration_logs_flat_identity_summary(tmp_path: Path, monkeypatch) -> None:
+    """run_calibration itself calls classify_flat_identity and logs its
+    summary, before staging -- verified via a monkeypatched Siril chain
+    (no real calibration needed to check the note is written)."""
+    import astro_pipeline.calibration as calibration_module
+
+    def fake_build_master_bias(bias_frames, work_dir):
+        return tmp_path / "master_bias.fit"
+
+    def fake_build_master_dark(dark_frames, work_dir):
+        return tmp_path / "master_dark.fit"
+
+    def fake_build_master_flat(flat_frames, master_bias, work_dir):
+        return tmp_path / "master_flat.fit"
+
+    def fake_calibrate_lights(*args, **kwargs):
+        return [tmp_path / "pp_light_0.fit"], SirilResult(returncode=0, log_lines=[])
+
+    monkeypatch.setattr(calibration_module, "build_master_bias", fake_build_master_bias)
+    monkeypatch.setattr(calibration_module, "build_master_dark", fake_build_master_dark)
+    monkeypatch.setattr(calibration_module, "build_master_flat", fake_build_master_flat)
+    monkeypatch.setattr(calibration_module, "calibrate_lights", fake_calibrate_lights)
+
+    flat_path = tmp_path / "flat0.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(flat_path)
+    flat_frame = CalibrationFrame(
+        path=flat_path, telescope="T99", frame_type="Flat", binning=1, exptime=0.0, filter_name="Luminance",
+    )
+    light_path = tmp_path / "light0.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(light_path)
+    from astro_pipeline.ingest import LightFrame
+
+    light_frame = LightFrame(
+        path=light_path, provenance="raw", telescope="T99", user="u", target="X",
+        date="20260101", time="000000", filter_name="Luminance", binning=1, side="E",
+        exptime=300.0, sequence=1,
+    )
+    bias_path = tmp_path / "bias0.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(bias_path)
+    bias_frame = CalibrationFrame(path=bias_path, telescope="T99", frame_type="Bias", binning=1, exptime=0.0)
+    dark_path = tmp_path / "dark0.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(dark_path)
+    dark_frame = CalibrationFrame(path=dark_path, telescope="T99", frame_type="Dark", binning=1, exptime=300.0)
+
+    notes: list[str] = []
+    run_calibration(
+        [light_frame], [bias_frame], [dark_frame], tmp_path / "work",
+        flat_frames=[flat_frame], flat_policy=FlatPolicy.REQUIRE, notes=notes,
+    )
+    assert any("flat:" in line and "matched" in line for line in notes)
+    assert any("1 matched" in line for line in notes)
 
 
 @requires_siril
