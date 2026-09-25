@@ -545,9 +545,9 @@ class LRGBOrchestrator:
             frame_hash = _colour_contributor_frame_hash(report, self.telescope, self.target, binning)
             colour_frame_hashes[contributor_key] = frame_hash
             # plan-flats-v4.md Step 2 (fixes G10): mode-aware, replacing the
-            # old mode-BLIND `_colour_contributor_flat_frame_hash` call here
-            # -- that helper hashed whatever flats matched with no regard
-            # for calibration_mode at all. Verified inert on every real
+            # old mode-BLIND flat-hash call this used to make here -- that
+            # computation hashed whatever flats matched with no regard for
+            # calibration_mode at all. Verified inert on every real
             # persisted colour hash today (every one is already ""), but a
             # real gap nonetheless: computed here via the same
             # `calibration_recipe_parts` helper the Luminance loop above

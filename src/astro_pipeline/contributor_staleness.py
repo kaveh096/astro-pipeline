@@ -85,25 +85,13 @@ def _flat_frame_hash(flat_frames: list) -> str:
 def _colour_contributor_flat_frames(report, telescope: str, binning: int) -> list:
     """Every matched flat CalibrationFrame across a colour contributor's
     whole R+G+B set (Slice 2.3), merged into one flat list -- the raw
-    material both _colour_contributor_flat_frame_hash (below) and
-    plan-flats-v4.md Step 2's mode-aware calibration_recipe_parts() need,
-    factored out so neither has to re-walk RGB_FILTERS independently."""
+    material plan-flats-v4.md Step 2's mode-aware
+    calibration_recipe_parts() needs, factored out so it doesn't have to
+    re-walk RGB_FILTERS itself."""
     flats: list = []
     for filter_name in RGB_FILTERS:
         flats.extend(report.flat_index().get((telescope, binning, filter_name), []))
     return flats
-
-
-def _colour_contributor_flat_frame_hash(report, telescope: str, binning: int) -> str:
-    """Slice 2.3's flat-aware sibling of _colour_contributor_frame_hash
-    above: one hash for a colour contributor's entire matched flat set
-    across R+G+B -- a change to ANY of the three filters' matched flats
-    (a flat re-shot, a new filter's flats added) must be caught, since all
-    three feed the one rgbcomp'd composite exactly like the light set
-    does. See _flat_frame_hash for why an entirely empty matched flat set
-    (T24's real, permanent situation) hashes to "" rather than
-    frame_identity_hash([])'s own non-empty constant."""
-    return _flat_frame_hash(_colour_contributor_flat_frames(report, telescope, binning))
 
 
 def calibration_recipe_parts(calibration_mode: CalibrationMode, flats: list) -> tuple[str, str]:
