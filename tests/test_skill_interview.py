@@ -281,6 +281,48 @@ def test_flat_identity_preview_counts_copies_and_collisions(tmp_path: Path) -> N
     assert summary == "5 frames (1 copies, 1 collisions)"
 
 
+def test_flat_identity_preview_corrupt_header_non_oserror_degrades_to_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A colliding-basename group (T21 L's own real 10-collision shape)
+    where one member's header read raises something OTHER than OSError --
+    astropy can reject a corrupt header with VerifyError, a struct-
+    unpacking ValueError, UnicodeDecodeError, etc, not just OSError --
+    must fold into the existing 'unreadable' signature bucket rather than
+    propagate and crash the whole interview render. Before the fix, this
+    site caught only `except OSError`, unlike every other FITS-header-read
+    site touched in this diff (ingest.py, calibration.py)."""
+    import numpy as np
+    from astropy.io import fits
+
+    class _CalFrame:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+    dir1, dir2 = tmp_path / "s1", tmp_path / "s2"
+    dir1.mkdir()
+    dir2.mkdir()
+
+    ok = dir1 / "skyflat0.fit"
+    corrupt = dir2 / "skyflat0.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(ok)
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(corrupt)
+
+    frames = [_CalFrame(p) for p in (ok, corrupt)]
+
+    real_getheader = fits.getheader
+
+    def fake_getheader(path, *args, **kwargs):
+        if Path(path) == corrupt:
+            raise ValueError("simulated corrupt header -- struct-unpacking failure, not OSError")
+        return real_getheader(path, *args, **kwargs)
+
+    monkeypatch.setattr(fits, "getheader", fake_getheader)
+
+    summary = flat_identity_preview(frames)  # must not raise
+    assert summary == "2 frames (0 copies, 1 collisions)"
+
+
 @requires_project
 def test_render_real_m51_includes_new_step6_sections() -> None:
     """Real gate check: M51's own interview output gains the new

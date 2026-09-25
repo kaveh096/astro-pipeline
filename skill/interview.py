@@ -226,7 +226,13 @@ def flat_identity_preview(frames: list) -> str:
                 header = fits.getheader(frame.path)
                 size = frame.path.stat().st_size
                 signatures.add((str(header.get("DATE-OBS")), header.get("EXPTIME"), size))
-            except OSError:
+            except Exception:
+                # Broadened to match every other FITS-header-read site
+                # touched in this diff (ingest.py, calibration.py):
+                # astropy can reject a corrupt header with VerifyError, a
+                # struct-unpacking ValueError, UnicodeDecodeError, etc --
+                # not just OSError -- and any of those must fold into this
+                # "unreadable" bucket rather than crash the whole render.
                 signatures.add(("unreadable", None, None))
         if len(signatures) == 1:
             copies += len(group) - 1

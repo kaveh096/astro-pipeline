@@ -844,6 +844,28 @@ def test_classify_tree_fallback_dark_exptime_rounds_to_one_decimal(tmp_path: Pat
     assert matches[0].exptime == 240.0
 
 
+def test_classify_tree_fallback_dark_malformed_exptime_skipped_not_crashed(tmp_path: Path) -> None:
+    """A Dark frame's header EXPTIME can be malformed/non-numeric (empty
+    string, 'N/A', an astropy Undefined) -- must be treated like every
+    other malformed-header case in this function (skip just this one
+    frame into report.unrecognized) rather than raising an unhandled
+    ValueError/TypeError that crashes the whole classify_tree call. Before
+    the fix, this raised; every sibling FITS-header-to-float conversion in
+    this diff (e.g. flat_sanity_notes() in calibration.py) already guarded
+    against exactly this."""
+    project = _setup_project_with_one_raw_light(tmp_path)
+    p = project / "cal" / "dark_malformed_exptime.fit"
+    _write_cal_fits(p, imagetyp="Dark Frame", xbinning=1, ybinning=1, instrume="CAM1", naxis1=8, naxis2=8)
+    # _write_cal_fits' own exptime param is float-typed -- write the
+    # malformed, non-numeric value directly to express this case.
+    with fits.open(p, mode="update") as hdul:
+        hdul[0].header["EXPTIME"] = "N/A"
+
+    report = classify_tree(project, calibration_header_fallback=True)  # must not raise
+    assert not any(f.path == p for f in report.calibration)
+    assert any(f.path == p for f in report.unrecognized)
+
+
 def test_classify_tree_fallback_flat_requires_filter(tmp_path: Path) -> None:
     project = _setup_project_with_one_raw_light(tmp_path)
     p = project / "cal" / "flat_no_filter.fit"

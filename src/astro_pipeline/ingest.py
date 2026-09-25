@@ -822,7 +822,16 @@ def _classify_calibration_via_header(
         raw_exptime = header.get("EXPTIME")
         if raw_exptime is None:
             return frame
-        exptime = round(float(raw_exptime), 1)
+        try:
+            exptime = round(float(raw_exptime), 1)
+        except (TypeError, ValueError):
+            # Malformed/non-numeric EXPTIME (empty string, "N/A", an
+            # astropy Undefined) -- treat like every other malformed-
+            # header case above: skip just this one frame, never crash
+            # the whole classify_tree/scan_session call. Mirrors
+            # flat_sanity_notes()'s own guard around the equivalent
+            # conversion in calibration.py.
+            return frame
     else:
         exptime = 0.0
 
