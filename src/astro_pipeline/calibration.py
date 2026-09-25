@@ -70,6 +70,7 @@ import hashlib
 import re
 import shutil
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -514,52 +515,134 @@ class FlatIdentityReport:
         )
 
 
-def classify_flat_identity(flat_frames: list[CalibrationFrame]) -> FlatIdentityReport:
-    """G1's own real finding (plan-flats-v4.md ??1.3.5/Step 3a), made
-    reportable: classify a matched flat set by CONTENT identity, not just
-    name, and report what today's basename-collapsing `stage_frames` (I5)
-    actually keeps.
+@dataclass
+class FlatBasenameGroup:
+    """One basename's matched flat frames, classified by identity
+    signature -- the shared unit `classify_flat_basename_groups()` below
+    produces, used by `classify_flat_identity()`, `stage_flat_frames()`
+    (both here) and `flat_identity_preview()` (skill/interview.py) so all
+    three stop independently re-implementing the identical "group by
+    basename -> skip singletons -> compute a per-member identity signature
+    -> classify as copies (1 distinct signature) or collision (>1 distinct
+    signature)" skeleton.
 
-    Report-only, never raises -- this step's own scope (3a) is observation;
-    the actual staging fix (dedupe + uniquify collisions) is Step 3b.
+    `survivors` is one frame per distinct signature among `frames` (first
+    by sorted path within each signature group) -- for a singleton-
+    basename group this is trivially `frames` itself (no signature is ever
+    computed for a singleton, since there's nothing to compare)."""
 
-    For each basename shared by more than one matched frame:
-    - if every frame under that name is byte-identical (same SHA-256), the
-      extras are BYTE-IDENTICAL COPIES (`byte_identical_copies` counts the
-      ones beyond the first) -- today's collapse silently keeps one, which
-      is harmless, since they're the same bytes;
-    - otherwise, the name is shared by genuinely DISTINCT frames -- a NAME
-      COLLISION (`name_collisions` counts the colliding basename itself,
-      not the frame count) -- today's collapse silently keeps only
-      whichever one `stage_frames`' `rglob` iteration order happens to
-      copy last, discarding real, distinct data (T21 L's real case: 10
-      colliding basenames, 0 byte-identical copies, 30 matched -> 20
-      staged).
+    name: str
+    frames: list[CalibrationFrame]
+    survivors: list[CalibrationFrame]
 
-    `staged` mirrors today's `stage_frames` basename-collapse count (one
-    survivor per distinct basename), NOT Step 3b's future dedupe+uniquify
-    count -- this step observes today's behaviour, it does not change it.
+    @property
+    def is_collision(self) -> bool:
+        """True iff `frames` (len > 1) actually split into more than one
+        distinct signature -- a genuine name collision between distinct
+        frames, not just multiple identical copies under one name."""
+        return len(self.survivors) > 1
+
+
+def classify_flat_basename_groups(
+    flat_frames: Sequence[CalibrationFrame],
+    signature_fn: Callable[[CalibrationFrame], object],
+) -> list[FlatBasenameGroup]:
+    """The shared skeleton behind `classify_flat_identity()`,
+    `stage_flat_frames()` and `flat_identity_preview()` (skill/
+    interview.py): group matched flat frames by basename, skip computing
+    a signature for basenames matched by only one frame (nothing to
+    compare), and for every basename shared by more than one frame,
+    compute `signature_fn(frame)` once per frame and split into distinct-
+    signature groups.
+
+    `signature_fn` is deliberately pluggable, not hardcoded to SHA-256:
+    `classify_flat_identity`/`stage_flat_frames` use real content identity
+    (`_sha256_file`, since they stage/copy the files anyway), while
+    `flat_identity_preview` uses a cheap header-only signal instead (see
+    its own docstring for why re-hashing an entire project's flats on
+    every interview render would be needlessly expensive) -- both are the
+    same "distinct signature -> collision" skeleton underneath, just fed a
+    different notion of identity.
     """
     by_name: dict[str, list[CalibrationFrame]] = defaultdict(list)
     for frame in flat_frames:
         by_name[frame.path.name].append(frame)
 
+    groups: list[FlatBasenameGroup] = []
+    for name, frames in by_name.items():
+        if len(frames) == 1:
+            groups.append(FlatBasenameGroup(name=name, frames=frames, survivors=list(frames)))
+            continue
+        by_signature: dict[object, list[CalibrationFrame]] = defaultdict(list)
+        for frame in frames:
+            by_signature[signature_fn(frame)].append(frame)
+        survivors = [sorted(group, key=lambda f: str(f.path))[0] for group in by_signature.values()]
+        groups.append(FlatBasenameGroup(name=name, frames=frames, survivors=survivors))
+    return groups
+
+
+def _sha256_file_signature(frame: CalibrationFrame) -> str:
+    """`classify_flat_basename_groups`' real-content `signature_fn` for
+    `classify_flat_identity`/`stage_flat_frames` -- SHA-256 over the
+    frame's own file, unchanged from what both independently computed
+    before this helper existed."""
+    return _sha256_file(frame.path)
+
+
+def classify_flat_identity(
+    flat_frames: list[CalibrationFrame],
+    groups: list[FlatBasenameGroup] | None = None,
+) -> FlatIdentityReport:
+    """G1's own real finding (plan-flats-v4.md ??1.3.5/Step 3a), made
+    reportable: classify a matched flat set by CONTENT identity, not just
+    name, and report what `stage_flat_frames()` (Step 3b) actually stages.
+
+    Report-only, never raises.
+
+    For each basename shared by more than one matched frame:
+    - if every frame under that name is byte-identical (same SHA-256), the
+      extras are BYTE-IDENTICAL COPIES (`byte_identical_copies` counts the
+      ones beyond the first) -- `stage_flat_frames()` keeps one, which is
+      harmless, since they're the same bytes;
+    - otherwise, the name is shared by genuinely DISTINCT frames -- a NAME
+      COLLISION (`name_collisions` counts the colliding basename itself,
+      not the frame count) -- `stage_flat_frames()` stages every distinct-
+      content survivor under a disambiguated name (T21 L's real case: 10
+      colliding basenames, 0 byte-identical copies, 30 matched -> all 30
+      staged, one per distinct signature).
+
+    `staged` is the actual count of files `stage_flat_frames()` puts on
+    disk for this same `flat_frames` set: one per singleton basename, one
+    per byte-identical-copy group, and one PER DISTINCT SIGNATURE for
+    every colliding basename (NOT `len(by_name)` -- that undercounts any
+    basename with more than one surviving distinct signature; this was a
+    real bug, see FlatBasenameGroup/classify_flat_basename_groups above).
+
+    `groups`: an already-computed `classify_flat_basename_groups()` result
+    a caller may pass in instead of having this function compute its own
+    (see `stage_flat_frames`'s own `groups` parameter for why -- avoiding
+    a second, redundant hash pass over the same files).
+    """
+    if groups is None:
+        groups = classify_flat_basename_groups(flat_frames, _sha256_file_signature)
+
     byte_identical_copies = 0
     name_collisions = 0
-    for frames in by_name.values():
-        if len(frames) == 1:
+    staged = 0
+    for group in groups:
+        staged += len(group.survivors)
+        if len(group.frames) == 1:
             continue
-        hashes = {_sha256_file(f.path) for f in frames}
-        if len(hashes) == 1:
-            byte_identical_copies += len(frames) - 1
-        else:
+        if group.is_collision:
             name_collisions += 1
+        else:
+            byte_identical_copies += len(group.frames) - 1
 
     return FlatIdentityReport(
         matched=len(flat_frames),
         byte_identical_copies=byte_identical_copies,
         name_collisions=name_collisions,
-        staged=len(by_name),
+        staged=staged,
     )
 
 
@@ -708,7 +791,11 @@ FLAT_RECIPE_VERSION = "flat:v2:dedup+uniq+mul"
 _NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
 
 
-def stage_flat_frames(flat_frames: list[CalibrationFrame], dest_dir: str | Path) -> Path:
+def stage_flat_frames(
+    flat_frames: list[CalibrationFrame],
+    dest_dir: str | Path,
+    groups: list[FlatBasenameGroup] | None = None,
+) -> Path:
     """Flat-only content-aware staging (Step 3b, fixes G1) -- unlike the
     generic `stage_frames` every other calibration frame kind still uses
     unchanged (lights, bias, dark -- I5 is deliberately not touched for
@@ -720,7 +807,8 @@ def stage_flat_frames(flat_frames: list[CalibrationFrame], dest_dir: str | Path)
     iteration order happened to copy last, discarding a real, distinct
     exposure with zero indication anything was lost.
 
-    Per basename:
+    Per basename (via the shared `classify_flat_basename_groups` skeleton,
+    see `FlatBasenameGroup`'s own docstring):
     - a single matched frame is copied as-is, unchanged from `stage_frames`;
     - multiple frames sharing a basename are first deduplicated by CONTENT
       (SHA-256): byte-identical copies are dropped, keeping the first by
@@ -732,37 +820,33 @@ def stage_flat_frames(flat_frames: list[CalibrationFrame], dest_dir: str | Path)
       staged, not just one -- the sanitiser strips everything but
       alphanumerics from the parent directory name, and the path hash
       disambiguates same-named parents.
+
+    `groups`: an already-computed `classify_flat_basename_groups()` result
+    a caller may pass in instead of having this function compute its own
+    -- see `classify_flat_identity`'s own `groups` parameter for the other
+    half of that sharing.
     """
     dest_dir = Path(dest_dir)
     if dest_dir.exists():
         shutil.rmtree(dest_dir)
     dest_dir.mkdir(parents=True)
 
-    by_name: dict[str, list[CalibrationFrame]] = defaultdict(list)
-    for frame in flat_frames:
-        by_name[frame.path.name].append(frame)
+    if groups is None:
+        groups = classify_flat_basename_groups(flat_frames, _sha256_file_signature)
 
-    for name, frames in by_name.items():
-        if len(frames) == 1:
-            shutil.copy2(frames[0].path, dest_dir / name)
-            continue
-
-        by_hash: dict[str, list[CalibrationFrame]] = defaultdict(list)
-        for frame in frames:
-            by_hash[_sha256_file(frame.path)].append(frame)
-        # Keep the first by sorted path within each content-identical group.
-        survivors = [sorted(group, key=lambda f: str(f.path))[0] for group in by_hash.values()]
-
-        if len(survivors) == 1:
+    for group in groups:
+        if len(group.frames) == 1:
+            shutil.copy2(group.frames[0].path, dest_dir / group.name)
+        elif not group.is_collision:
             # All byte-identical -- one survives under its original name.
-            shutil.copy2(survivors[0].path, dest_dir / name)
+            shutil.copy2(group.survivors[0].path, dest_dir / group.name)
         else:
             # A genuine name collision between distinct frames -- stage
             # every survivor under a disambiguated name.
-            for survivor in survivors:
+            for survivor in group.survivors:
                 sanitised_parent = _NON_ALNUM_RE.sub("", survivor.path.parent.name)
                 path_hash = hashlib.sha256(str(survivor.path.parent).encode("utf-8")).hexdigest()[:8]
-                new_name = f"{sanitised_parent}_{path_hash}__{name}"
+                new_name = f"{sanitised_parent}_{path_hash}__{group.name}"
                 shutil.copy2(survivor.path, dest_dir / new_name)
     return dest_dir
 

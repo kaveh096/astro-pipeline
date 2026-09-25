@@ -635,7 +635,11 @@ def test_classify_flat_identity_byte_identical_and_colliding_distinct(tmp_path: 
     assert report.matched == 5
     assert report.byte_identical_copies == 1  # one extra copy of "identical.fit"
     assert report.name_collisions == 1  # one colliding basename ("skyflat0.fit")
-    assert report.staged == 3  # identical.fit (1) + skyflat0.fit (1) + skyflat1.fit (1)
+    # identical.fit (1 survivor) + skyflat0.fit (2 DISTINCT survivors, both
+    # staged under disambiguated names) + skyflat1.fit (1) == 4, not 3 --
+    # `staged` must reflect what stage_flat_frames() actually puts on disk
+    # (every distinct-content survivor of a collision), not len(by_name).
+    assert report.staged == 4
 
 
 def test_classify_flat_identity_no_frames_is_all_zero() -> None:
@@ -650,15 +654,68 @@ def test_classify_flat_identity_no_frames_is_all_zero() -> None:
 def test_classify_flat_identity_real_t21_luminance_matches_known_numbers() -> None:
     """Real gate (D)/(P): T21's real Luminance flat set -- 30 matched, 0
     byte-identical copies, 10 name collisions between distinct frames
-    (two twilight sessions' worth of colliding 'skyflat<N>' basenames),
-    20 staged -- plan-flats-v4.md ??1.3.5/Step 3a's own real numbers."""
+    (two twilight sessions' worth of colliding 'skyflat<N>' basenames).
+    `staged` is 30, NOT 20: every one of the 10 colliding basenames has 0
+    byte-identical copies, i.e. BOTH of its 2 same-named-but-distinct
+    frames survive and get staged under a disambiguated name (confirmed
+    directly against `stage_flat_frames()`'s own real output on this same
+    real flat set: matched=30 -> 30 real files land on disk) --
+    `len(by_name)` (== 20: 10 singleton + 10 colliding basenames) was the
+    wrong, pre-fix count; the real fix-#3 finding. See the synthetic
+    regression test below for the general (non-real-data) guard."""
     report_ing = scan_session(REAL_SESSION_DIR)
     t21_l_flats = report_ing.flat_index()[("T21", 1, "Luminance")]
     report = classify_flat_identity(t21_l_flats)
     assert report.matched == 30
     assert report.byte_identical_copies == 0
     assert report.name_collisions == 10
-    assert report.staged == 20
+    assert report.staged == 30
+
+
+def test_flat_identity_report_staged_matches_actual_staged_file_count(tmp_path: Path) -> None:
+    """General regression guard (synthetic, mocked/tmp_path -- not just the
+    one real-data assertion above): `FlatIdentityReport.staged` must always
+    equal the real number of files `stage_flat_frames()` puts on disk for
+    the SAME flat set, for an arbitrary mix of singleton basenames, byte-
+    identical copies, and multi-way (3-frame) name collisions."""
+    data_a = np.zeros((4, 4), dtype=np.uint16)
+    data_b = np.ones((4, 4), dtype=np.uint16) * 50
+    data_c = np.ones((4, 4), dtype=np.uint16) * 100
+
+    dir1, dir2, dir3 = tmp_path / "s1", tmp_path / "s2", tmp_path / "s3"
+    for d in (dir1, dir2, dir3):
+        d.mkdir()
+
+    # Singleton basename -- no collision, no copy.
+    unique = dir1 / "unique.fit"
+    fits.PrimaryHDU(data=data_a).writeto(unique)
+
+    # Byte-identical copies under one basename (2 frames, same content).
+    copy_a = dir1 / "copy.fit"
+    copy_b = dir2 / "copy.fit"
+    fits.PrimaryHDU(data=data_b).writeto(copy_a)
+    fits.PrimaryHDU(data=data_b).writeto(copy_b)
+
+    # A genuine THREE-WAY name collision -- 3 distinct contents sharing one
+    # basename across 3 session folders.
+    collide_a = dir1 / "collide.fit"
+    collide_b = dir2 / "collide.fit"
+    collide_c = dir3 / "collide.fit"
+    fits.PrimaryHDU(data=data_a).writeto(collide_a)
+    fits.PrimaryHDU(data=data_b).writeto(collide_b)
+    fits.PrimaryHDU(data=data_c).writeto(collide_c)
+
+    frames = [
+        CalibrationFrame(path=p, telescope="T21", frame_type="Flat", binning=1, exptime=0.0, filter_name="Luminance")
+        for p in (unique, copy_a, copy_b, collide_a, collide_b, collide_c)
+    ]
+
+    report = classify_flat_identity(frames)
+    dest = stage_flat_frames(frames, tmp_path / "staged")
+    actual_staged_files = len(list(dest.iterdir()))
+
+    assert report.staged == actual_staged_files
+    assert report.staged == 5  # unique(1) + copy(1) + collide's 3 distinct survivors(3)
 
 
 def test_run_calibration_logs_flat_identity_summary(tmp_path: Path, monkeypatch) -> None:

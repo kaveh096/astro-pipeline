@@ -40,7 +40,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from astro_pipeline.calibration import CalibrationFramesMissingError, CalibrationMode, FlatPolicy, select_dark  # noqa: E402
+from astro_pipeline.calibration import (  # noqa: E402
+    CalibrationFramesMissingError,
+    CalibrationMode,
+    FlatPolicy,
+    classify_flat_basename_groups,
+    select_dark,
+)
 from astro_pipeline.ingest import CALIBRATION_WARNING_RES, IngestReport, scan_session, warning_telescope  # noqa: E402
 from astro_pipeline.calibration_policy import infer_calibration_mode, infer_flat_policy  # noqa: E402
 
@@ -198,46 +204,47 @@ def consequence_annotations(
     return annotated
 
 
-def flat_identity_preview(frames: list) -> str:
-    """Step 6a(iii): `N frames (K copies, C collisions)`, using a CHEAP
-    header-identity signal (DATE-OBS, EXPTIME, file size), NOT SHA-256
-    (R3-10) -- the interview makes no copy of the flats the way
-    `run_calibration` does, so re-hashing T21's 330 flats (or T68's 88
-    large frames) on every interview run would be needlessly expensive.
-    The SHA-256-based mechanism stays in Step 3a's `run_calibration`
-    path, which copies the files anyway.
-    """
-    from collections import defaultdict
+def _flat_header_signature(frame) -> tuple:
+    """`flat_identity_preview`'s own CHEAP header-identity signal (DATE-OBS,
+    EXPTIME, file size), NOT SHA-256 (R3-10) -- the interview makes no copy
+    of the flats the way `run_calibration` does, so re-hashing T21's 330
+    flats (or T68's 88 large frames) on every interview run would be
+    needlessly expensive. The SHA-256-based mechanism stays in Step 3a's
+    `run_calibration` path, which copies the files anyway.
 
+    `except Exception`, matching every other FITS-header-read site touched
+    in this diff (ingest.py, calibration.py): astropy can reject a corrupt
+    header with VerifyError, a struct-unpacking ValueError,
+    UnicodeDecodeError, etc, not just OSError -- any of those must fold
+    into this "unreadable" signature rather than crash the whole render.
+    """
     from astropy.io import fits
 
-    by_name: dict[str, list] = defaultdict(list)
-    for frame in frames:
-        by_name[frame.path.name].append(frame)
+    try:
+        header = fits.getheader(frame.path)
+        size = frame.path.stat().st_size
+        return (str(header.get("DATE-OBS")), header.get("EXPTIME"), size)
+    except Exception:
+        return ("unreadable", None, None)
+
+
+def flat_identity_preview(frames: list) -> str:
+    """Step 6a(iii): `N frames (K copies, C collisions)` -- built on the
+    same shared `classify_flat_basename_groups` skeleton
+    `classify_flat_identity`/`stage_flat_frames` (calibration.py) use,
+    fed `_flat_header_signature` (above) instead of their SHA-256 content
+    signature (see that function's own docstring for why)."""
+    groups = classify_flat_basename_groups(frames, _flat_header_signature)
 
     copies = 0
     collisions = 0
-    for name, group in by_name.items():
-        if len(group) == 1:
+    for group in groups:
+        if len(group.frames) == 1:
             continue
-        signatures = set()
-        for frame in group:
-            try:
-                header = fits.getheader(frame.path)
-                size = frame.path.stat().st_size
-                signatures.add((str(header.get("DATE-OBS")), header.get("EXPTIME"), size))
-            except Exception:
-                # Broadened to match every other FITS-header-read site
-                # touched in this diff (ingest.py, calibration.py):
-                # astropy can reject a corrupt header with VerifyError, a
-                # struct-unpacking ValueError, UnicodeDecodeError, etc --
-                # not just OSError -- and any of those must fold into this
-                # "unreadable" bucket rather than crash the whole render.
-                signatures.add(("unreadable", None, None))
-        if len(signatures) == 1:
-            copies += len(group) - 1
-        else:
+        if group.is_collision:
             collisions += 1
+        else:
+            copies += len(group.frames) - 1
     return f"{len(frames)} frames ({copies} copies, {collisions} collisions)"
 
 
