@@ -221,6 +221,85 @@ def test_run_narrowband_boost_call_site_passes_parsed_calibration_mode(tmp_path:
     assert captured.get("calibration_mode") == CalibrationMode.RAW_LOCAL
 
 
+def test_run_narrowband_boost_main_threads_calibration_header_fallback_and_preserves_source(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """run_narrowband_boost.py wires --calibration-header-fallback into
+    scan_session() and wraps the result in _NarrowbandNormalizingReport
+    before it reaches build_single_filter_master's header-fallback-aware
+    resolution -- but unlike run_narrowband.py/interview.py (see their own
+    dedicated tests above), this call site had no test exercising
+    calibration_header_fallback=True end-to-end at all.
+
+    Confirms (a) scan_session() actually receives
+    calibration_header_fallback=True, and (b) header-fallback-recognized
+    frames' `source` attribute survives the REAL _NarrowbandNormalizingReport
+    wrapper's attribute delegation: calibration_index() is one of the
+    methods that proxy does NOT override (only instrument_groups()/
+    calibrated_instrument_groups()/flat_index() are -- see its own
+    docstring), so it must delegate straight through via __getattr__ to
+    the underlying real report, unchanged -- exactly what
+    calibration_policy.infer_calibration_mode()'s own
+    getattr(f, "source", "filename") check needs, not silently lost."""
+    import run_narrowband_boost
+    from astro_pipeline.ingest import CalibrationFrame
+
+    final_dir = tmp_path / "_pipeline" / "final"
+    final_dir.mkdir(parents=True)
+    (final_dir / "rgb_reconciled.fit").write_bytes(b"not real fits, never read by _find_existing")
+
+    header_dark = CalibrationFrame(
+        path=tmp_path / "dark0.fit", telescope="T20", frame_type="Dark", binning=2,
+        exptime=300.0, source="header",
+    )
+
+    class _FakeRawReport:
+        def instrument_groups(self):
+            return {}
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def flat_index(self):
+            return {}
+
+        def calibration_index(self):
+            return {("T20", "Dark", 2, 300.0): [header_dark]}
+
+    captured_scan_kwargs = {}
+
+    def fake_scan_session(project_dir, **kwargs):
+        captured_scan_kwargs.update(kwargs)
+        return _FakeRawReport()
+
+    monkeypatch.setattr(run_narrowband_boost, "pipeline_dir", lambda project_dir: tmp_path / "_pipeline")
+    monkeypatch.setattr(run_narrowband_boost, "scan_session", fake_scan_session)
+    # _NarrowbandNormalizingReport itself is left REAL (not mocked) -- the
+    # whole point of this test is to confirm its delegation behaviour.
+
+    captured_report = {}
+
+    def fake_build_single_filter_master(project_dir, report, *args, **kwargs):
+        captured_report["report"] = report
+        return None  # short-circuits main() right after this call
+
+    monkeypatch.setattr(run_narrowband_boost, "build_single_filter_master", fake_build_single_filter_master)
+
+    run_narrowband_boost.main(
+        [
+            str(tmp_path), "--telescope", "T20", "--target", "M42",
+            "--ra-hours", "5.588", "--dec-deg", "-5.391",
+            "--calibration-header-fallback",
+        ]
+    )
+
+    assert captured_scan_kwargs.get("calibration_header_fallback") is True
+
+    wrapped_report = captured_report["report"]
+    frames = wrapped_report.calibration_index()[("T20", "Dark", 2, 300.0)]
+    assert frames[0].source == "header"
+
+
 # --- interview.py main(): --calibration-header-fallback --------------------
 
 
