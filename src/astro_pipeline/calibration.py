@@ -860,7 +860,10 @@ def build_master_dark(dark_frames: list[CalibrationFrame], work_dir: str | Path)
 
 
 def build_master_flat(
-    flat_frames: list[CalibrationFrame], master_bias: Path, work_dir: str | Path
+    flat_frames: list[CalibrationFrame],
+    master_bias: Path,
+    work_dir: str | Path,
+    groups: list[FlatBasenameGroup] | None = None,
 ) -> Path:
     """Bias-subtract each flat, then stack with rejection -- grounded in
     real measurements against T21's real 30-frame-per-filter sky flats
@@ -896,6 +899,13 @@ def build_master_flat(
     LIGHT sequence exactly this way, with "Found 0 stars in reference").
     Hence three separate steps here, in this order: convert the flats,
     THEN stage the bias copy, THEN calibrate+stack.
+
+    `groups`: forwarded to `stage_flat_frames()` unchanged -- lets
+    `run_calibration()` pass in the SAME `classify_flat_basename_groups()`
+    result it already computed for `classify_flat_identity()`'s report,
+    instead of this call re-hashing every colliding basename's files a
+    second time (report-only classification and real staging used to each
+    hash independently).
     """
     if not flat_frames:
         raise CalibrationFramesMissingError("No frames provided to build master 'flat'.")
@@ -907,7 +917,7 @@ def build_master_flat(
     # `stage_frames` every other frame kind still uses; see
     # stage_flat_frames' own docstring for why flats are the one kind that
     # needs this (G1).
-    stage_flat_frames(flat_frames, stage_dir)
+    stage_flat_frames(flat_frames, stage_dir, groups=groups)
 
     seq = sequence_name(basename)
     run_script([f"convert {basename}"], workdir=stage_dir, script_name="convert.ssf")
@@ -1183,12 +1193,21 @@ def run_calibration(
             "pass flat_policy=SKIP_IF_MISSING to proceed without flat correction."
         )
 
+    flat_groups: list[FlatBasenameGroup] | None = None
     if flat_frames:
         # Step 3a (plan-flats-v4.md, report only, never raises): classify
         # the matched flats by CONTENT identity before staging collapses
-        # any colliding basenames -- G1's real T21 L finding (30 matched,
-        # 20 staged) made visible rather than silently absorbed.
-        identity = classify_flat_identity(flat_frames)
+        # any colliding basenames -- G1's real T21 L finding made visible
+        # rather than silently absorbed.
+        #
+        # Hashed ONCE here: `classify_flat_basename_groups()` computes
+        # every colliding basename's SHA-256 exactly once, and that same
+        # `flat_groups` result is handed to both `classify_flat_identity()`
+        # (the report below) and `build_master_flat()` ->
+        # `stage_flat_frames()` (the real staging further down) -- neither
+        # re-hashes anything this call already hashed.
+        flat_groups = classify_flat_basename_groups(flat_frames, _sha256_file_signature)
+        identity = classify_flat_identity(flat_frames, groups=flat_groups)
         _log(f"       flat: {identity.summary()}", notes)
         # Step 7 (fixes G9): heuristic sanity notes on a sample of the raw
         # flats themselves -- warning-only, never raises.
@@ -1203,7 +1222,7 @@ def run_calibration(
 
     master_flat: Path | None = None
     if flat_frames:
-        master_flat = build_master_flat(flat_frames, master_bias, work_dir)
+        master_flat = build_master_flat(flat_frames, master_bias, work_dir, groups=flat_groups)
 
     calibrated, _result = calibrate_lights(
         light_frames,

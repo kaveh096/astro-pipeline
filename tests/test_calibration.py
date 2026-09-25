@@ -718,6 +718,126 @@ def test_flat_identity_report_staged_matches_actual_staged_file_count(tmp_path: 
     assert report.staged == 5  # unique(1) + copy(1) + collide's 3 distinct survivors(3)
 
 
+def test_flat_groups_computed_once_shared_between_report_and_staging(tmp_path: Path, monkeypatch) -> None:
+    """Fix #4's own mechanism: `classify_flat_basename_groups()` computes
+    every colliding basename's SHA-256 exactly once. `run_calibration()`
+    reuses that SAME result for both `classify_flat_identity()`'s report
+    and `build_master_flat()` -> `stage_flat_frames()`'s real staging,
+    instead of each independently re-hashing every file (the double-
+    hashing the reviewer flagged). Verified directly at the hashing layer
+    (not through a full `run_calibration()` call, which would need a real
+    Siril convert/stack for a non-mocked `build_master_flat`): compute
+    `groups` once, then confirm passing that SAME `groups` into BOTH
+    `classify_flat_identity()` and `stage_flat_frames()` triggers no
+    further `_sha256_file()` calls."""
+    import astro_pipeline.calibration as calibration_module
+
+    data_a = np.zeros((4, 4), dtype=np.uint16)
+    data_b = np.ones((4, 4), dtype=np.uint16) * 100
+
+    dir1, dir2 = tmp_path / "s1", tmp_path / "s2"
+    dir1.mkdir()
+    dir2.mkdir()
+    collide_a = dir1 / "collide.fit"
+    collide_b = dir2 / "collide.fit"
+    fits.PrimaryHDU(data=data_a).writeto(collide_a)
+    fits.PrimaryHDU(data=data_b).writeto(collide_b)
+
+    frames = [
+        CalibrationFrame(path=p, telescope="T21", frame_type="Flat", binning=1, exptime=0.0, filter_name="Luminance")
+        for p in (collide_a, collide_b)
+    ]
+
+    call_count = 0
+    real_sha256_file = calibration_module._sha256_file
+
+    def counting_sha256_file(path):
+        nonlocal call_count
+        call_count += 1
+        return real_sha256_file(path)
+
+    monkeypatch.setattr(calibration_module, "_sha256_file", counting_sha256_file)
+
+    groups = calibration_module.classify_flat_basename_groups(frames, calibration_module._sha256_file_signature)
+    assert call_count == 2  # one hash per file, computed once
+
+    report = classify_flat_identity(frames, groups=groups)
+    dest = stage_flat_frames(frames, tmp_path / "staged", groups=groups)
+
+    # No further hashing -- both consumers reused the same precomputed groups.
+    assert call_count == 2
+    assert report.staged == len(list(dest.iterdir())) == 2
+
+
+def test_run_calibration_computes_flat_groups_once_and_threads_to_build_master_flat(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """run_calibration() itself: confirms it computes `flat_groups` ONCE
+    (via classify_flat_basename_groups) and passes that same object
+    through to both classify_flat_identity() and build_master_flat() --
+    the actual production wiring fix #4 adds, not just the lower-level
+    mechanism the test above exercises."""
+    import astro_pipeline.calibration as calibration_module
+
+    def fake_build_master_bias(bias_frames, work_dir):
+        return tmp_path / "master_bias.fit"
+
+    def fake_build_master_dark(dark_frames, work_dir):
+        return tmp_path / "master_dark.fit"
+
+    captured_groups = {}
+
+    def fake_build_master_flat(flat_frames, master_bias, work_dir, groups=None):
+        captured_groups["groups"] = groups
+        return tmp_path / "master_flat.fit"
+
+    def fake_calibrate_lights(*args, **kwargs):
+        return [tmp_path / "pp_light_0.fit"], SirilResult(returncode=0, log_lines=[])
+
+    hash_call_count = 0
+    real_classify_flat_basename_groups = calibration_module.classify_flat_basename_groups
+
+    def counting_classify_flat_basename_groups(flat_frames, signature_fn):
+        nonlocal hash_call_count
+        hash_call_count += 1
+        return real_classify_flat_basename_groups(flat_frames, signature_fn)
+
+    monkeypatch.setattr(calibration_module, "build_master_bias", fake_build_master_bias)
+    monkeypatch.setattr(calibration_module, "build_master_dark", fake_build_master_dark)
+    monkeypatch.setattr(calibration_module, "build_master_flat", fake_build_master_flat)
+    monkeypatch.setattr(calibration_module, "calibrate_lights", fake_calibrate_lights)
+    monkeypatch.setattr(calibration_module, "classify_flat_basename_groups", counting_classify_flat_basename_groups)
+
+    flat_path = tmp_path / "flat0.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(flat_path)
+    flat_frame = CalibrationFrame(
+        path=flat_path, telescope="T99", frame_type="Flat", binning=1, exptime=0.0, filter_name="Luminance",
+    )
+    light_path = tmp_path / "light0.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(light_path)
+    from astro_pipeline.ingest import LightFrame
+
+    light_frame = LightFrame(
+        path=light_path, provenance="raw", telescope="T99", user="u", target="X",
+        date="20260101", time="000000", filter_name="Luminance", binning=1, side="E",
+        exptime=300.0, sequence=1,
+    )
+    bias_path = tmp_path / "bias0.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(bias_path)
+    bias_frame = CalibrationFrame(path=bias_path, telescope="T99", frame_type="Bias", binning=1, exptime=0.0)
+    dark_path = tmp_path / "dark0.fit"
+    fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.uint16)).writeto(dark_path)
+    dark_frame = CalibrationFrame(path=dark_path, telescope="T99", frame_type="Dark", binning=1, exptime=300.0)
+
+    run_calibration(
+        [light_frame], [bias_frame], [dark_frame], tmp_path / "work",
+        flat_frames=[flat_frame], flat_policy=FlatPolicy.REQUIRE,
+    )
+
+    assert hash_call_count == 1  # classify_flat_basename_groups called exactly once
+    assert captured_groups["groups"] is not None  # build_master_flat received the precomputed groups
+
+
 def test_run_calibration_logs_flat_identity_summary(tmp_path: Path, monkeypatch) -> None:
     """run_calibration itself calls classify_flat_identity and logs its
     summary, before staging -- verified via a monkeypatched Siril chain
@@ -730,7 +850,7 @@ def test_run_calibration_logs_flat_identity_summary(tmp_path: Path, monkeypatch)
     def fake_build_master_dark(dark_frames, work_dir):
         return tmp_path / "master_dark.fit"
 
-    def fake_build_master_flat(flat_frames, master_bias, work_dir):
+    def fake_build_master_flat(flat_frames, master_bias, work_dir, groups=None):
         return tmp_path / "master_flat.fit"
 
     def fake_calibrate_lights(*args, **kwargs):
