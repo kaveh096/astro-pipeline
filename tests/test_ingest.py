@@ -639,12 +639,61 @@ def test_classify_tree_replace_not_append_zip_peeked_vs_extracted(tmp_path: Path
     assert real_report.lights[0].path.name == light_name
 
 
+def test_scan_session_classifies_each_zip_entry_exactly_once(tmp_path: Path, monkeypatch) -> None:
+    """The real, unconditional double-work the reviewer flagged:
+    scan_session() used to re-open every zip and re-run
+    classify_filename() on every entry a second time (via
+    _extract_zipped_lights), AFTER classify_tree() had already opened and
+    classified the exact same zip once (via _peek_zipped_lights) --
+    zf.namelist()/classify_filename() ran twice per zip, once discarded.
+
+    Now classify_tree() hands scan_session() the real (zip_path,
+    inner_name, fields) tuples it already computed
+    (IngestReport.zip_peeks), so scan_session() only ever extracts, never
+    re-classifies. Verified directly: classify_filename() (imported into
+    this module and called by both the old and new code paths) must be
+    called exactly once per real zip entry across one scan_session() call,
+    not twice."""
+    import zipfile
+
+    import astro_pipeline.ingest as ingest_module
+
+    project = tmp_path / "project"
+    project.mkdir()
+    light_names = [
+        "raw-T24-observer1-M51-20250123-021344-Luminance-BIN1-E-300-001.fit",
+        "raw-T24-observer1-M51-20250123-021400-Luminance-BIN1-E-300-002.fit",
+    ]
+    zip_path = project / "Lights.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for name in light_names:
+            zf.writestr(name, b"not a real fits file, never read by classify_filename")
+
+    call_count = 0
+    real_classify_filename = ingest_module.classify_filename
+
+    def counting_classify_filename(basename, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return real_classify_filename(basename, **kwargs)
+
+    monkeypatch.setattr(ingest_module, "classify_filename", counting_classify_filename)
+
+    report = scan_session(project)
+
+    assert len(report.lights) == len(light_names)
+    assert all(f.path.exists() for f in report.lights)
+    # One classify_filename() call per real zip entry -- NOT doubled by a
+    # second, redundant re-scan of the same zip.
+    assert call_count == len(light_names)
+
+
 def test_classify_tree_calibration_and_unrecognized_untouched_by_zip_logic(tmp_path: Path) -> None:
     """Bare-file calibration/unrecognized classification is completely
     unaffected by the zip-peeking half of classify_tree -- only raw-
     provenance LIGHT entries inside a zip are ever peeked (mirroring
-    _extract_zipped_lights' own real, narrower scope: no real delivery
-    ships bias/dark/flat inside a zip)."""
+    _materialize_zipped_light's own real, narrower scope: no real
+    delivery ships bias/dark/flat inside a zip)."""
     project = tmp_path / "project"
     (project / "T24").mkdir(parents=True)
     bias_path = project / "T24" / "T24-observer1-Bias-000-LD20250203-LT171434-BIN1.fit"
