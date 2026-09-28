@@ -1,8 +1,17 @@
 [project]
 name = "astro-pipeline"
 version = "0.1.0"
-description = "Automated, checkpointed LRGB/narrowband astrophotography processing pipeline (calibration through Photoshop handoff)"
+description = "Automated, checkpointed LRGB/narrowband astrophotography processing pipeline (calibration through 16-bit TIFF export)"
+readme = "README.md"
+authors = [{name = "Kaveh Shahabi"}]
 license = "MIT"
+keywords = ["astrophotography", "astronomy", "siril", "fits", "itelescope"]
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "astropy>=6.0",
@@ -10,13 +19,14 @@ dependencies = [
     "photutils>=1.13",
     "tifffile>=2024.5",
     "numpy>=1.26",
-    "pyyaml>=6.0",
+    "pillow>=10.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/kaveh096/astro-pipeline"
+Issues = "https://github.com/kaveh096/astro-pipeline/issues"
+
 [project.optional-dependencies]
-windows = [
-    "pywin32>=306",
-]
 dev = [
     "pytest>=8.0",
 ]
@@ -24,12 +34,14 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "m51_pipeline: real Siril run against the live M51 project; excluded by default, see docs/plan-flats-v4.md §4.0",
+    "m51_pipeline: real Siril run against the live M51 project; excluded by default (see the module docstring on the four tests this marks in tests/test_pipeline.py)",
 ]
 addopts = ["-m", "not m51_pipeline"]
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
