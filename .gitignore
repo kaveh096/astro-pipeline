@@ -244,3 +244,11 @@ tests/local_paths.py
 
 # Generated test golden-data cache
 tests/fixtures/
+
+# Internal planning/adversarial-review transcripts (dev-process artifacts,
+# not part of the published project; kept locally, not tracked)
+docs/plan-flats-v4.md
+docs/plan-flats-v4-review-round*.md
+docs/task5-oop-refactor-plan.md
+docs/task5-step12-review-round*.md
+docs/task5-step12-substeps.md

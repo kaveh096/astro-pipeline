@@ -491,7 +491,7 @@ def test_calibration_index_real_m51_snapshot() -> None:
 @pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
 def test_instrument_groups_real_m51_post_deletion_counts() -> None:
     """Pinned against the POST-DELETION tree (plan ??4.0's event), per the
-    plan's own Step 1a text -- T21 L bin1 = 2, T24 L bin1 = 21. Kaveh's
+    plan's own Step 1a text -- T21 L bin1 = 2, T24 L bin1 = 21. The manual
     deletion of the byte-identical duplicate M51 folders
     (Uncalibrated Lights - Jan 2025/, calibrated Lights - T24 - Feb 2025/)
     is explicitly OUT OF SCOPE for the coding task that added this test

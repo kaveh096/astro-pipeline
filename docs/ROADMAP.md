@@ -13,7 +13,7 @@ Last updated: 2026-09-21. Current `main` HEAD: pushed and up to date with
 
 **Task 5 (the OOP refactor) is fully done, Steps 0-17, including Step 17**
 (2026-09-21): a real, full `run_lrgb` run against the real M51 project on
-Kaveh's own machine completed successfully end to end (real Siril
+this machine completed successfully end to end (real Siril
 calibration/stacking, real GraXpert background extraction, real SPCC on
 both colour contributors, real gain/offset match + combine), followed by
 the actual real-data verification tests --
@@ -32,7 +32,7 @@ Renamed to `PROJECT_DIR_BASE` (env var `ASTRO_PIPELINE_PROJECT_DIR_BASE`)
 across `tests/conftest.py`/`tests/local_paths.py.example`/
 `tests/local_paths.py` to name what it actually holds: the base directory
 under which the M51 project folder (raw lights + its own `_pipeline/`
-working copy) lives -- which on Kaveh's own machine is the same iTelescope
+working copy) lives -- which on this machine is the same iTelescope
 raw-backup drive `ITELESCOPE_DIR` already pointed at, not a separate
 "Desktop" location.
 
@@ -84,7 +84,11 @@ it (see `plan-flats-v4.md`'s own "Provenance of v3" note).
 Branch `flats-v4-core`, one commit per step (`git log` on that branch for
 the full list). 8 rounds of adversarial review before implementation
 (`docs/plan-flats-v4-review-round1..8.md`), then finalized (rev 9) with
-Kaveh's decisions recorded in the plan's own ??6.
+decisions recorded in the plan's own ??6. The planning/review documents
+themselves are intentionally **not tracked** in this repo (see `.gitignore`)
+-- they were internal working notes for arriving at the design above, not
+part of the published project; the design decisions and the operational
+procedure that matter for anyone picking this up are preserved below.
 
 **What shipped**:
 - **G1/G2 fix (Decision Q1, "fix now"), unconditional**: T21 Luminance's
@@ -138,9 +142,74 @@ T21 raw=2, T24 L bin1=21, T21 L bin1=2, matching the plan's own numbers
 exactly), but the actual `run_lrgb` call that rebuilds M51 under the new
 recipe, checks `luminance_selected`/`colour_reference` didn't flip, and
 re-pins gate (P)'s reference has NOT been run yet. **Whoever picks this
-up next**: read `plan-flats-v4.md` ??4.0's full event-E procedure before
-running it -- it's a snapshot-first, checked procedure, not a bare
-`run_lrgb` call.
+up next**: follow the procedure below -- it's a snapshot-first, checked
+procedure, not a bare `run_lrgb` call.
+
+#### Event E procedure (preserved here; `plan-flats-v4.md` itself is untracked)
+
+**Open pre-requisite, not yet done**: Decision Q7 (whether to fix bias/dark
+masters' missing `-nonorm` flag, "I6") is conditional, not yet resolved --
+it depends on a no-code measurement (build T21's bias/dark masters with and
+without `-nonorm`, using the same `tmp_path` harness as gate (P), and
+compare the pixel difference against the Step-1b Siril determinism bound)
+that has not been run yet. Run that measurement first and record the
+result here before starting the procedure below, since step 6's expected
+outcome branches on whether I6 rides along.
+
+1. **Snapshot**: copy `_pipeline/final/`, `_pipeline/checkpoints/`,
+   `_pipeline/run_signature.json`, and every group's `lights/master_*.fit`
+   (T21 and both T24 binnings) to a location outside the project tree, so
+   there is something to compare against and fall back to.
+2. Record SHA-256 of the current `lrgb_final.fit` and `M51_lrgb.tif`.
+   Record the persisted `run_signature.json` verbatim. Record
+   per-contributor `STACKCNT`, median FWHM (`contributor_fwhm_arcsec`),
+   `luminance_selected` and `colour_reference`.
+3. Apply the triggers (the duplicate-folder deletion is already done; the
+   Step 3b flat recipe fix is already merged; I6 only if the measurement
+   above resolved Q7 = change).
+4. Run one full `run_lrgb` for M51, using the same parameters
+   `scripts/run_m51.py` uses (call `run_lrgb` directly from a scratch
+   script with those arguments -- do **not** edit the tracked
+   `scripts/run_m51.py`, whose `PROJECT_DIR` placeholder stays as-is).
+5. **Check `luminance_selected` and `colour_reference`.** If either
+   changed, or the FWHM ranking flipped, **stop and ask before accepting**
+   -- do not silently keep the new selection.
+6. **Pixel-identity check**: compare the rebuilt T24 Luminance and both T24
+   colour-contributor masters' pixel data (`np.array_equal`, or the
+   Step-1b determinism bound if not exactly equal -- plate solving
+   rewrites WCS headers, so compare data arrays, not headers) against the
+   step-1 snapshot.
+   - **If I6 was NOT part of this run**: the masters are expected to be
+     pixel-identical, because the staged T24 file sets are byte-identical
+     before and after the deletion and nothing else in this run touches
+     `build_master`. A mismatch here means something **other** than the
+     deletion changed T24's pixels, and must be investigated before
+     proceeding.
+   - **If I6 WAS part of this run**: T24's bias/dark masters -- and
+     everything built from them -- are **expected to differ**,
+     deliberately. The expected magnitude is the pre-requisite
+     measurement's own reported pixel difference, plus the Step-1b
+     determinism bound as slack for ordinary Siril run-to-run noise. Only
+     a difference **beyond** that combined envelope is a real fault.
+7. Record the new hashes, signature, `STACKCNT`s and FWHMs in a
+   **follow-up ROADMAP commit** (not by amending the triggering commit's
+   message, which is already merged by the time E runs).
+8. Only then run gate (I) (the four real-M51 tests, via
+   `pytest -m m51_pipeline` or `-o addopts=""` for this one invocation)
+   and re-pin gate (P)'s reference. **In the same commit**, remove the
+   `addopts = ["-m", "not m51_pipeline"]` line from `pyproject.toml`
+   (keep the `markers` registration) -- from this point on, a plain
+   `pytest` covers the four real-M51 tests again, same as any other test.
+9. The now-stale `_index.json` at the M51 project root (built July,
+   references the deleted folder 111 times, no code consumer today) can be
+   regenerated or deleted in the same pass, at your option.
+
+**Hygiene while doing this**: checkpoint labels stay untouched. Watch for
+monkeypatch drift -- grep before each step for patches of
+`run_calibration`, `build_master_flat`, `build_group_master`, `run_script`,
+`scan_session` and `fits.getheader`; new header reads go through an
+injectable reader. Real paths come only via `tests/local_paths.py` or
+`ASTRO_PIPELINE_ITELESCOPE_DIR`.
 
 ### 2.3 The "5-task publish roadmap" (2026-09-12 -> 2026-09-17, this long session)
 Goal: prepare the repo for public GitHub release. Full blow-by-blow detail
@@ -233,14 +302,14 @@ Revisit only on a genuinely different (future) machine with a modern GPU.
 
 ## 3. Task 5 (OOP refactor) -- detailed status
 
-**Plan document**: `docs/task5-oop-refactor-plan.md` (moved here from a
-session scratchpad this session -- previously untracked, now permanent).
-Read it in full before continuing; it has 2 full rounds of independent
-adversarial review merged inline (14 total findings, all corrected in
-place) and is the actual source of truth for the remaining steps, not
-this summary.
+**Plan document**: `docs/task5-oop-refactor-plan.md` -- an internal planning
+artifact, intentionally **not tracked** in this repo (see `.gitignore`; it
+had 2 full rounds of independent adversarial review merged inline, 14 total
+findings, all corrected in place). Task 5 is now **fully complete** (see
+below), so this summary is the durable record going forward; the plan
+document itself is no longer needed to pick this up.
 
-**Goal** (Kaveh's own framing): "refactor the code to uplevel it in terms
+**Goal** (original framing): "refactor the code to uplevel it in terms
 of good object oriented design, small, single responsibility modules, and
 a simple architecture... 100% behavior-preserving... good coverage of
 e2e tests" to verify that. Hybrid test strategy mandated: a few real
@@ -338,7 +407,7 @@ entirely, into the new `lrgb_orchestrator.py` (~1020 lines including the
   lrgb_orchestrator.py) needed zero changes.
 
 - Step 17 (2026-09-21, no commit -- real-data-only, not code): **manual
-  real-data verification**, done on Kaveh's own machine with
+  real-data verification**, done on this machine with
   `ASTRO_PIPELINE_PROJECT_DIR_BASE`/`ASTRO_PIPELINE_ITELESCOPE_DIR`
   configured -- the actual final behavior-preservation gate. A real, full
   `run_lrgb` run against the real M51 project completed successfully
@@ -371,14 +440,26 @@ SEE real flat/bias/dark libraries at M42/T20, IC 1396/T68 and M31/T05
 `calibration_index()` machinery already generalizes to them (confirmed:
 real gate-(D) counts match exactly) -- but recognition alone changes
 nothing (Decision Q2, PRECALIBRATED stays the default for all three,
-permanently). The **actual next step, per Kaveh's decision (Q3/Q9)**,
-is the per-target local-flats-vs-iTelescope measurement, NOT reprocessing
-blind:
+permanently). The **actual next step (decisions Q3/Q9)**, is the
+per-target local-flats-vs-iTelescope measurement, NOT reprocessing blind:
 - M42/T20, IC 1396/T68 and M31/T05 EACH get their own measurement (same
   corner/centre-ratio or half-split method T21's own real measurement
   used) -- not one shared verdict.
 - Needs only Step 4b's recognition + Step 2's `calibration_recipe_parts`
   mechanism -- not Steps 3b/6/7 or the CLI flags.
+- **Mechanics**: build RAW_LOCAL masters with and without a flat, and
+  PRECALIBRATED masters, and compare masked background uniformity and
+  dust-residual metrics. A naive version of this is expensive (~360
+  register+stack runs across 20 half-splits x 3 arms x 3 masters) and
+  confounded on background alone (darks/cosmetic correction/pedestal
+  differ between RAW_LOCAL and PRECALIBRATED, not just the flat) -- when
+  actually run: build each arm's calibrated master **once**, then split
+  only register+stack for the noise floor (roughly halves the cost); a
+  half-stack's noise is ~sqrt(2) worse than the full stack being compared
+  -- account for that or use it only as a relative comparison across arms;
+  isolate the flat's own effect via RAW_LOCAL-no-flat vs
+  RAW_LOCAL-with-flat (same darks), and report RAW_LOCAL vs PRECALIBRATED
+  separately rather than auto-deciding from it.
 - **Reprocess only where a target's own measurement shows a genuine,
   quantified improvement.** Real risk per target argues against blind
   reprocessing: M42's flat library is 21 months older than its lights
@@ -387,8 +468,6 @@ blind:
   (see 4.3); M31's flats are the freshest (19 days) but its darks are at
   the wrong temperature (-15C vs -10C lights) -- **fix that (G15) before
   or as part of measuring M31**, or the measurement itself is unreliable.
-- Full mechanics/cost-reduction notes in `plan-flats-v4.md` ??5's own
-  measurement bullet -- read that before starting, don't re-derive it.
 
 ### 4.2 Multi-instrument RGB/colour discovery generalization
 Luminance discovery was generalized across telescopes in `plan-rev4`
@@ -397,7 +476,7 @@ to the caller's own telescope (`pipeline.py`'s own comment: "colour
 discovery is hard-scoped to the caller's own telescope"). Broadening
 this (combining RGB data captured across multiple telescopes for one
 target) is real, unstarted work, last flagged as a priority on
-2026-09-09 and not picked up since -- worth asking Kaveh whether this is
+2026-09-09 and not picked up since -- worth re-asking whether this is
 still wanted before starting, since narrowband/post-processing work took
 priority instead.
 
@@ -476,42 +555,42 @@ functions. Not needed today; noted for completeness.
   Section 6 for why it was explicitly rejected once already).
 - **T24 (M51) has zero flats, permanently, by binding decision -- not
   reopened by `plan-flats-v4.md`.** Documented fact, not a scope change
-  (Decision Q8, 2026-09-24): jmwill's `calibrated-` T24 BIN1 copies are
-  `CALSTAT=BDF` -- already flat-corrected server-side by iTelescope. This
-  is a fact about the existing delivery (T24's OWN local calibration
-  still has no flats of any kind), surfaced for completeness, not a
-  reason to revisit the "no T24 flats" decision from ??2.2.
+  (Decision Q8, 2026-09-24): the iTelescope-provided `calibrated-` T24
+  BIN1 copies are `CALSTAT=BDF` -- already flat-corrected server-side by
+  iTelescope. This is a fact about the existing delivery (T24's OWN local
+  calibration still has no flats of any kind), surfaced for completeness,
+  not a reason to revisit the "no T24 flats" decision from ??2.2.
 
 ---
 
 ## 6. Explicitly rejected ideas -- re-ask before assuming these still don't apply
 
-Per Kaveh's own instruction: anything he's said he'll "never" want should
-stay visible here, not silently vanish, and should be actively
-re-questioned in a future session rather than assumed permanent.
+Anything flagged as "never" wanted should stay visible here, not silently
+vanish, and should be actively re-questioned in a future session rather
+than assumed permanent.
 
 1. **Photoshop-scripted creative grading automation** (contrast/gamma/
    vibrance automation). Rejected 2026-09-12: contradicts the skill's own
    repeated "ends at TIFF" design boundary (Section 5), has no testable
    ground truth (unlike SNR/star-count/background, which the rest of the
    pipeline already measures), and requires paid Photoshop, shrinking the
-   published skill's real audience. Kaveh agreed with this reasoning at
-   the time. **Re-ask if**: the project's scope or audience changes (e.g.
+   published skill's real audience. This reasoning was agreed at the
+   time. **Re-ask if**: the project's scope or audience changes (e.g.
    if this stops being a "publish for others" project and becomes
    personal-workflow-only again), or if a genuinely testable/open-source
    creative-grading approach emerges.
 2. **PII/personal-target-tracking automation** (an early brainstormed
-   capability -- automatically tracking Kaveh's own target list/
-   preferences/Instagram activity). Rejected 2026-09-12 specifically
+   capability -- automatically tracking the maintainer's own target list/
+   preferences/social-media activity). Rejected 2026-09-12 specifically
    because it's "not useful for others in general," in the context of
-   preparing this repo for public release. **Re-ask if**: Kaveh wants a
-   separate, personal (un-published, or a private fork/branch) automation
-   for his own use -- the rejection was about the PUBLISHED skill's
+   preparing this repo for public release. **Re-ask if**: a separate,
+   personal (un-published, or a private fork/branch) automation for one's
+   own use is wanted -- the rejection was about the PUBLISHED skill's
    scope, not a judgment that the feature itself is bad.
 3. **Narrowband support** (SHO/HOO, HaRGB) was originally deprioritized
    2026-09-09 ("I don't usually do narrowbands... don't build HOO/SHO/
-   Ha-blending unless asked"). **Already resolved** -- Kaveh explicitly
-   reversed this 2026-09-14 and it shipped as capabilities A/A2 (Section
+   Ha-blending unless asked"). **Already resolved** -- this was explicitly
+   reversed 2026-09-14 and it shipped as capabilities A/A2 (Section
    2.3). Kept here only as a real example of exactly this pattern (a
    "never" that became a "yes, build it" once framed for the public-skill
    use case) -- no action needed, historical note only.
@@ -524,17 +603,16 @@ re-questioned in a future session rather than assumed permanent.
    entry point), then this file.
 2. `git log --oneline -30` to see what's actually landed vs. what this
    doc describes (this doc can go stale; git is ground truth).
-3. For Task 5 specifically: read `docs/task5-oop-refactor-plan.md` in
-   full, including its inline review-correction annotations, before
-   touching any source file.
+3. Task 5 (the OOP refactor) is fully complete -- Section 3 above is the
+   durable record; no plan document is needed to pick anything up there.
 4. Run the full suite once before changing anything:
    `.venv/Scripts/python.exe -m pytest tests/ -q` -- confirm the baseline
    (288 passed / 35 skipped as of this writing) before assuming any
    number that follows.
 5. For real-data-gated tests: copy `tests/local_paths.py.example` to
-   `tests/local_paths.py` and fill in real local paths (gitignored,
-   never committed) if working on Kaveh's own machine; otherwise those
-   tests will just skip, which is expected and fine.
+   `tests/local_paths.py` and fill in your own real local paths
+   (gitignored, never committed); otherwise those tests will just skip,
+   which is expected and fine.
 
 ---
 
