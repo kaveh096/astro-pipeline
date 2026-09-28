@@ -64,7 +64,7 @@ def find_siril_cli() -> Path:
     )
 
 
-def get_version(siril_cli: Path | None = None) -> tuple[int, int, int]:
+def get_version(siril_cli: Path | None = None, timeout: float | None = None) -> tuple[int, int, int]:
     exe = siril_cli or find_siril_cli()
     result = subprocess.run(
         [str(exe), "--version"],
@@ -73,6 +73,7 @@ def get_version(siril_cli: Path | None = None) -> tuple[int, int, int]:
         encoding="utf-8",
         errors="replace",
         check=True,
+        timeout=timeout,
     )
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout)
     if not match:

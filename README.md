@@ -189,14 +189,20 @@ wrapper around it, not a requirement. From a project folder laid out per
 ```
 
 `interview.py` scans the folder and reports what it found (telescopes,
-filters, calibration gaps) without writing anything. `run_stage.py` runs
+filters, calibration gaps, and a Prerequisites section listing which
+tools/Siril version/SPCC profiles are available), without writing
+anything. `run_stage.py` checks the same prerequisites itself before
+doing anything (exits with a clear message if something's missing or too
+old, rather than failing partway through a multi-hour run) — pass
+`--skip-preflight` to bypass that check if you know better. It then runs
 the LRGB/RGB-only/OSC pipeline (auto-detected from what's present) and
 pauses at each checkpoint. RA/Dec are the target's coordinates in decimal
 hours and decimal degrees — look them up on Simbad or a planetarium app.
 Outputs land in `<project_dir>/_pipeline/final/` (TIFF + PNG preview);
 intermediate checkpoints are in `<project_dir>/_pipeline/checkpoints/`.
 See `skill/SKILL.md` for narrowband, narrowband-boost and post-processing
-(denoise/star-removal/black-point) entry points.
+(denoise/star-removal/black-point) entry points, which have the same
+preflight check and escape hatch.
 
 ## Project folder layout
 

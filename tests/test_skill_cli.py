@@ -64,6 +64,7 @@ def test_run_stage_main_passes_calibration_mode_and_fallback_to_run_lrgb(monkeyp
         return _Result()
 
     monkeypatch.setattr(run_stage, "run_lrgb", fake_run_lrgb)
+    monkeypatch.setattr(run_stage.preflight, "check_prerequisites", lambda **kwargs: [])
     run_stage.main(
         [
             "proj", "--telescope", "T24", "--target", "M51",
@@ -120,6 +121,7 @@ def test_run_narrowband_main_passes_calibration_mode_and_fallback(monkeypatch) -
         return _Result()
 
     monkeypatch.setattr(run_narrowband, "run_narrowband", fake_run_narrowband)
+    monkeypatch.setattr(run_narrowband.preflight, "check_prerequisites", lambda **kwargs: [])
     run_narrowband.main(
         [
             "proj", "--telescope", "T20", "--target", "M42",
@@ -210,6 +212,7 @@ def test_run_narrowband_boost_call_site_passes_parsed_calibration_mode(tmp_path:
         return None  # short-circuits main() right after this call
 
     monkeypatch.setattr(run_narrowband_boost, "build_single_filter_master", fake_build_single_filter_master)
+    monkeypatch.setattr(run_narrowband_boost.preflight, "check_prerequisites", lambda **kwargs: [])
 
     run_narrowband_boost.main(
         [
@@ -284,6 +287,7 @@ def test_run_narrowband_boost_main_threads_calibration_header_fallback_and_prese
         return None  # short-circuits main() right after this call
 
     monkeypatch.setattr(run_narrowband_boost, "build_single_filter_master", fake_build_single_filter_master)
+    monkeypatch.setattr(run_narrowband_boost.preflight, "check_prerequisites", lambda **kwargs: [])
 
     run_narrowband_boost.main(
         [
@@ -334,6 +338,7 @@ def test_interview_main_threads_calibration_header_fallback(monkeypatch, capsys)
         return _EmptyReport()
 
     monkeypatch.setattr(interview, "scan_session", fake_scan_session)
+    monkeypatch.setattr(interview, "prerequisites_summary", lambda report: [])
     interview.main(["interview.py", "some_project", "--calibration-header-fallback"])
     assert captured.get("calibration_header_fallback") is True
 
@@ -369,6 +374,7 @@ def test_interview_main_defaults_calibration_header_fallback_false(monkeypatch) 
         return _EmptyReport()
 
     monkeypatch.setattr(interview, "scan_session", fake_scan_session)
+    monkeypatch.setattr(interview, "prerequisites_summary", lambda report: [])
     interview.main(["interview.py", "some_project"])
     assert captured.get("calibration_header_fallback") is False
 
@@ -406,6 +412,7 @@ def test_run_stage_main_passes_flat_policy_to_run_lrgb(monkeypatch) -> None:
         return _Result()
 
     monkeypatch.setattr(run_stage, "run_lrgb", fake_run_lrgb)
+    monkeypatch.setattr(run_stage.preflight, "check_prerequisites", lambda **kwargs: [])
     run_stage.main(
         [
             "proj", "--telescope", "T24", "--target", "M51",
@@ -440,6 +447,7 @@ def test_run_narrowband_parses_and_passes_flat_policy(monkeypatch) -> None:
         return _Result()
 
     monkeypatch.setattr(run_narrowband, "run_narrowband", fake_run_narrowband)
+    monkeypatch.setattr(run_narrowband.preflight, "check_prerequisites", lambda **kwargs: [])
     run_narrowband.main(
         [
             "proj", "--telescope", "T20", "--target", "M42",
@@ -466,9 +474,9 @@ def test_interview_main_threads_flat_policy_override(monkeypatch) -> None:
     captured = {}
     real_render = interview.render
 
-    def spy_render(project_dir, report, flat_policy_override=None):
+    def spy_render(project_dir, report, flat_policy_override=None, prerequisites=None):
         captured["flat_policy_override"] = flat_policy_override
-        return real_render(project_dir, report, flat_policy_override)
+        return real_render(project_dir, report, flat_policy_override, prerequisites)
 
     def fake_scan_session(project_dir, **kwargs):
         class _EmptyReport:
@@ -495,5 +503,6 @@ def test_interview_main_threads_flat_policy_override(monkeypatch) -> None:
 
     monkeypatch.setattr(interview, "scan_session", fake_scan_session)
     monkeypatch.setattr(interview, "render", spy_render)
+    monkeypatch.setattr(interview, "prerequisites_summary", lambda report: [])
     interview.main(["interview.py", "some_project", "--flat-policy", "require"])
     assert captured["flat_policy_override"] == FlatPolicy.REQUIRE

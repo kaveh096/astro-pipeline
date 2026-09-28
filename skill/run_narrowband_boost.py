@@ -52,6 +52,7 @@ from astro_pipeline.reconciliation import reproject_to_reference  # noqa: E402
 from astro_pipeline.siril_driver import run_script  # noqa: E402
 from astro_pipeline.stretch_compose import stretch_and_compose, stretch_rgb  # noqa: E402
 from astro_pipeline.workspace import pipeline_dir  # noqa: E402
+from astro_pipeline import preflight  # noqa: E402
 
 
 def _find_existing(final_dir: Path, name: str) -> Path:
@@ -89,7 +90,19 @@ def main(argv: list[str] | None = None) -> int:
         "--flat-policy", choices=["require", "skip_if_missing"], default=None,
         help="override this boost filter's inferred FlatPolicy",
     )
+    p.add_argument(
+        "--skip-preflight", action="store_true",
+        help="skip the tool/Siril-version check before running",
+    )
     args = p.parse_args(argv)
+
+    if not args.skip_preflight:
+        problems = preflight.check_prerequisites(needs_siril=True, needs_astap=True)
+        if problems:
+            print("Cannot run -- fix these first (or pass --skip-preflight):")
+            for problem in problems:
+                print(f"  - {problem}")
+            return 2
 
     project_dir = Path(args.project_dir)
     final_dir = pipeline_dir(project_dir) / "final"

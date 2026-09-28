@@ -46,6 +46,12 @@ separately-named files next to what's already there.
 - `skill/interview.py`, `skill/run_stage.py`, `skill/run_narrowband.py`,
   `skill/run_narrowband_boost.py`, `skill/run_post_process.py` do the actual
   work below; read their docstrings if anything here is ambiguous.
+- Every `run_*.py` script (not `interview.py`, which only reports) checks
+  its own required tools/Siril version/SPCC profile before writing
+  anything, and exits 2 with a clear message if something's missing --
+  relay that message verbatim rather than guessing at a fix. `--skip-
+  preflight` bypasses the check if the user says the tool situation is
+  fine despite what it reports.
 
 ## Step 1 -- Interview
 

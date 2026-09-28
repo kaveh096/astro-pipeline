@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from astro_pipeline.calibration import DEFAULT_PEDESTAL, CalibrationMode, FlatPolicy  # noqa: E402
 from astro_pipeline.narrowband_filters import NARROWBAND_PALETTES  # noqa: E402
 from astro_pipeline.narrowband_orchestrator import run_narrowband  # noqa: E402
+from astro_pipeline import preflight  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,11 +48,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--flat-policy", choices=["require", "skip_if_missing"], default=None,
         help="override this run's inferred FlatPolicy",
     )
+    p.add_argument(
+        "--skip-preflight", action="store_true",
+        help="skip the tool/Siril-version check before running",
+    )
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if not args.skip_preflight:
+        problems = preflight.check_prerequisites(
+            needs_siril=True,
+            needs_astap=True,
+            needs_graxpert=True,
+        )
+        if problems:
+            print("Cannot run -- fix these first (or pass --skip-preflight):")
+            for problem in problems:
+                print(f"  - {problem}")
+            return 2
 
     result = run_narrowband(
         project_dir=args.project_dir,

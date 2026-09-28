@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from astro_pipeline.background_color import run_graxpert_denoise  # noqa: E402
 from astro_pipeline.export_image import export, export_with_black_point  # noqa: E402
 from astro_pipeline.star_removal import run_star_removal  # noqa: E402
+from astro_pipeline import preflight  # noqa: E402
 
 
 def find_final_composite(final_dir: Path) -> Path:
@@ -72,11 +73,31 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--denoise-gpu", action="store_true", help="attempt GPU denoise (may crash/hang on older or integrated GPUs -- CPU is the safe default)")
     p.add_argument("--graxpert-exe", default=None)
     p.add_argument("--starnet-exe", default=None)
+    p.add_argument(
+        "--skip-preflight", action="store_true",
+        help="skip the tool check before running",
+    )
     args = p.parse_args(argv)
 
     final_dir = Path(args.final_dir)
     graxpert_exe = Path(args.graxpert_exe) if args.graxpert_exe else None
     starnet_exe = Path(args.starnet_exe) if args.starnet_exe else None
+
+    if not args.skip_preflight:
+        problems = []
+        if not final_dir.exists():
+            problems.append(f"{final_dir} does not exist.")
+        problems.extend(preflight.check_prerequisites(
+            needs_graxpert=True,
+            needs_starnet=args.nebula,
+            graxpert_exe=graxpert_exe,
+            starnet_exe=starnet_exe,
+        ))
+        if problems:
+            print("Cannot run -- fix these first (or pass --skip-preflight):")
+            for problem in problems:
+                print(f"  - {problem}")
+            return 2
 
     composite = find_final_composite(final_dir)
     print(f"[run ] source composite: {composite}")

@@ -30,8 +30,11 @@ anything runs:
     not a re-implementation of the policy.
 
 This is presentation logic for the interview checkpoint, not pipeline
-logic -- it never calls Siril/GraXpert/SPCC and never writes to
-`_pipeline/`.
+logic -- it never calls Siril/GraXpert/SPCC. It does still call
+`scan_session()`, which extracts any zip deliveries into
+`_pipeline/_extracted_zips/` (a real, if incidental, filesystem write --
+`classify_tree()` is the side-effect-free alternative when that matters,
+e.g. for preflight.py's own checks).
 """
 
 from __future__ import annotations
@@ -50,6 +53,17 @@ from astro_pipeline.calibration import (  # noqa: E402
 )
 from astro_pipeline.ingest import CALIBRATION_WARNING_RES, IngestReport, scan_session, warning_telescope  # noqa: E402
 from astro_pipeline.calibration_policy import infer_calibration_mode, infer_flat_policy  # noqa: E402
+from astro_pipeline import preflight  # noqa: E402
+from astro_pipeline.background_extraction import find_graxpert  # noqa: E402
+from astro_pipeline.color_calibration import (  # noqa: E402
+    UnknownInstrumentError,
+    resolve_instrument_profile,
+    resolve_osc_instrument_profile,
+)
+from astro_pipeline.filter_constants import OSC_FILTER, RGB_FILTERS  # noqa: E402
+from astro_pipeline.siril_driver import find_siril_cli, get_version  # noqa: E402
+from astro_pipeline.solving import find_astap_cli  # noqa: E402
+from astro_pipeline.star_removal import find_starnet  # noqa: E402
 
 # The three fixed templates IngestReport.missing_calibration_warnings()
 # emits today (ingest.py, CALIBRATION_WARNING_RES -- moved there from this
@@ -249,6 +263,70 @@ def flat_identity_preview(frames: list) -> str:
     return f"{len(frames)} frames ({copies} copies, {collisions} collisions)"
 
 
+def prerequisites_summary(report: IngestReport) -> list[str]:
+    """Informational (never blocking) status lines: which external tools
+    are actually found on this machine, Siril's version against the
+    minimum, and -- per telescope this scan found R/G/B or Color data
+    for -- whether an SPCC colour-calibration profile is registered.
+
+    This calls the real find_*()/get_version() functions (unlike the rest
+    of this module, which never touches Siril/GraXpert/SPCC) -- it is the
+    one place in the interview that actually looks for the tools, so a
+    human sees "GraXpert: not found" before a multi-hour run gets there.
+    Real preflight enforcement (the exit-2 blocking check) lives in
+    preflight.py; this is its read-only, informational cousin.
+    """
+    lines = ["Prerequisites:"]
+
+    for label, finder in (
+        ("Siril", find_siril_cli),
+        ("ASTAP", find_astap_cli),
+        ("GraXpert", find_graxpert),
+        ("StarNet2", find_starnet),
+    ):
+        try:
+            exe = finder()
+            lines.append(f"  {label}: found at {exe}")
+        except FileNotFoundError:
+            lines.append(f"  {label}: NOT FOUND")
+
+    try:
+        siril_cli = find_siril_cli()
+        version = get_version(siril_cli, timeout=30)
+        version_str = ".".join(map(str, version))
+        if version < preflight.MIN_SIRIL_VERSION:
+            min_str = ".".join(map(str, preflight.MIN_SIRIL_VERSION))
+            lines.append(f"  Siril version: {version_str} -- older than the required {min_str}+")
+        else:
+            lines.append(f"  Siril version: {version_str} (OK)")
+    except FileNotFoundError:
+        pass  # already reported as NOT FOUND above
+    except Exception as exc:
+        lines.append(f"  Siril version: could not determine ({exc})")
+
+    groups = report.instrument_groups()
+    telescopes_seen = sorted({t for (t, _tgt, _f, _b) in groups})
+    for telescope in telescopes_seen:
+        filters_here = {f for (t, _tgt, f, _b) in groups if t == telescope}
+        statuses = []
+        if filters_here & set(RGB_FILTERS):
+            try:
+                resolve_instrument_profile(telescope)
+                statuses.append("mono SPCC profile OK")
+            except UnknownInstrumentError:
+                statuses.append("NO mono SPCC profile registered")
+        if OSC_FILTER in filters_here:
+            try:
+                resolve_osc_instrument_profile(telescope)
+                statuses.append("OSC SPCC profile OK")
+            except UnknownInstrumentError:
+                statuses.append("NO OSC SPCC profile registered")
+        if statuses:
+            lines.append(f"  {telescope}: {'; '.join(statuses)}")
+
+    return lines
+
+
 def session_summary(report: IngestReport) -> dict:
     """Real counts for the interview's "what was found" line -- no
     hardcoded target/telescope/binning assumed, so this generalizes to
@@ -263,9 +341,21 @@ def session_summary(report: IngestReport) -> dict:
     }
 
 
-def render(project_dir: Path, report: IngestReport, flat_policy_override: FlatPolicy | None = None) -> str:
+def render(
+    project_dir: Path,
+    report: IngestReport,
+    flat_policy_override: FlatPolicy | None = None,
+    prerequisites: list[str] | None = None,
+) -> str:
+    """`prerequisites` is pre-computed (via prerequisites_summary()) and
+    passed in rather than computed here, deliberately -- this function
+    must stay callable without touching any real external tool, since
+    most of this module's own tests do exactly that."""
     summary = session_summary(report)
     lines = [f"=== {project_dir.name} ==="]
+    if prerequisites:
+        lines.extend(prerequisites)
+        lines.append("")
     lines.append(f"Telescopes found: {', '.join(summary['telescopes']) or '(none)'}")
     lines.append(f"Targets found:    {', '.join(summary['targets']) or '(none)'}")
     lines.append(f"Binnings found:   {', '.join(str(b) for b in summary['binnings']) or '(none)'}")
@@ -360,7 +450,8 @@ def main(argv: list[str]) -> int:
     project_dir = Path(args.project_dir)
     report = scan_session(project_dir, calibration_header_fallback=args.calibration_header_fallback)
     flat_policy_override = FlatPolicy(args.flat_policy) if args.flat_policy else None
-    print(render(project_dir, report, flat_policy_override))
+    prerequisites = prerequisites_summary(report)
+    print(render(project_dir, report, flat_policy_override, prerequisites))
     return 0
 
 

@@ -16,6 +16,7 @@ from interview import (  # noqa: E402
     dark_scaling_notes,
     dedupe_calibration_warnings,
     flat_identity_preview,
+    prerequisites_summary,
     render,
     session_summary,
     unrecognized_summary,
@@ -347,3 +348,99 @@ def test_render_real_ic1396_includes_unrecognized_section() -> None:
     report = scan_session(IC1396_PROJECT_DIR)
     text = render(IC1396_PROJECT_DIR, report)
     assert "Unrecognized frames" in text
+
+
+# --- Step 3 (publish-readiness plan): prerequisites_summary() -- an
+# informational (never blocking) tool/version/SPCC-profile status, real
+# preflight enforcement lives in preflight.py. ------------------------------
+
+
+class _FakeGroupsReport:
+    def __init__(self, groups: dict) -> None:
+        self._groups = groups
+
+    def instrument_groups(self):
+        return self._groups
+
+
+def test_prerequisites_summary_reports_found_and_missing_tools(monkeypatch) -> None:
+    import interview as interview_module
+
+    monkeypatch.setattr(interview_module, "find_siril_cli", lambda: Path("C:/fake/siril-cli.exe"))
+    monkeypatch.setattr(interview_module, "find_astap_cli", lambda: (_ for _ in ()).throw(FileNotFoundError("nope")))
+    monkeypatch.setattr(interview_module, "find_graxpert", lambda: Path("C:/fake/GraXpert.exe"))
+    monkeypatch.setattr(interview_module, "find_starnet", lambda: (_ for _ in ()).throw(FileNotFoundError("nope")))
+    monkeypatch.setattr(interview_module, "get_version", lambda exe, timeout=None: (1, 4, 4))
+
+    lines = prerequisites_summary(_FakeGroupsReport({}))
+    text = "\n".join(lines)
+    assert "Siril: found at C:\\fake\\siril-cli.exe" in text
+    assert "ASTAP: NOT FOUND" in text
+    assert "GraXpert: found at C:\\fake\\GraXpert.exe" in text
+    assert "StarNet2: NOT FOUND" in text
+    assert "Siril version: 1.4.4 (OK)" in text
+
+
+def test_prerequisites_summary_flags_old_siril_version(monkeypatch) -> None:
+    import interview as interview_module
+
+    monkeypatch.setattr(interview_module, "find_siril_cli", lambda: Path("C:/fake/siril-cli.exe"))
+    monkeypatch.setattr(interview_module, "find_astap_cli", lambda: Path("C:/fake/astap_cli.exe"))
+    monkeypatch.setattr(interview_module, "find_graxpert", lambda: Path("C:/fake/GraXpert.exe"))
+    monkeypatch.setattr(interview_module, "find_starnet", lambda: Path("C:/fake/starnet2.exe"))
+    monkeypatch.setattr(interview_module, "get_version", lambda exe, timeout=None: (1, 4, 3))
+
+    lines = prerequisites_summary(_FakeGroupsReport({}))
+    text = "\n".join(lines)
+    assert "1.4.3" in text
+    assert "older than" in text
+
+
+def test_prerequisites_summary_reports_missing_mono_profile_only_for_telescopes_with_rgb_data(monkeypatch) -> None:
+    import interview as interview_module
+
+    monkeypatch.setattr(interview_module, "find_siril_cli", lambda: Path("C:/fake/siril-cli.exe"))
+    monkeypatch.setattr(interview_module, "find_astap_cli", lambda: Path("C:/fake/astap_cli.exe"))
+    monkeypatch.setattr(interview_module, "find_graxpert", lambda: Path("C:/fake/GraXpert.exe"))
+    monkeypatch.setattr(interview_module, "find_starnet", lambda: Path("C:/fake/starnet2.exe"))
+    monkeypatch.setattr(interview_module, "get_version", lambda exe, timeout=None: (1, 4, 4))
+
+    groups = {
+        ("T21", "M51", "Luminance", 1): [],
+        ("T99", "M51", "Red", 2): [],
+        ("T99", "M51", "Green", 2): [],
+        ("T99", "M51", "Blue", 2): [],
+    }
+    lines = prerequisites_summary(_FakeGroupsReport(groups))
+    text = "\n".join(lines)
+    assert "T99: NO mono SPCC profile registered" in text
+    # T21 has no R/G/B/Color data (Luminance only) -- must not appear at all.
+    assert "T21:" not in text
+
+
+def test_render_includes_prerequisites_section_only_when_provided() -> None:
+    class _EmptyReport:
+        lights = []
+        unrecognized = []
+
+        def instrument_groups(self):
+            return {}
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {}
+
+        def flat_index(self):
+            return {}
+
+        def missing_calibration_warnings(self):
+            return []
+
+    text_without = render(Path("/fake/project"), _EmptyReport())
+    assert "Prerequisites:" not in text_without
+
+    text_with = render(Path("/fake/project"), _EmptyReport(), prerequisites=["Prerequisites:", "  Siril: found at fake.exe"])
+    assert "Prerequisites:" in text_with
+    assert "Siril: found at fake.exe" in text_with
