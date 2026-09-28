@@ -2,7 +2,6 @@
 
 Practical notes for choosing calibration inputs per telescope. Written after
 tracing visible vertical banding in an M51/T24 render back to its cause.
-Revisit when the multi-instrument path is built.
 
 ## Background: why iTelescope data bands
 
@@ -77,28 +76,30 @@ Rough guidance:
 
 | telescope | bias | darks | flats |
 |---|---|---|---|
-| T24 | 5 per binning | 5 per binning (300s) | **none** — never downloadable, and the subscription has lapsed |
+| T24 | 5 per binning | 5 per binning (300s) | **none** — not offered for this telescope/delivery |
 | T21 | 82 per binning | 25 per binning (900s) | 330 raw sky flats + pre-built masters |
-| T20 (M42) | 50 (BIN1) / 49 (BIN2, +1 truncated) | 10 (BIN1, 180s) + 10 (BIN2, 180s) + 10 (BIN2, 300s) | 70 raw (10 each L/R/G/B/Ha/SII, 9+1 truncated OIII) — **~21 months older than the lights** (real dust/vignetting-drift risk, see `plan-flats-v4.md` §5) |
+| T20 (M42) | 50 (BIN1) / 49 (BIN2, +1 truncated) | 10 (BIN1, 180s) + 10 (BIN2, 180s) + 10 (BIN2, 300s) | 70 raw (10 each L/R/G/B/Ha/SII, 9+1 truncated OIII) — **~21 months older than the lights** (real dust/vignetting-drift risk) |
 | T68 (IC 1396) | 48 (BIN1) | 50 (BIN1, 240s) | 88 raw, all Color/BIN1 — real `DATE-OBS=1970` (camera clock unset) on the calibration frames |
-| T05 (M31) | 15 (BIN1) | 16 (BIN1, 180s, **−15°C** — real, unfixed temperature mismatch vs the lights' −10°C, G15) | 120 raw (40 each R/G/B) — the freshest of the three, 19 days old |
+| T05 (M31) | 15 (BIN1) | 16 (BIN1, 180s, **−15°C** — real, unfixed temperature mismatch vs the lights' −10°C) | 120 raw (40 each R/G/B) — the freshest of the three, 19 days old |
 
-None of T20/T68/T05's calibration frames are recognised by FILENAME
-today (`plan-flats-v4.md`'s own Step 4) — no telescope token anywhere in
-their path. `plan-flats-v4.md` (Steps 0–8, shipped 2026-09-24) added
-opt-in, header-based recognition (`--calibration-header-fallback`) that
-makes these real counts visible in `calibration_index()`/`flat_index()`,
-but deliberately does NOT flip any of these three telescopes off
-`CalibrationMode.PRECALIBRATED` by default (Decision Q2) and does NOT
-reprocess any of their real delivered images (Decision Q9) — recognition
-and reprocessing are two separate decisions, and only the first has
-shipped. The per-target local-flats-vs-iTelescope measurement (whether
-reprocessing any of these three with local flats would actually help) is
-the deliberate next step, not yet done — see `docs/ROADMAP.md` §4.1.
+None of T20/T68/T05's calibration frames are recognised by FILENAME —
+no telescope token anywhere in their path. Opt-in, header-based recognition
+(`--calibration-header-fallback`) makes these real counts visible in
+`calibration_index()`/`flat_index()`, but deliberately does NOT flip any of
+these three telescopes off `CalibrationMode.PRECALIBRATED` by default, and
+does NOT reprocess any of their real delivered images — recognition and
+reprocessing are two separate decisions, and only the first has shipped.
+The per-target local-flats-vs-iTelescope measurement (whether reprocessing
+any of these three with local flats would actually help) is a deliberate
+next step, not yet done: build RAW_LOCAL and PRECALIBRATED masters for the
+same data and compare masked background uniformity / dust-residual
+metrics, per target rather than one shared verdict, since the age/quality
+risk above differs enough between T20/T68/T05 that a blind "reprocess all
+three" call isn't warranted.
 
-So T24 is the worst case on every axis and T21 should calibrate visibly
-cleaner. When the multi-instrument path lands, that difference is worth
-measuring rather than assuming.
+So T24 is the worst case on every axis and T21 calibrates visibly cleaner.
+That gap is worth measuring on any newly-added multi-telescope target
+rather than assumed.
 
 ## What was tried and rejected
 
@@ -113,5 +114,5 @@ measuring rather than assuming.
 - More aggressive stacking rejection for datasets with known column defects
   — with dithering, defects should be rejectable, and 13 subs with
   winsorized sigma 3/3 evidently is not enough to fully remove them.
-- Whether T21's much larger calibration sets measurably reduce banding, once
-  that data is processed.
+- Whether T21's much larger calibration sets measurably reduce banding
+  compared to T24's, on a real side-by-side render.

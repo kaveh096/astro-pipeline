@@ -29,7 +29,8 @@ that PCC is gone.)
 
 ## Finding your chunk
 
-`astropy_healpix` is already a dependency:
+`astropy_healpix` isn't a direct dependency of this project, but it comes
+in transitively via `reproject`, so it's already available in the venv:
 
 ```python
 from astropy_healpix import HEALPix
@@ -64,12 +65,14 @@ setting `~/.local/share/siril/gaia_photometric.dat` is a folder that
 Siril iterates, not a file. Getting this wrong produces
 "directory iterator cannot open directory".
 
-```
-curl -L -o chunk10.dat.bz2 \
-  "https://zenodo.org/records/14738271/files/siril_cat1_healpix8_xpsamp_10.dat.bz2?download=1"
-bunzip2 chunk10.dat.bz2
-mkdir -p "%LOCALAPPDATA%/siril/gaia_photometric.dat"
-mv chunk10.dat "%LOCALAPPDATA%/siril/gaia_photometric.dat/siril_cat1_healpix8_xpsamp_10.dat"
+PowerShell:
+
+```powershell
+Invoke-WebRequest "https://zenodo.org/records/14738271/files/siril_cat1_healpix8_xpsamp_10.dat.bz2?download=1" -OutFile chunk10.dat.bz2
+# bunzip2 isn't a Windows builtin -- 7-Zip, WSL, or Python's bz2 module can decompress it:
+.venv\Scripts\python.exe -c "import bz2,shutil; shutil.copyfileobj(bz2.open('chunk10.dat.bz2'), open('chunk10.dat','wb'))"
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\siril\gaia_photometric.dat"
+Move-Item chunk10.dat "$env:LOCALAPPDATA\siril\gaia_photometric.dat\siril_cat1_healpix8_xpsamp_10.dat"
 ```
 
 Then point Siril at it (persists in config, so this is one-time):
@@ -78,9 +81,10 @@ Then point Siril at it (persists in config, so this is one-time):
 set core.catalogue_gaia_photo=C:/Users/<you>/AppData/Local/siril/gaia_photometric.dat
 ```
 
-Chunk 10 is installed on this machine and Siril reads it — the log line
-`Getting stars from local catalogue Gaia DR3 xp_sampled for SPCC`
-confirms it, so the install procedure above is verified working.
+Once installed and pointed at, Siril's log confirms it's actually being
+read with the line
+`Getting stars from local catalogue Gaia DR3 xp_sampled for SPCC` (verified
+against a real chunk-10/M51 run).
 
 ## Sensor and filter definitions
 
@@ -89,9 +93,9 @@ response. Those live in a separate repository that Siril syncs from its
 GUI (`gui.use_spcc_repository`); it is **not** fetched in headless CLI
 use. Clone it manually:
 
-```
-git clone --depth 1 https://gitlab.com/free-astro/siril-spcc-database.git \
-  "%LOCALAPPDATA%/siril/siril-spcc-database"
+```powershell
+git clone --depth 1 https://gitlab.com/free-astro/siril-spcc-database.git `
+  "$env:LOCALAPPDATA\siril\siril-spcc-database"
 ```
 
 Names must match the JSON `name` field exactly, and contain spaces, so
@@ -103,8 +107,9 @@ spcc -catalog=localgaia "-monosensor=KAF16803" "-rfilter=Astrodon Red (E series)
      "-gfilter=Astrodon Green (E series)" "-bfilter=Astrodon Blue (E / I series)"
 ```
 
-These are the `InstrumentProfile` entries in `background_color.py`
-(`INSTRUMENT_PROFILES`, keyed by telescope). Add a profile there for each
+These are the `InstrumentProfile` entries in `color_calibration.py`
+(`INSTRUMENT_PROFILES` for mono sensors, `OSC_INSTRUMENT_PROFILES` for
+one-shot-colour, both keyed by telescope). Add a profile there for each
 new telescope/sensor combination.
 
 ## Status: works, requires Siril >= 1.4.4
