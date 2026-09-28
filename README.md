@@ -56,12 +56,11 @@ cd astro-pipeline
   `%LOCALAPPDATA%\Programs\GraXpert\GraXpert.exe`. Has a real `-cli` flag;
   GPU acceleration needs a modern DirectML-capable GPU — older/integrated
   GPUs (e.g. pre-2020 Intel iGPUs) may crash or hang under GraXpert's GPU
-  mode. CPU-only is slower but works everywhere; the post-processing
-  denoise step's `--denoise-gpu`/off-by-default flag lets you choose, but
-  the main pipeline's background-extraction step doesn't have a CPU
-  override yet (see Known limitations).
-- **StarNet2 CLI 2.6.0** (optional, only if you want star removal) — download
-  from [starnetastro.com](https://www.starnetastro.com), extract so
+  mode. CPU-only is slower but works everywhere; see "Configuring tool
+  locations" below for how to force CPU.
+- **StarNet2 CLI 2.6.0+** (optional, only if you want star removal) —
+  any installed version is found automatically; download from
+  [starnetastro.com](https://www.starnetastro.com), extract so
   `starnet2.exe` ends up at
   `%LOCALAPPDATA%\Programs\StarNet2\starnet2_win_2.6.0-0231_ORT_x64_cli\starnet2.exe`.
   Its license prohibits sharing full-scale raw input images that demonstrate
@@ -120,6 +119,30 @@ instead.) Either makes a directory junction, not a copy — no admin rights
 needed on Windows, and it stays in sync with `skill/` automatically. A plain
 `xcopy skill .claude\skills\astro-pipeline-lrgb /E /I` also works if you'd
 rather have an independent copy.
+
+## Configuring tool locations
+
+Siril, ASTAP, GraXpert and StarNet2 are found in this order: an
+`ASTRO_PIPELINE_*` environment variable naming the exact executable (an
+error if set but the file doesn't exist -- a wrong override should say so,
+not silently fall through), then a list of known default install
+locations, then your `PATH`. Set one of these if a tool is installed
+somewhere other than its default location:
+
+| Tool | Env var |
+|---|---|
+| Siril | `ASTRO_PIPELINE_SIRIL_CLI` |
+| ASTAP | `ASTRO_PIPELINE_ASTAP_CLI` |
+| GraXpert | `ASTRO_PIPELINE_GRAXPERT_EXE` |
+| StarNet2 | `ASTRO_PIPELINE_STARNET_EXE` |
+
+Each should point at the executable itself, e.g. in PowerShell:
+`$env:ASTRO_PIPELINE_SIRIL_CLI = "D:\Tools\Siril\bin\siril-cli.exe"`.
+
+GraXpert's background-extraction step (used by the main LRGB/narrowband
+pipeline) defaults to GPU acceleration. Set `ASTRO_PIPELINE_GRAXPERT_GPU=0`
+to force CPU -- useful on older/integrated GPUs that crash or hang under
+GraXpert's GPU mode.
 
 ## Scope and known limitations
 

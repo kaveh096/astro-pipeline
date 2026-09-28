@@ -129,7 +129,10 @@ def test_run_star_removal_raises_when_files_missing_mocked(tmp_path: Path, monke
 
 def test_find_starnet_raises_clear_error_when_not_found(monkeypatch) -> None:
     import astro_pipeline.star_removal as star_removal_module
+    import astro_pipeline.tool_locator as tool_locator_module
 
+    monkeypatch.delenv("ASTRO_PIPELINE_STARNET_EXE", raising=False)
     monkeypatch.setattr(star_removal_module, "DEFAULT_STARNET_CANDIDATES", [Path("Z:/does/not/exist.exe")])
+    monkeypatch.setattr(tool_locator_module.shutil, "which", lambda name: None)
     with pytest.raises(FileNotFoundError, match="starnet2.exe"):
         star_removal_module.find_starnet()

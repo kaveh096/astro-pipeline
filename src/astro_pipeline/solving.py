@@ -34,6 +34,8 @@ from pathlib import Path
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 
+from astro_pipeline.tool_locator import resolve_tool
+
 DEFAULT_ASTAP_CLI_CANDIDATES = [
     Path(r"C:\Program Files\astap\astap_cli.exe"),
 ]
@@ -58,12 +60,12 @@ class SolveResult:
 
 
 def find_astap_cli() -> Path:
-    for candidate in DEFAULT_ASTAP_CLI_CANDIDATES:
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        f"astap_cli.exe not found in known locations: "
-        f"{[str(c) for c in DEFAULT_ASTAP_CLI_CANDIDATES]}"
+    return resolve_tool(
+        display_name="astap_cli.exe",
+        env_var="ASTRO_PIPELINE_ASTAP_CLI",
+        candidates=DEFAULT_ASTAP_CLI_CANDIDATES,
+        which_names=["astap_cli.exe", "astap_cli"],
+        install_hint="Install ASTAP (with a star database) from https://www.hnsky.org/astap.htm.",
     )
 
 

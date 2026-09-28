@@ -21,6 +21,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from astro_pipeline.tool_locator import resolve_tool
+
 DEFAULT_SIRIL_CLI_CANDIDATES = [
     Path(r"C:\Program Files\SiriL\bin\siril-cli.exe"),
 ]
@@ -53,12 +55,12 @@ class SirilResult:
 
 
 def find_siril_cli() -> Path:
-    for candidate in DEFAULT_SIRIL_CLI_CANDIDATES:
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        "siril-cli.exe not found in known locations: "
-        f"{[str(c) for c in DEFAULT_SIRIL_CLI_CANDIDATES]}"
+    return resolve_tool(
+        display_name="siril-cli.exe",
+        env_var="ASTRO_PIPELINE_SIRIL_CLI",
+        candidates=DEFAULT_SIRIL_CLI_CANDIDATES,
+        which_names=["siril-cli.exe", "siril-cli"],
+        install_hint="Install Siril 1.4.4+ from https://siril.org.",
     )
 
 

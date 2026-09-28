@@ -63,6 +63,8 @@ without it.
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,15 +72,27 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 
-DEFAULT_STARNET_CANDIDATES = [
-    Path.home()
-    / "AppData"
-    / "Local"
-    / "Programs"
-    / "StarNet2"
-    / "starnet2_win_2.6.0-0231_ORT_x64_cli"
-    / "starnet2.exe",
-]
+from astro_pipeline.tool_locator import resolve_tool
+
+_LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+
+
+def _starnet_candidates() -> list[Path]:
+    """StarNet2 CLI releases each extract into their own version-named
+    folder (e.g. "starnet2_win_2.6.0-0231_ORT_x64_cli") -- glob for any
+    installed version rather than pinning one, newest first by the
+    version number embedded in the folder name."""
+    found = list((_LOCALAPPDATA / "Programs" / "StarNet2").glob("*/starnet2.exe"))
+
+    def version_key(p: Path) -> tuple[int, int, int]:
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)", p.parent.name)
+        return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)  # type: ignore[return-value]
+
+    found.sort(key=version_key, reverse=True)
+    return found
+
+
+DEFAULT_STARNET_CANDIDATES = _starnet_candidates()
 
 
 class StarNetError(RuntimeError):
@@ -92,11 +106,12 @@ class StarRemovalResult:
 
 
 def find_starnet() -> Path:
-    for candidate in DEFAULT_STARNET_CANDIDATES:
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        f"starnet2.exe not found in known locations: {[str(c) for c in DEFAULT_STARNET_CANDIDATES]}"
+    return resolve_tool(
+        display_name="starnet2.exe",
+        env_var="ASTRO_PIPELINE_STARNET_EXE",
+        candidates=DEFAULT_STARNET_CANDIDATES,
+        which_names=["starnet2.exe"],
+        install_hint="Download StarNet2 CLI from https://www.starnetastro.com.",
     )
 
 

@@ -21,14 +21,20 @@ check.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
 
+from astro_pipeline.tool_locator import resolve_tool
+
+_LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+
 DEFAULT_GRAXPERT_CANDIDATES = [
-    Path.home() / "AppData" / "Local" / "Programs" / "GraXpert" / "GraXpert.exe",
+    _LOCALAPPDATA / "Programs" / "GraXpert" / "GraXpert.exe",
+    Path(r"C:\Program Files\GraXpert\GraXpert.exe"),
 ]
 
 
@@ -37,11 +43,12 @@ class BackgroundExtractionError(RuntimeError):
 
 
 def find_graxpert() -> Path:
-    for candidate in DEFAULT_GRAXPERT_CANDIDATES:
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        f"GraXpert.exe not found in known locations: {[str(c) for c in DEFAULT_GRAXPERT_CANDIDATES]}"
+    return resolve_tool(
+        display_name="GraXpert.exe",
+        env_var="ASTRO_PIPELINE_GRAXPERT_EXE",
+        candidates=DEFAULT_GRAXPERT_CANDIDATES,
+        which_names=["GraXpert.exe", "GraXpert"],
+        install_hint="Install GraXpert from https://graxpert.com.",
     )
 
 
@@ -105,8 +112,15 @@ def run_graxpert_background_extraction(
     """Run GraXpert's AI background extraction. GraXpert always appends
     '.fits' to whatever -output value is given -- output_stem must be a
     bare stem (no extension); the real output path is '<output_stem>.fits'.
+
+    `ASTRO_PIPELINE_GRAXPERT_GPU=0` forces CPU even when the caller didn't
+    pass `gpu=False` explicitly -- for older/integrated GPUs that crash or
+    hang under GraXpert's GPU mode. Only ever turns GPU off, never on: an
+    explicit `gpu=False` from the caller is never overridden.
     """
     fits_path = Path(fits_path)
+    if gpu and os.environ.get("ASTRO_PIPELINE_GRAXPERT_GPU") == "0":
+        gpu = False
     exe = graxpert_exe or find_graxpert()
     output_dir = fits_path.parent
     output_path = output_dir / f"{output_stem}.fits"
