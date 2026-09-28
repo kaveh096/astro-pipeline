@@ -5,10 +5,10 @@ An agentic solution to an astrophotography processing pipeline using free CLI an
 Automated, checkpointed processing pipeline for LRGB/narrowband astrophotography
 data rented from iTelescope.net: calibration through stacking, pixel-grid
 reconciliation across mixed binning/instruments, background extraction, color
-calibration, stretch, LRGB/narrowband composition, and a 16-bit handoff to
-Photoshop for final creative work.
+calibration, stretch, LRGB/narrowband composition, and a 16-bit TIFF export
+for final creative work in the image editor of your choice.
 
-Design goal: replace DeepSkyStacker + all-manual Photoshop stretching with a
+Design goal: replace DeepSkyStacker + all-manual stretching with a
 scriptable, resumable pipeline that pauses at real checkpoints instead of
 running as a single black box. A Claude Code skill (`skill/`) wraps the core
 CLI to interview the user and drive it stage-by-stage.
@@ -17,39 +17,49 @@ CLI to interview the user and drive it stage-by-stage.
 
 Feature-complete for LRGB/RGB-only/OSC composites, pure narrowband (SHO/HOO),
 narrowband-boost (HaRGB), and optional post-processing (denoise, star
-removal, black-point export) — see `docs/ROADMAP.md` for what has shipped,
-what's deliberately deferred, and the project's binding design decisions.
+removal, black-point export). See "Scope and known limitations" below for
+what this does and doesn't cover.
 `research/2026-07-27-tooling-research.md` has the original tool survey and
-design plan, kept for historical context.
+design plan (superseded in places — see the note at its top), kept for
+historical context.
 
 ## Toolchain
 
 - [Siril](https://siril.org) 1.4.4+ — calibration, registration, stacking,
-  plate solving, drizzle, GHT stretch, SPCC, `rgbcomp`, `pm` (pixelmath)
+  GHT stretch, SPCC, `rgbcomp`, `pm` (pixelmath)
+- [ASTAP](https://www.hnsky.org/astap.htm) — plate solving (required; the
+  only solver this pipeline calls)
 - [GraXpert](https://graxpert.com) — AI background extraction, AI denoise
-- [ASTAP](https://www.hnsky.org/astap.htm) — plate-solve fallback
 - [StarNet2](https://www.starnetastro.com) — AI star removal / star-layer
   separation (optional post-processing step)
-- Python 3.11/3.12: astropy, reproject, photutils, tifffile
-- Adobe Photoshop (optional) — the pipeline's own job ends at a 16-bit TIFF;
-  Photoshop is only needed for the final manual creative pass
+- Python 3.11/3.12: astropy, reproject, photutils, tifffile, pillow
+- Any image editor that opens a 16-bit TIFF (optional) — the pipeline's own
+  job ends at the TIFF export; there is no automation of the creative pass
 
 ## Setup (Windows)
 
-This pipeline is Windows-only today (Siril CLI paths, Photoshop COM
-automation). External tools install side-by-side with existing software,
+This pipeline is Windows-only today (Siril CLI paths, `.venv\Scripts\`
+convention). External tools install side-by-side with existing software,
 nothing removed or overwritten:
+
+```
+git clone https://github.com/kaveh096/astro-pipeline.git
+cd astro-pipeline
+```
 
 - **Siril 1.4.4+** — installs to `C:\Program Files\SiriL\bin\siril-cli.exe`.
   **1.4.4 or newer is required**: SPCC crashes the process outright on 1.4.3.
+- **ASTAP + a star database** (D20 is enough for most fields) — installs to
+  `C:\Program Files\astap\astap_cli.exe`. **Required**: this is the only
+  plate solver the pipeline calls (Siril's own solver isn't used).
 - **GraXpert 3.0.2+** — installs to
   `%LOCALAPPDATA%\Programs\GraXpert\GraXpert.exe`. Has a real `-cli` flag;
-  GPU acceleration (`-gpu true`) needs a modern DirectML-capable GPU — CPU-only
-  works everywhere, just slower (see `docs/ROADMAP.md` §2.5 if denoise hangs
-  or crashes on an older/integrated GPU).
-- **ASTAP + a star database** (D20 is enough for most fields) — installs to
-  `C:\Program Files\astap\astap_cli.exe`. Only needed as a plate-solve
-  fallback; Siril's own solver is tried first.
+  GPU acceleration needs a modern DirectML-capable GPU — older/integrated
+  GPUs (e.g. pre-2020 Intel iGPUs) may crash or hang under GraXpert's GPU
+  mode. CPU-only is slower but works everywhere; the post-processing
+  denoise step's `--denoise-gpu`/off-by-default flag lets you choose, but
+  the main pipeline's background-extraction step doesn't have a CPU
+  override yet (see Known limitations).
 - **StarNet2 CLI 2.6.0** (optional, only if you want star removal) — download
   from [starnetastro.com](https://www.starnetastro.com), extract so
   `starnet2.exe` ends up at
@@ -57,25 +67,24 @@ nothing removed or overwritten:
   Its license prohibits sharing full-scale raw input images that demonstrate
   the software's performance — doesn't affect normal use, just don't publish
   StarNet2 test/benchmark inputs.
-- **Adobe Photoshop** (optional, already installed if you have it) — any
-  version with COM automation (`Photoshop.Application`); only used for the
-  manual creative pass after the pipeline hands off a TIFF.
+- An **image editor that opens 16-bit TIFF** (optional, e.g. Photoshop, GIMP,
+  Affinity Photo) — only for the manual creative pass after the pipeline
+  hands off a TIFF; nothing in this repo automates or talks to it.
 - A **Gaia DR3 catalogue** for SPCC color calibration — see
   [Colour calibration: catalogues, and the per-project sky
   region](docs/colour-calibration-catalogues.md) for which one to download
   and how to install it into Siril.
 
-Python: this project targets 3.11–3.12, installed side-by-side with the
-system Python via the official installer (not the system default, no PATH
-changes):
+Install **Python 3.12** specifically (3.11 also works; 3.13+ is not
+supported yet — `py -3.12` below assumes the official installer registered
+it with the `py` launcher, not that it's your system default):
 
 ```
 py -3.12 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e ".[windows,dev]"
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-`[windows]` pulls in `pywin32`, needed for the Photoshop COM handoff.
-`[dev]` pulls in `pytest`. Skip either extra if you don't need it.
+`[dev]` pulls in `pytest`; skip it if you don't plan to run the tests.
 
 ## Using the skill in Claude Code
 
@@ -98,17 +107,114 @@ extra setup.
 **To have Claude Code recognize requests like "process \<target\>" or "denoise
 this TIFF" automatically**, without naming the file, register it as a
 project-scoped skill so Claude Code's own skill-discovery picks it up by its
-`SKILL.md` description:
+`SKILL.md` description. In `cmd.exe`:
 
 ```
 mkdir .claude\skills
 mklink /J .claude\skills\astro-pipeline-lrgb skill
 ```
 
-(`mklink /J` makes a directory junction, not a copy — no admin rights needed
-on Windows, and it stays in sync with `skill/` automatically. A plain
+(`mklink` is a `cmd.exe` builtin, not a PowerShell one. In PowerShell, use
+`New-Item -ItemType Junction -Path .claude\skills\astro-pipeline-lrgb -Target skill`
+instead.) Either makes a directory junction, not a copy — no admin rights
+needed on Windows, and it stays in sync with `skill/` automatically. A plain
 `xcopy skill .claude\skills\astro-pipeline-lrgb /E /I` also works if you'd
-rather have an independent copy.)
+rather have an independent copy.
+
+## Scope and known limitations
+
+- **iTelescope.net data only.** Light frames must match iTelescope's own
+  filename convention (`raw-T24-<user>-<target>-YYYYMMDD-HHMMSS-<filter>-
+  BIN<n>-<E|W>-<exptime>-<seq>.fits`, case-insensitive; `raw`/`calibrated`/
+  `jpeg` provenance). Anything else is reported as an unrecognized frame,
+  not processed. `.zip` deliveries are auto-extracted and scanned the same
+  way.
+- **Colour calibration (SPCC) only has instrument profiles for a few
+  telescopes** — mono: T24, T73, T59; one-shot-colour: T02. Any other
+  telescope's LRGB/RGB/OSC run will fail at the SPCC step with
+  `UnknownInstrumentError` (after the masters are already built). To add
+  your own telescope, add an `InstrumentProfile`/`OSCInstrumentProfile` to
+  `src/astro_pipeline/color_calibration.py`. Narrowband composites don't use
+  SPCC and aren't affected.
+- **RGB/colour discovery is scoped to one telescope per run** — the
+  `--telescope` you pass. Combining RGB data captured across multiple
+  telescopes for one target isn't supported.
+- **OSC (one-shot-colour) cameras with local raw calibration
+  (bias/dark/flat, not iTelescope-precalibrated) aren't supported yet.**
+  Precalibrated OSC lights work fine.
+- **Windows only** — Siril/ASTAP/GraXpert/StarNet2 are all located via
+  fixed Windows install paths, and the skill scripts assume
+  `.venv\Scripts\python.exe`.
+- **Some stages take a long time.** A full master build with GraXpert
+  background extraction, or a CPU-only denoise pass, can run well past the
+  couple of minutes a typical terminal command implies — plan to let a
+  stage run to completion rather than assuming it's hung. ~8 GB of RAM is
+  workable but tight for full-resolution images.
+- Input: FITS (`.fit`/`.fits`/`.fts`), zip-aware. Output: 16-bit TIFF +
+  PNG preview per composite, written under the project's own `_pipeline/`
+  (see "Project folder layout" below).
+
+## Quick start (without Claude Code)
+
+The pipeline is a standalone CLI; the Claude Code skill is a convenience
+wrapper around it, not a requirement. From a project folder laid out per
+"Project folder layout" below:
+
+```
+.venv\Scripts\python.exe skill\interview.py <project_dir>
+.venv\Scripts\python.exe skill\run_stage.py <project_dir> --telescope T24 --target M51 --ra-hours 13.498 --dec-deg 47.195
+```
+
+`interview.py` scans the folder and reports what it found (telescopes,
+filters, calibration gaps) without writing anything. `run_stage.py` runs
+the LRGB/RGB-only/OSC pipeline (auto-detected from what's present) and
+pauses at each checkpoint. RA/Dec are the target's coordinates in decimal
+hours and decimal degrees — look them up on Simbad or a planetarium app.
+Outputs land in `<project_dir>/_pipeline/final/` (TIFF + PNG preview);
+intermediate checkpoints are in `<project_dir>/_pipeline/checkpoints/`.
+See `skill/SKILL.md` for narrowband, narrowband-boost and post-processing
+(denoise/star-removal/black-point) entry points.
+
+## Project folder layout
+
+Everything for one target lives under a single project folder, alongside
+the raw delivery folders iTelescope gives you:
+
+```
+<Target> - <telescopes> - <date>/
+    Calibrations/              <- raw, from iTelescope (or your own bias/dark/flat)
+    <Lights folder(s)>/        <- raw, from iTelescope (any name; scanned recursively)
+    _pipeline/                 <- generated by this pipeline; never edit by hand
+        final/                 <- TIFF + PNG outputs, per-composite intermediates
+        checkpoints/           <- resumability state
+```
+
+The pipeline only ever writes inside `_pipeline/`; your raw delivery
+folders are never modified. Camera-named bias/dark frames and
+`scope_<filter>_<binning>_skyflat<n>` flats need to sit under a `T<digits>`
+telescope folder for recognition; lights can be anywhere in the tree.
+
+## Design boundaries
+
+- **The pipeline's job ends the moment a 16-bit TIFF exists** — no framing,
+  cropping, or colour-grading of any kind. That stays a manual step in
+  whatever editor you use.
+- **The sharpest telescope (by measured FWHM) owns Luminance**; Luminance
+  is never blended across telescopes.
+- **Colour calibration is SPCC-only** (Siril's Spectrophotometric Colour
+  Calibration, requires Siril 1.4.4+). No alternative colour calibration
+  method is implemented.
+
+## Contributing
+
+Issues and PRs are welcome. Most of the test suite runs against mocked
+data with no external dependencies; a smaller set of real-data tests needs
+your own iTelescope project data — point `tests/local_paths.py` (copy from
+`tests/local_paths.py.example`, gitignored) or the matching
+`ASTRO_PIPELINE_*` environment variables at it, or those tests just skip.
+Code comments occasionally cite an internal planning label (e.g. "Step 3b",
+"Decision Q2", "plan-flats-v4") — these refer to design discussions that
+aren't published; the comment's own text is the part that matters.
 
 ## Notes
 
@@ -118,6 +224,9 @@ rather have an independent copy.)
 - [Calibration frames: when to use bias, darks, and how many is
   enough](docs/calibration-frame-counts.md) — why lights are calibrated
   against darks only, and what to expect per telescope.
+- External tools (Siril, GraXpert, ASTAP, StarNet2) are separately
+  licensed and not bundled with this repo; see each project's own site for
+  its license.
 
 ## Layout
 
@@ -125,6 +234,6 @@ rather have an independent copy.)
 src/astro_pipeline/   Pipeline stage modules (Layer 1, standalone CLI)
 scripts/              Siril .ssf script templates
 skill/                Claude Code skill wrapper (Layer 2)
-docs/                 Design decisions, roadmap, calibration reference notes
+docs/                 Calibration reference notes
 tests/                Tests, run against real sample session fixtures
 ```
