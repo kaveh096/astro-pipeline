@@ -238,6 +238,11 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Claude Code local project config -- e.g. the skill/ junction from
+# README's "Using the skill in Claude Code" section; personal/local,
+# not meant to be committed (a Windows junction isn't portable anyway).
+.claude/
+
 # Personal test-data locations (real paths on your own machine) -- see
 # tests/local_paths.py.example for how to configure these.
 tests/local_paths.py
