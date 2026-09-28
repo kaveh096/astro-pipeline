@@ -598,7 +598,7 @@ def _peek_zipped_lights(zip_path: Path) -> tuple[list[LightFrame], list[tuple[Pa
       which a genuine bare-file light's parent directory can never be)
       and replaces every one of these placeholders with its real
       extracted-file equivalent before returning -- never appends both,
-      which would double-count (see ??1.5's real M51 duplication bug this
+      which would double-count (see §1.5's real M51 duplication bug this
       exact append-instead-of-replace mistake caused elsewhere:
       `_instrument_groups_from` merging two zips' worth of identically-
       named lights into one inflated group);
@@ -683,7 +683,7 @@ def _raw_light_reference(report: IngestReport) -> dict[tuple[str, int], Path]:
     guards against: T68 (IC 1396) shipped a genuinely different camera in
     2023 (NGC 3628, 4944x3284) under the identical INSTRUME string used in
     2021 (6248x4176) -- NAXIS is the only real discriminator (see
-    ingest.py's own module docstring / plan ??2.1) -- never a production
+    ingest.py's own module docstring / plan §2.1) -- never a production
     trigger today since the two deliveries are never co-scanned in one
     `scan_session` call, but this cross-check is what would catch it if
     they ever were."""

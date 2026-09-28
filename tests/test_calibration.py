@@ -99,7 +99,7 @@ def test_stage_precalibrated_lights_debayer_real_t02_produces_3channel(tmp_path:
     """Real T02 Abell 6 and HFG1 calibrated-provenance Color BIN1 lights --
     genuine undemosaiced Bayer-mosaic (RGGB) data, confirmed via a 2x2-phase
     periodicity test and a leftover DeepSkyStacker config independently
-    agreeing on the same pattern (see plan-rgb-only-mode.md ??0). Confirms
+    agreeing on the same pattern (see plan-rgb-only-mode.md §0). Confirms
     the debayer=True path actually demosaics: MEASURED against real Siril
     1.4.4 that plain `convert` alone leaves this 2D (BAYERPAT absent from
     the header, so nothing marks it undemosaiced downstream unless this
@@ -985,7 +985,7 @@ def test_flat_sanity_notes_age_gap_to_lights(tmp_path: Path) -> None:
 @requires_real_session
 def test_flat_sanity_notes_real_t21_luminance() -> None:
     """Real check: T21's own real Luminance flats sit at about 35% of
-    65535 (??2.3) -- inside the heuristic range, no level/saturation
+    65535 (§2.3) -- inside the heuristic range, no level/saturation
     warning expected; a real exposure and date note must still appear."""
     report = scan_session(REAL_SESSION_DIR)
     t21_l_flats = report.flat_index()[("T21", 1, "Luminance")]
@@ -1180,7 +1180,7 @@ def test_select_dark_real_t21_luminance_group() -> None:
 
 
 # --- Step 1b gate (P): Siril run-to-run determinism, T21 Luminance -------
-# (plan-flats-v4.md ??4.0/Step 1b) -- at least 3 independent tmp_path
+# (plan-flats-v4.md §4.0/Step 1b) -- at least 3 independent tmp_path
 # run_calibration() calls for T21's real Luminance BIN1 group, compared
 # pairwise, establish Siril's own run-to-run noise floor for this exact
 # real calibration; then ONE tmp-path run is compared against the real,
@@ -1234,7 +1234,7 @@ def test_t21_luminance_flat_and_calibration_siril_determinism_bound(tmp_path: Pa
                 delta = float(np.max(np.abs(flat_data(a) - flat_data(b))))
                 max_tmp_calibrated_delta = max(max_tmp_calibrated_delta, delta)
 
-    # plan-flats-v4.md ??4.0: "After Step 3b the reference switches to the
+    # plan-flats-v4.md §4.0: "After Step 3b the reference switches to the
     # new recipe's output, recorded in 3b." That switch is event E's own
     # job -- it rebuilds the real M51 pipeline (and this on-disk
     # reference) under the new recipe, and is explicitly out of scope for

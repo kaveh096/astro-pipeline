@@ -593,7 +593,7 @@ def classify_flat_identity(
     flat_frames: list[CalibrationFrame],
     groups: list[FlatBasenameGroup] | None = None,
 ) -> FlatIdentityReport:
-    """G1's own real finding (plan-flats-v4.md ??1.3.5/Step 3a), made
+    """G1's own real finding (plan-flats-v4.md §1.3.5/Step 3a), made
     reportable: classify a matched flat set by CONTENT identity, not just
     name, and report what `stage_flat_frames()` (Step 3b) actually stages.
 
@@ -671,7 +671,7 @@ def flat_sanity_notes(
     """G9 (Step 7, plan-flats-v4.md): warning-only heuristic sanity notes
     on a SAMPLE of RAW flat frames (pre-Siril, native ADU) -- never the
     Siril-normalised master, whose data is a 32-bit float in [0, 1]
-    (verified directly, ??2.3): a "fraction of 65535" check applied to the
+    (verified directly, §2.3): a "fraction of 65535" check applied to the
     MASTER is nonsensical and would fire on every real master including
     T21's correctly-behaved one. Never raises -- these are notes, not
     gates.

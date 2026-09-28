@@ -459,7 +459,7 @@ def test_instrument_groups_merges_users_sharing_telescope_and_binning() -> None:
 
 @pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
 def test_flat_index_real_t21_luminance_unique_basenames_and_hash() -> None:
-    """G1's own real numbers (plan ??1.3.5/??1.5): T21's real Luminance
+    """G1's own real numbers (plan §1.3.5/§1.5): T21's real Luminance
     flat set spans two twilight sessions with 10 colliding generic
     'skyflat<N>' basenames -- 30 matched CalibrationFrames collapse to only
     20 UNIQUE basenames. The existing frame-identity hash is blind to this
@@ -490,7 +490,7 @@ def test_calibration_index_real_m51_snapshot() -> None:
 
 @pytest.mark.skipif(not REAL_SESSION_DIR.exists(), reason="Real sample session not present on this machine")
 def test_instrument_groups_real_m51_post_deletion_counts() -> None:
-    """Pinned against the POST-DELETION tree (plan ??4.0's event), per the
+    """Pinned against the POST-DELETION tree (plan §4.0's event), per the
     plan's own Step 1a text -- T21 L bin1 = 2, T24 L bin1 = 21. The manual
     deletion of the byte-identical duplicate M51 folders
     (Uncalibrated Lights - Jan 2025/, calibrated Lights - T24 - Feb 2025/)
@@ -500,7 +500,7 @@ def test_instrument_groups_real_m51_post_deletion_counts() -> None:
     for the identical, already-documented reason as this file's own
     test_scan_real_multi_telescope_session /
     test_instrument_groups_merges_users_sharing_telescope_and_binning
-    (??1.5: today's tree gives T21=4, T24=42, not 2/21). It turns green
+    (§1.5: today's tree gives T21=4, T24=42, not 2/21). It turns green
     with zero code change the moment the deletion happens."""
     report = scan_session(REAL_SESSION_DIR)
     groups = report.instrument_groups()
@@ -530,7 +530,7 @@ def test_scan_real_abell6_no_calibration_frames_recognized_today() -> None:
 def test_scan_real_abell31_no_calibration_frames_recognized_today() -> None:
     """Abell 31/T59 (Mar 2023), a NEW gate-(D) fixture added by Step 1a:
     PRECALIBRATED, CALSTAT='BDF', no unrecognised calibration frames of any
-    kind (plan ??2.1) -- included for completeness even though it has
+    kind (plan §2.1) -- included for completeness even though it has
     nothing local to recognise."""
     report = scan_session(ABELL31_PROJECT_DIR)
     raw_lights = [f for f in report.lights if f.provenance == "raw"]
@@ -543,7 +543,7 @@ def test_scan_real_abell31_no_calibration_frames_recognized_today() -> None:
 @requires_m42_project
 def test_scan_real_m42_flats_and_bias_dark_unrecognized_today() -> None:
     """M42/T20 (Jan 2022), a NEW gate-(D) fixture added by Step 1a: real
-    raw lights across 7 filters (plan ??2.1's own counts), a real 70-file
+    raw lights across 7 filters (plan §2.1's own counts), a real 70-file
     flat library and real bias/dark -- NONE of the calibration frames are
     recognised today (no 'T20' folder token anywhere in their path; only
     the LIGHT filenames carry a T20 token) -- the real fixture Step 4b's
@@ -617,7 +617,7 @@ def test_classify_tree_replace_not_append_zip_peeked_vs_extracted(tmp_path: Path
     """The dedicated mocked test for the replace-not-append rule (Step
     4a): a zip whose peeked light and extracted light must not both end
     up in report.lights -- exactly the double-count class of bug
-    documented in ??1.5 (two zips of the same lights each contributing a
+    documented in §1.5 (two zips of the same lights each contributing a
     LightFrame, inflating a real group from 21 to 42)."""
     import zipfile
 
@@ -960,7 +960,7 @@ def test_classify_tree_fallback_instrume_mismatch_rejected(tmp_path: Path) -> No
 
 
 def test_classify_tree_fallback_naxis_mismatch_rejected(tmp_path: Path) -> None:
-    """The real T68 2021-vs-2023 case (??2.1): identical INSTRUME string,
+    """The real T68 2021-vs-2023 case (§2.1): identical INSTRUME string,
     genuinely different sensor resolution -- NAXIS is the discriminator."""
     project = _setup_project_with_one_raw_light(tmp_path, instrume="CAM1")
     p = project / "cal" / "bias_wrong_size.fit"
@@ -1066,7 +1066,7 @@ def test_classify_tree_fallback_filename_vs_header_disagreement_refused(tmp_path
 @requires_m42_project
 def test_classify_tree_fallback_real_m42_counts_match_known_numbers() -> None:
     """Real gate (D), flag-on: M42/T20's real bias/dark/flat counts,
-    exactly as plan-flats-v4.md ??2.1 documents (verified directly against
+    exactly as plan-flats-v4.md §2.1 documents (verified directly against
     this real delivery before writing this test): bias 50 (BIN1) + 49
     (BIN2, +1 truncated/unreadable), darks 10 (BIN1, 180s) + 10 (BIN2,
     180s) + 10 (BIN2, 300s), flats 10 each of L/R/G/B/Ha/SII (BIN1 or
@@ -1090,7 +1090,7 @@ def test_classify_tree_fallback_real_m42_counts_match_known_numbers() -> None:
 @requires_ic1396_project
 def test_classify_tree_fallback_real_ic1396_counts_match_known_numbers() -> None:
     """Real gate (D), flag-on: IC 1396/T68's real bias 48, darks 50, flats
-    88 (all Color, BIN1) -- plan ??2.1's own numbers."""
+    88 (all Color, BIN1) -- plan §2.1's own numbers."""
     report = classify_tree(IC1396_PROJECT_DIR, calibration_header_fallback=True)
     cal_index = report.calibration_index()
     assert len(cal_index.get(("T68", "Bias", 1, 0.0), [])) == 48
@@ -1102,7 +1102,7 @@ def test_classify_tree_fallback_real_ic1396_counts_match_known_numbers() -> None
 @requires_m31_project
 def test_classify_tree_fallback_real_m31_counts_match_known_numbers() -> None:
     """Real gate (D), flag-on: M31/T05's real bias 15, darks 16, flats 40
-    each of R/G/B (BIN1) -- plan ??2.1's own numbers. The T5->T05
+    each of R/G/B (BIN1) -- plan §2.1's own numbers. The T5->T05
     ancestor-token normalisation is load-bearing here (the project root is
     literally named "M31 - Andromeda - T5 - RGB - Aug 2021")."""
     report = classify_tree(M31_PROJECT_DIR, calibration_header_fallback=True)

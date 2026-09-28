@@ -148,7 +148,7 @@ def build_group_master(
     frames at all because iTelescope already calibrated server-side (real
     case: NGC 3628/T73). `cal_index`/`flat_frames`/`flat_policy` are never
     read in that branch; callers pass `{}`/`[]`/`FlatPolicy.SKIP_IF_MISSING`
-    as inert placeholders (see plan-precalibrated-path.md ??3.4). Everything
+    as inert placeholders (see plan-precalibrated-path.md §3.4). Everything
     from `register_and_stack(...)` onward is calibration-mode-agnostic --
     it only cares that a Siril sequence literally named "pp_lights_" exists
     in `work_dir / "lights"`, which both branches produce.

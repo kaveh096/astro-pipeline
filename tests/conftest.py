@@ -164,7 +164,7 @@ requires_abell6_project = pytest.mark.skipif(
 # OSC is real, tested code (this fixture proves the mechanics work), but
 # unreachable end-to-end for T68 today without an explicit
 # --calibration-mode override AND fixing build_osc's own cal_index={}
-# KeyError bug (deferred, plan-flats-v4.md ??5). Real BAYERPAT header
+# KeyError bug (deferred, plan-flats-v4.md §5). Real BAYERPAT header
 # holds a non-standard placeholder ("VALID"), confirmed via direct header
 # inspection, not a real pattern code -- bayer_pattern must be passed
 # explicitly (RGGB=0), never auto-detected from this delivery's header.
@@ -174,8 +174,8 @@ requires_ic1396_project = pytest.mark.skipif(
 )
 
 # Abell 31/T59 (Mar 2023) real delivery -- PRECALIBRATED, CALSTAT=BDF, no
-# unrecognised calibration frames of any kind (plan-flats-v4.md ??2.1) --
-# one of that plan's seven gate-(D) data-invariant projects (??4.0),
+# unrecognised calibration frames of any kind (plan-flats-v4.md §2.1) --
+# one of that plan's seven gate-(D) data-invariant projects (§4.0),
 # included for completeness even though it has nothing of its own to
 # recognise.
 ABELL31_PROJECT_DIR = _under(_ITELESCOPE_DIR, "Abell 31 - LRGB - Mar 2023")
@@ -187,7 +187,7 @@ requires_abell31_project = pytest.mark.skipif(
 # with a real raw flat library (70 files, dated 2020-03-19, ~21 months
 # older than the lights) and real bias/dark under a "Bias-Darks-T20-..."
 # naming convention -- none of it recognised today because the flats/
-# darks carry no "T20" folder token at all (plan-flats-v4.md ??2.1) -- the
+# darks carry no "T20" folder token at all (plan-flats-v4.md §2.1) -- the
 # real fixture for Step 4b's opt-in header-based calibration recognition.
 M42_PROJECT_DIR = _under(_ITELESCOPE_DIR, "M42 - Orion Nebula - LRGBHOS - Jan 2022")
 requires_m42_project = pytest.mark.skipif(
@@ -197,7 +197,7 @@ requires_m42_project = pytest.mark.skipif(
 # M31/T05 (Aug 2021) real delivery -- mono RGB, real bias/dark filenames
 # literally spelled "T5" (not "T05") and a folder literally named "T5" --
 # the real fixture for Step 4b's T5->T05 telescope-token normalisation
-# (plan-flats-v4.md ??2.1). Its darks are also the real, unfixed G15
+# (plan-flats-v4.md §2.1). Its darks are also the real, unfixed G15
 # temperature mismatch (-15C darks vs -10C lights), documented not fixed.
 M31_PROJECT_DIR = _under(_ITELESCOPE_DIR, "M31 - Andromeda - T5 - RGB - Aug 2021")
 requires_m31_project = pytest.mark.skipif(

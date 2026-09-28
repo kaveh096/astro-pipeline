@@ -458,7 +458,7 @@ class LRGBOrchestrator:
             }
         )
         # Mixed OSC+mono-RGB reconciliation is deliberately unsupported (see
-        # plan-rgb-only-mode.md ??7): channel-order parity between Siril's
+        # plan-rgb-only-mode.md §7): channel-order parity between Siril's
         # -debayer output and rgbcomp's R-then-G-then-B convention has never
         # been verified, and a binning with BOTH real shapes of colour data
         # would produce two ColourContributors with the IDENTICAL `.key` -- a
@@ -647,12 +647,12 @@ class LRGBOrchestrator:
             # plan-flats-v4.md Step 2: left at literal "" deliberately, not
             # by omission -- RAW_LOCAL OSC is structurally unreachable while
             # build_osc's cal_index={} KeyError stands (G7/I1, deferred to
-            # ??5), and calibration_recipe_parts(mode, flats=[]) always
+            # §5), and calibration_recipe_parts(mode, flats=[]) always
             # returns ("", "") anyway (empty flat set, and every real OSC
             # contributor today is PRECALIBRATED besides) -- verified inert
             # today, for the same reason as G10/R4-4. Whoever lifts that
             # KeyError later must also wire a real calibration_recipe (and
-            # flat_frame_hash) into this call site -- see ??5's OSC bullet.
+            # flat_frame_hash) into this call site -- see §5's OSC bullet.
             colour_calibration_recipes[contributor_key] = ""
 
             needs_full_rebuild = force_masters or (

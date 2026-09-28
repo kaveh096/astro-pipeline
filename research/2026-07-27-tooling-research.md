@@ -2,6 +2,16 @@
 Date: 2026-07-27
 Scope: free/open-source replacement for DeepSkyStacker + manual Photoshop stretch/LRGB combine, for iTelescope-sourced mono LRGB(+NB) data with mixed binning (L=1x1, RGB=2x2, NB sometimes higher). Constraint: pipeline must be checkpointed, not single-button — the user keeps final creative control in Photoshop.
 
+> **Superseded in places.** This is the original planning document and is
+> kept for historical context, not as current documentation (see
+> README.md for what actually shipped). Since this was written: star
+> removal uses StarNet2, not Cosmic Clarity (mentioned below as a
+> candidate); there is no Photoshop automation of any kind, COM-based or
+> otherwise -- the pipeline hands off a plain 16-bit TIFF; ASTAP is the
+> primary (and only) plate solver actually called, not a supplementary
+> pass; and SPCC is available starting in Siril 1.4.4, not "new in 1.5"
+> as assumed below.
+
 ## 1. Calibration / registration / stacking (replaces DSS)
 
 **Siril 1.4.3** (stable, actively released — monthly cadence, 1.5 dev already underway) is the only serious free/OSS candidate; DSS-class alternatives (Astro Pixel Processor) are paid-only, and PixInsight is paid and out of budget.

@@ -1530,7 +1530,7 @@ def test_run_lrgb_force_final_only_touches_final_not_reconciled_or_masters() -> 
 def test_run_lrgb_rgb_only_full_run_no_luminance_no_crash(tmp_path: Path, monkeypatch) -> None:
     """Real integration-style test, exercising the exact code path that had
     THREE real crash bugs found by adversarial review before this test was
-    written (see plan-rgb-only-mode.md ??6b): a bare TypeError in
+    written (see plan-rgb-only-mode.md §6b): a bare TypeError in
     RunSignature construction (`selected_key[0]` on None), a NameError on
     `lum_for_compose_path` (referenced outside both of its guarding
     branches), and the original IndexError in select_luminance_source
@@ -1632,7 +1632,7 @@ def test_run_lrgb_rgb_only_full_run_no_luminance_no_crash(tmp_path: Path, monkey
 
 def test_run_lrgb_rgb_only_multi_contributor_raises_not_implemented(tmp_path: Path, monkeypatch) -> None:
     """The deferred multi-contributor RGB-only case (plan-rgb-only-mode.md
-    ??7 non-goal) must fail loudly, not silently attempt an unverified
+    §7 non-goal) must fail loudly, not silently attempt an unverified
     combine. Pure unit test -- no real Siril needed, since the
     NotImplementedError fires before any reprojection/stretch call."""
     import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
@@ -1692,7 +1692,7 @@ def test_run_lrgb_mixed_osc_and_rgb_same_binning_raises_not_implemented(tmp_path
     """The real mixed-shape guard trigger: a telescope with genuine R/G/B
     AND genuine Color data at the SAME binning must raise, not silently
     combine them (unverified channel-order parity between debayer output
-    and rgbcomp -- see plan-rgb-only-mode.md ??7). Distinguishes the real
+    and rgbcomp -- see plan-rgb-only-mode.md §7). Distinguishes the real
     trigger from the false-positive case (a target with NEITHER real R/G/B
     NOR real Color data at the caller's own rgb_binning, which must NOT
     raise -- both discovery lists unconditionally include the caller's own
