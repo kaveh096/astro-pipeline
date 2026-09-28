@@ -2,6 +2,7 @@
 name = "astro-pipeline"
 version = "0.1.0"
 description = "Automated, checkpointed LRGB/narrowband astrophotography processing pipeline (calibration through Photoshop handoff)"
+license = "MIT"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "astropy>=6.0",
