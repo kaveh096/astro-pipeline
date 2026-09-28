@@ -66,10 +66,10 @@ def find_final_composite(final_dir: Path) -> Path:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("final_dir", help="the target's _pipeline/final directory")
-    p.add_argument("--target-name", required=True, help='output file stem, e.g. "M51", "Abell 31"')
+    p.add_argument("--target-name", required=True, help='output file stem, e.g. "M51"')
     p.add_argument("--nebula", action="store_true", help="run star removal before denoising")
     p.add_argument("--black-point", type=float, required=True)
-    p.add_argument("--denoise-gpu", action="store_true", help="attempt GPU denoise (known unreliable on this machine)")
+    p.add_argument("--denoise-gpu", action="store_true", help="attempt GPU denoise (may crash/hang on older or integrated GPUs -- CPU is the safe default)")
     p.add_argument("--graxpert-exe", default=None)
     p.add_argument("--starnet-exe", default=None)
     args = p.parse_args(argv)

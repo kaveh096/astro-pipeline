@@ -13,7 +13,7 @@ algorithms that never call into each other, aside from all three sharing
 (`gain_offset.py`). This module re-exports everything so no external
 caller (`skill/run_narrowband_boost.py`, `colour_contributor.py`,
 `lrgb_orchestrator.py`, `tests/test_reconciliation.py`, etc.) needs to
-change its own import -- see `docs/task5-oop-refactor-plan.md` Section 2.
+change its own import.
 """
 
 from .coverage import crop_to_common_coverage

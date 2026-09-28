@@ -23,9 +23,10 @@ anything runs:
     surface at all -- it only checks for an EXACT-exptime dark, so T21's
     real 300s/600s-vs-900s-dark case reads as a flat "missing" gap there,
     when what will actually happen (see calibration.select_dark, called
-    for real inside pipeline.build_master) is a safe per-image scale-down.
-    Computed here by calling the exact same `select_dark()` against the
-    exact same `calibration_index()` build_master() will use -- a preview,
+    for real inside master_builder.build_group_master) is a safe
+    per-image scale-down. Computed here by calling the exact same
+    `select_dark()` against the exact same `calibration_index()`
+    build_group_master() will use -- a preview,
     not a re-implementation of the policy.
 
 This is presentation logic for the interview checkpoint, not pipeline
@@ -52,8 +53,8 @@ from astro_pipeline.calibration_policy import infer_calibration_mode, infer_flat
 
 # The three fixed templates IngestReport.missing_calibration_warnings()
 # emits today (ingest.py, CALIBRATION_WARNING_RES -- moved there from this
-# file, 2026-09, as the shared source of truth pipeline.py's precalibrated-
-# path filtering also needs; skill/ has no __init__.py so it isn't
+# file, 2026-09, as the shared source of truth lrgb_orchestrator.py's
+# precalibrated-path filtering also needs; skill/ has no __init__.py so it isn't
 # importable the other direction). If that function's wording ever
 # changes, dedupe_calibration_warnings() below degrades to passing the
 # line through unrecognized rather than crashing or dropping it.

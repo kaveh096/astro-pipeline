@@ -1,12 +1,12 @@
 """Thin driver around the Siril headless CLI.
 
 `.ssf` scripts run via `siril-cli -s` are the primary, stable orchestration
-surface (see research/2026-07-27-tooling-research.md and the design plan) --
-`sirilpy` is reserved for pixel-access QA stats where there's no CLI
-equivalent, since it's explicitly experimental upstream.
+surface (see research/2026-07-27-tooling-research.md) -- `sirilpy` is
+reserved for pixel-access QA stats where there's no CLI equivalent, since
+it's explicitly experimental upstream.
 
-Empirically verified against a real Siril 1.4.3 install on this machine
-(not assumed from docs): exit code 0 on success, 1 on script failure; every
+Empirically verified against a real installed Siril CLI (not assumed from
+docs): exit code 0 on success, 1 on script failure; every
 output line is prefixed "log:" or "progress:"; invoking siril-cli.exe via
 Python's subprocess (as opposed to directly from an MSYS/git-bash shell)
 does not trigger the "msys2 environment detected" Python-init failure, so

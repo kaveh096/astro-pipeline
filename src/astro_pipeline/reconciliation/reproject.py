@@ -98,14 +98,14 @@ def reproject_to_reference(
 
     out_shape = (int(ref_header["NAXIS2"]), int(ref_header["NAXIS1"]))
 
-    # Memory-conscious by necessity: this runs on a machine with only ~8GB
-    # total RAM and, in practice, as little as ~2.5GB free (confirmed via
-    # Win32_OperatingSystem). reproject_interp works in float64 internally
+    # Memory-conscious by necessity: on a machine with only ~8GB total RAM
+    # and, in practice, as little as ~2.5GB free (confirmed via
+    # Win32_OperatingSystem), reproject_interp works in float64 internally
     # regardless of input dtype, so a naive "reproject all 3 channels, then
     # np.stack" approach holds several 4096x4096 float64 arrays (channel +
     # footprint, x3) simultaneously -- verified to reliably trigger an
-    # out-of-memory kill on this machine (repeatedly reproduced, at the
-    # process level -- no Python exception, the process was just gone).
+    # out-of-memory kill under those conditions (repeatedly reproduced, at
+    # the process level -- no Python exception, the process was just gone).
     # Fixed two ways together: each channel is reprojected, cast down to
     # float32, and freed before starting the next one; and reproject_interp
     # is called with block_size="auto" (processes the output in chunks

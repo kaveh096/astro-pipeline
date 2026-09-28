@@ -119,7 +119,7 @@ T24_PROFILE = InstrumentProfile(
 # sensor, 26 MP)" and the filters are "Chroma LRGB, Chroma 3nm Ha, OIII,
 # SII" (narrowband irrelevant here -- SPCC only calibrates RGB, no
 # `-lfilter=` parameter exists). Cross-checked against the real installed
-# Siril 1.4.4 spcc-database on this machine
+# Siril 1.4.4 spcc-database
 # (%LOCALAPPDATA%\siril\siril-spcc-database): mono_sensors/Sony_IMX.json's
 # one entry has `"name": "Sony IMX411/455/461/533/571"` with its own
 # comment explicitly listing "ZWO ASI2600MM Pro" as an example camera using

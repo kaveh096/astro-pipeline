@@ -1,7 +1,7 @@
 ---
 name: astro-pipeline-lrgb
-description: Use when the user wants to run, drive, resume, or continue the astrophotography pipeline in this repo against an iTelescope session folder -- phrases like "run the pipeline", "process <target>", "pick up where the pipeline left off", "build the masters for <target>", denoise/star-removal/darken a finished TIFF, or boost a broadband image with narrowband data. Covers LRGB/RGB-only/OSC composites, pure narrowband (SHO/HOO) composites, narrowband-boost (HaRGB), and optional post-processing (denoise, star removal, black-point export). Drives astro_pipeline.pipeline stage-by-stage, pausing at each checkpoint for a human Proceed/Adjust/Abort decision rather than running to completion unattended. Does not do framing, cropping, or colour-grading -- those stay the user's manual Photoshop step.
-version: 2.0.0
+description: Use when the user wants to run, drive, resume, or continue the astrophotography pipeline in this repo against an iTelescope session folder -- phrases like "run the pipeline", "process <target>", "pick up where the pipeline left off", "build the masters for <target>", denoise/star-removal/darken a finished TIFF, or boost a broadband image with narrowband data. Covers LRGB/RGB-only/OSC composites, pure narrowband (SHO/HOO) composites, narrowband-boost (HaRGB), and optional post-processing (denoise, star removal, black-point export). Drives astro_pipeline's lrgb_orchestrator/narrowband_orchestrator stage-by-stage, pausing at each checkpoint for a human Proceed/Adjust/Abort decision rather than running to completion unattended. Does not do framing, cropping, or colour-grading -- those stay a manual step in your own image editor.
+version: 0.1.0
 ---
 
 # Astro Pipeline: run wrapper

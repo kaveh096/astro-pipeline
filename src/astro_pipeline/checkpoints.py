@@ -358,7 +358,7 @@ def save_checkpoints(checkpoints: list[Checkpoint], path: str | Path) -> None:
 
     Slice 4.2: checkpoint emission moved from "gathered once at the very
     end of run_lrgb" to inline, immediately after each stage's own
-    usable() block (see pipeline.run_lrgb) -- which means this function
+    usable() block (see lrgb_orchestrator.run_lrgb) -- which means this function
     now gets called multiple times per run, and potentially across
     multiple `run_lrgb` invocations on the same project as staged
     execution (`stop_after`) progresses. A plain truncating write (what

@@ -3,8 +3,7 @@ orchestration for a single telescope+target -- a parallel, deliberately
 SEPARATE entry point from `run_lrgb` (`lrgb_orchestrator.py`), not a mode
 of it. Structurally simpler than `run_lrgb` on purpose: exactly one colour
 contributor, no Luminance, no reconciliation/combine step -- kept as a
-plain function, not a class, per `docs/task5-oop-refactor-plan.md`
-Section 1's explicit non-uniformity call: forcing a shared base class with
+plain function, not a class: forcing a shared base class with
 `LRGBOrchestrator` here for symmetry would be over-engineering with no
 behavior or coupling benefit.
 """

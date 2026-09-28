@@ -1,9 +1,10 @@
-"""Filter-name constants shared across pipeline.py and its extracted
-modules (Task 5 refactor, 2026-09-16). Kept zero-dependency so lower-level
-modules (master_builder.py, calibration_policy.py, luminance_selection.py,
-contributor_staleness.py, ...) never have to import back from pipeline.py
-just to get these -- that would recreate the import-cycle risk the
-module split is meant to avoid.
+"""Filter-name constants shared across lrgb_orchestrator.py,
+narrowband_orchestrator.py and the other modules split out of the former
+pipeline.py (Task 5 refactor, 2026-09-16). Kept zero-dependency so
+lower-level modules (master_builder.py, calibration_policy.py,
+luminance_selection.py, contributor_staleness.py, ...) never have to
+import back from the orchestrators just to get these -- that would
+recreate the import-cycle risk the module split is meant to avoid.
 """
 
 from __future__ import annotations

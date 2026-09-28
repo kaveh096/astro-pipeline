@@ -315,8 +315,9 @@ def stage_precalibrated_lights(
     Converts directly under the "pp_<basename>" name (not "<basename>"
     then Siril-prefixed "pp_" the way calibrate_lights() does), so the
     resulting sequence is sequence_name(f"pp_{basename}") ==
-    "pp_<basename>_" -- byte-identical to what pipeline.build_master()'s
-    hardcoded register_and_stack("pp_lights_", ...) already expects when
+    "pp_<basename>_" -- byte-identical to what
+    master_builder.build_group_master()'s hardcoded
+    register_and_stack("pp_lights_", ...) already expects when
     basename="lights". No change needed downstream of this function.
 
     MEASURED, not assumed (real T73 calibrated- Red frame, real Siril

@@ -76,8 +76,9 @@ def test_stage_precalibrated_lights_real_t73_produces_pp_lights_sequence(tmp_pat
     directly (no bias/dark/flat) -- confirms the seam claim from
     plan-precalibrated-path.md: converting under basename "pp_lights"
     produces a sequence literally named "pp_lights_", matching what
-    pipeline.build_master()'s hardcoded register_and_stack("pp_lights_",
-    ...) already expects, with zero change needed downstream."""
+    master_builder.build_group_master()'s hardcoded
+    register_and_stack("pp_lights_", ...) already expects, with zero
+    change needed downstream."""
     report = scan_session(NGC3628_PROJECT_DIR)
     groups = report.calibrated_instrument_groups()
     lights = groups[("T73", "NGC 3628", "Red", 2)]

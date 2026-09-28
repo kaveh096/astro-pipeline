@@ -122,11 +122,12 @@ _FLAT_RE_SKYFLAT = re.compile(
 # The three fixed templates IngestReport.missing_calibration_warnings()
 # emits (below) -- module-level (not skill/interview.py-private, where an
 # earlier version of these lived) as the shared source of truth, since
-# skill/ has no __init__.py and is not an importable package: pipeline.py
-# importing these OUT of skill/ would be architecturally backwards.
-# skill/interview.py's dedupe_calibration_warnings() imports these rather
-# than redefining them; pipeline.py's precalibrated-path filtering
-# (run_lrgb, 2026-09) uses warning_telescope() below for the same reason
+# skill/ has no __init__.py and is not an importable package:
+# lrgb_orchestrator.py importing these OUT of skill/ would be
+# architecturally backwards. skill/interview.py's
+# dedupe_calibration_warnings() imports these rather than redefining them;
+# lrgb_orchestrator.py's precalibrated-path filtering (run_lrgb, 2026-09)
+# uses warning_telescope() below for the same reason
 # -- an anchored regex extracting a real, whitespace-delimited telescope
 # token is not equivalent to a naive substring test, which could (in
 # principle, not observed with today's real telescope names) collide with
@@ -320,7 +321,7 @@ class IngestReport:
 
         A DELIBERATELY SEPARATE index from calibration_index(), not a widened
         key on it. Bias/Dark genuinely don't vary by filter, and every real
-        bias/dark lookup in the codebase (pipeline.py's
+        bias/dark lookup in the codebase (master_builder.py's
         `cal_index[(telescope, "Bias", binning, 0.0)]`, calibration.py's
         `select_dark()` iterating `cal_index.items()` filtering by
         `t, ftype, b`) keys on the existing 4-tuple. Folding filter_name in

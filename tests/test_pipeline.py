@@ -1417,7 +1417,7 @@ def test_run_lrgb_rejects_unknown_force_stage(tmp_path: Path) -> None:
 # These calls hit zero Siril/GraXpert/SPCC work (everything is already
 # usable() on this fixture, built by Slices 1-3) -- the only real cost is
 # checkpoint statistics/star-detection, which run regardless of stop_after
-# (see pipeline.run_lrgb's inline checkpoint emission, Slice 4.2). They are
+# (see lrgb_orchestrator.run_lrgb's inline checkpoint emission, Slice 4.2). They are
 # the actual claim Slice 4.3 exists to satisfy: a staged run resumes rather
 # than re-doing earlier work, and stopping early leaves no partial/broken
 # state.
@@ -1985,7 +1985,7 @@ def test_run_lrgb_stop_after_reconciled_then_final_does_not_rebuild_masters_MOCK
     # poisoning contributor_stale()'s comparison and forcing a full
     # rebuild on every resumed call, for any mono-RGB target. Fixed
     # 2026-09-16 in run_lrgb's OSC loop by skipping binnings with no real
-    # OSC data -- see the fix's own comment in pipeline.py.)
+    # OSC data -- see the fix's own comment in lrgb_orchestrator.py.)
     assert build_colour_calls["n"] == 1
 
 
@@ -2162,10 +2162,9 @@ def test_run_lrgb_force_cascade_deletes_expected_top_level_files_MOCKED(
     """Extends test_run_signature.py's
     test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale
     technique from "one call site, one argument" to the full top-level
-    masters/reconciled/final cascade-delete block (pipeline.py's `if
-    "masters"/"reconciled"/"final" in stages_to_invalidate:
-    _delete_if_exists(...)`) -- the exact code Risk 3 of
-    scratch/task5-oop-refactor-plan.md names as most likely to silently
+    masters/reconciled/final cascade-delete block (lrgb_orchestrator.py's
+    `if "masters"/"reconciled"/"final" in stages_to_invalidate:
+    _delete_if_exists(...)`) -- exactly the kind of code most likely to silently
     regress during the module split (a moved call site quietly losing an
     argument or a branch). Deliberately scoped to the three explicitly
     named top-level files plus the Luminance master (all reached via

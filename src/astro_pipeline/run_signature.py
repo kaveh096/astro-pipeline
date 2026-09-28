@@ -1,4 +1,4 @@
-"""Run-signature tracking: what `usable()` (pipeline.py) cannot see.
+"""Run-signature tracking: what `usable()` (lrgb_orchestrator.py) cannot see.
 
 `usable()` answers "does this stage's output file exist, parse, and look
 non-degenerate" -- and nothing about WHY that file has the content it
@@ -10,7 +10,7 @@ master forever, with zero way to know a second user's data should now be
 merged in, because nothing about a master FITS file records which lights
 built it. Slice 3's combine logic compounds the gap: the gain-fit/
 weighting reference contributor is picked dynamically each run (whichever
-colour contributor has the highest STACKCNT, see pipeline.run_lrgb) --
+colour contributor has the highest STACKCNT, see lrgb_orchestrator.run_lrgb) --
 that choice was never persisted anywhere, so a resumed run whose STACKCNT
 values shifted enough to flip the reference would silently keep serving a
 `rgb_reconciled.fit` gain-matched against the WRONG reference, with
@@ -25,12 +25,12 @@ resolved SPCC profile, and the two previously-unguarded parameters that
 change a run's OUTPUT without changing any FILE's existence or count
 (`stretch_method`, `pedestal`). Diffing the newly-computed signature
 against whatever was persisted last time says exactly which downstream
-stage outputs are now stale -- pipeline.py then deletes those specific
+stage outputs are now stale -- lrgb_orchestrator.py then deletes those specific
 files so `usable()`'s existing skip-if-present logic naturally
 regenerates them, rather than this module inventing a second, parallel
 gating mechanism.
 
-Dependency order, used throughout this module and pipeline.py's
+Dependency order, used throughout this module and lrgb_orchestrator.py's
 `stop_after`/`force` vocabulary (Slice 4.3):
 
     masters -> reconciled -> final
@@ -57,7 +57,7 @@ STAGE_ORDER = ("masters", "reconciled", "final")
 def cascade_from(stage: str) -> set[str]:
     """Every stage from `stage` onward in the masters -> reconciled ->
     final dependency order. Both the signature-mismatch diff below and
-    pipeline.py's `force` parameter (Slice 4.3) go through this, so
+    lrgb_orchestrator.py's `force` parameter (Slice 4.3) go through this, so
     "invalidating/forcing an earlier stage also invalidates everything
     after it" is enforced in exactly one place.
     """
@@ -102,7 +102,7 @@ class ContributorSignature:
     `flat_frame_hash` (Slice 2.3 of plan-flats-v3.md, default "") mirrors
     `frame_hash`'s exact mechanism (`frame_identity_hash()` over matched
     filenames) but for this contributor's matched FLAT set, not its light
-    set -- added once `pipeline.build_master()` actually started looking
+    set -- added once `master_builder.build_group_master()` actually started looking
     flats up (Slice 2.2), since a resumed run whose matched flat set
     changed (a flat re-shot, a new filter's flats added, a telescope's
     FlatPolicy flipping from SKIP_IF_MISSING to REQUIRE) would otherwise
@@ -274,7 +274,7 @@ class RunSignature:
 
         `flat_frame_hash`/`calibration_recipe` each default to "" for
         backward compatibility with any caller/test constructing a call
-        without them -- but see pipeline.run_lrgb's own real call sites
+        without them -- but see lrgb_orchestrator.run_lrgb's own real call sites
         (the Luminance loop and the mono-RGB colour loop): BOTH must pass
         the freshly-computed values explicitly, or these parameters'
         defaults silently mean the comparison below can never actually
@@ -338,7 +338,7 @@ def diff_invalidation(old: RunSignature | None, new: RunSignature) -> set[str]:
     two runs can have byte-identical light sets and still pick a
     different gain-fit/weighting reference if STACKCNT-affecting quality
     filtering rejected a different number of subs. See
-    pipeline.run_lrgb's own pre-build per-contributor checks (using
+    lrgb_orchestrator.run_lrgb's own pre-build per-contributor checks (using
     `RunSignature.contributor_stale`) for the earlier, frame-identity-only
     pass that decides whether a raw master needs rebuilding via Siril at
     all -- that pass necessarily runs before STACKCNT exists, so it

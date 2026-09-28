@@ -4,18 +4,19 @@ every user who contributed data on that telescope.
 Moved out of `pipeline.py` verbatim (Task 5 Step 12a), then restructured
 around an `LRGBOrchestrator` class (Steps 12b-12d) whose three phase methods
 match the existing `STAGE_ORDER = ("masters", "reconciled", "final")`
-vocabulary -- see `docs/task5-oop-refactor-plan.md` Section 1 and
-`docs/task5-step12-substeps.md` for the full design rationale
-(multi-user/multi-contributor combining rules, resumability via `usable()`,
-and the `RunSignature`-driven staleness cascade). `run_lrgb()` itself keeps
+vocabulary -- the design rationale (multi-user/multi-contributor combining
+rules, resumability via `usable()`, and the `RunSignature`-driven staleness
+cascade) is captured in this module's own docstrings and comments below,
+not a separate document. `run_lrgb()` itself keeps
 a byte-for-byte identical public signature and behavior throughout this
 restructuring -- it is the only name any external caller (skill scripts,
 tests) ever imports.
 
 Deliberately resumable at every step: each stage checks whether its output
-already exists and skips if so. This machine has ~8GB RAM and long runs
-have been killed mid-flight more than once, so a re-run must continue
-rather than start over. It also means a stage can be deleted from
+already exists and skips if so. On a memory-constrained machine (~8GB RAM
+is workable but tight), long runs can get killed mid-flight, so a re-run
+must continue rather than start over. It also means a stage can be deleted
+from
 `_pipeline/` to force just that stage to recompute.
 
 Stage order here reflects what was established empirically (see the

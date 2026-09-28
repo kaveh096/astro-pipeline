@@ -20,11 +20,11 @@ being wrong:
 
 ICC profiles are deliberately NOT embedded by default. Siril's GHT output
 is a custom perceptual curve that does not match sRGB's transfer curve, so
-tagging the file "sRGB" would replace "Photoshop guesses" with "Photoshop
-confidently applies a specific wrong transform" -- harder to notice, not
-easier. Left untagged and documented; revisit once Stage 12 shows whether
-an untagged file makes Photoshop CS6 raise a missing-profile dialog (which
-would block COM automation).
+tagging the file "sRGB" would replace "your editor guesses" with "your
+editor confidently applies a specific wrong transform" -- harder to
+notice, not easier. Left untagged and documented; an editor that insists
+on a profile before opening an untagged 16-bit TIFF may need one assigned
+manually on import.
 """
 
 from __future__ import annotations

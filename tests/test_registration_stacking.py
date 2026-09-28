@@ -52,8 +52,8 @@ def test_stack_command_with_filters_disabled() -> None:
 def test_stack_command_with_norm_addscale() -> None:
     # Mixed-exposure-time contributor groups (e.g. T21's real 600s/300s
     # Luminance lights) need flux normalization before stacking -- see
-    # pipeline.build_master, which is the only caller that ever passes a
-    # non-None norm.
+    # master_builder.build_group_master, which is the only caller that ever
+    # passes a non-None norm.
     cmd = _stack_command("r_pp_lights_", "master", "rej", 3.0, 3.0, 90.0, 90.0, "addscale")
     assert cmd == (
         "stack r_pp_lights_ rej 3.0 3.0 -filter-fwhm=90.0% -filter-round=90.0% "

@@ -1,10 +1,10 @@
 """`PipelineResult`, the return type shared by `run_lrgb` and `run_narrowband`.
 
 Split into its own module (mirroring `filter_constants.py`'s precedent) so
-`lrgb_orchestrator.py` and `pipeline.py` (which still hosts `run_narrowband`)
-can both depend on it without depending on each other -- defining it in
-either orchestration module and importing it into the other would create a
-two-way import cycle.
+`lrgb_orchestrator.py` and `narrowband_orchestrator.py` can both depend on
+it without depending on each other -- defining it in either orchestration
+module and importing it into the other would create a two-way import
+cycle.
 """
 
 from __future__ import annotations

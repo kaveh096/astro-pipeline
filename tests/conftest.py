@@ -82,8 +82,8 @@ def _master(filter_name: str, binning: int, user: str = RGB_USER) -> Path:
 
 # Plate-solved per-filter masters (Stages 2-4). Luminance is the merged
 # multi-user group (two real collaborators both shoot Luminance/BIN1 on
-# T24 -- pipeline.py combines them at the raw-sub level, see its module
-# docstring), so its group directory name reflects both real iTelescope
+# T24 -- lrgb_orchestrator.py combines them at the raw-sub level, see its
+# module docstring), so its group directory name reflects both real iTelescope
 # usernames, sorted (see local_paths.py.example for how to configure
 # these for your own real data). Red/Green/Blue at BIN2 are single-user,
 # so their group names are unchanged.

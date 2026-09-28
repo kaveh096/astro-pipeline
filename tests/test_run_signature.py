@@ -47,7 +47,7 @@ def _sig(
 
 
 # --- cascade_from: the dependency-order primitive both diff_invalidation ---
-# --- and pipeline.run_lrgb's `force` parameter go through -----------------
+# --- and lrgb_orchestrator.run_lrgb's `force` parameter go through --------
 
 
 def test_cascade_from_masters_includes_everything_after_it() -> None:
@@ -211,7 +211,7 @@ def test_contributor_stale_true_for_a_brand_new_key() -> None:
 
 # --- Slice 2.3: flat_frame_hash -- both the dataclass-comparison mechanism
 # AND (the actually critical part, per round 2's finding) the exact way
-# pipeline.run_lrgb's own two real call sites invoke contributor_stale. ----
+# lrgb_orchestrator.run_lrgb's own two real call sites invoke contributor_stale. --
 
 
 def test_contributor_stale_true_on_flat_frame_hash_change_direct_call() -> None:
@@ -236,7 +236,7 @@ def test_contributor_stale_defaults_flat_frame_hash_to_empty_string() -> None:
     or code that hasn't been updated) must not raise -- the parameter has
     a default, for backward compatibility -- but that default is exactly
     the trap: see the call-site-exercising test below for why a default
-    alone is NOT sufficient for pipeline.run_lrgb's real call sites."""
+    alone is NOT sufficient for lrgb_orchestrator.run_lrgb's real call sites."""
     old = RunSignature(
         stretch_method="autostretch",
         pedestal=0.1,
@@ -327,7 +327,7 @@ def test_old_format_run_signature_json_without_calibration_mode_still_loads(tmp_
 
 # --- THE call-site-exercising test: round 2's actual finding was that
 # giving contributor_stale a defaulted flat_frame_hash parameter WITHOUT
-# updating pipeline.run_lrgb's two real (pure-positional) call sites would
+# updating lrgb_orchestrator.run_lrgb's two real (pure-positional) call sites would
 # leave the whole feature silently dead -- compiling, running, and passing
 # `pytest tests/ -q` cleanly, with the comparison simply never firing. This
 # test exercises the REAL call sites (via a minimal run_lrgb invocation
@@ -338,14 +338,14 @@ def test_old_format_run_signature_json_without_calibration_mode_still_loads(tmp_
 def test_run_lrgb_call_sites_actually_pass_flat_frame_hash_to_contributor_stale(
     tmp_path, monkeypatch
 ) -> None:
-    """Exercises pipeline.run_lrgb's real Luminance-loop call site the same
+    """Exercises lrgb_orchestrator.run_lrgb's real Luminance-loop call site the same
     way it is actually invoked in production: monkeypatches
     RunSignature.contributor_stale itself to record every call's
     arguments, then drives just enough of run_lrgb (via light monkeypatching
     of the Siril/GraXpert/SPCC-touching internals, none of which this test
     needs) to reach that call site with a persisted OLD signature already
     on disk (predating flat_frame_hash, exactly like the real file), and a
-    contributor whose ONLY change is its matched flat set. If pipeline.py's
+    contributor whose ONLY change is its matched flat set. If lrgb_orchestrator.py's
     call site were reverted to the pre-Slice-2.3 positional call (no
     flat_frame_hash argument), this test goes red -- proving it actually
     catches the regression, not just the dataclass field in isolation.
@@ -548,9 +548,9 @@ def test_load_corrupt_file_returns_none_not_raises(tmp_path) -> None:
     assert load_run_signature(path) is None
 
 
-# --- the SECOND real call site (pipeline.py's colour loop) -- round 2's
-# finding named BOTH pipeline.py:843 (Luminance) and pipeline.py:911
-# (colour) as pure-positional call sites that each needed the fix; the test
+# --- the SECOND real call site (lrgb_orchestrator.py's colour loop) -- a
+# review round's finding named both the Luminance and colour call sites
+# as pure-positional call sites that each needed the fix; the test
 # above exercises the Luminance one, this exercises the colour one. -------
 
 
@@ -561,7 +561,7 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
     loop's own `old_signature.contributor_stale("colour", ...)` call site.
     A minimal Luminance contributor is allowed to build successfully
     (via a stubbed build_group_master returning a real, tiny, readable FITS
-    file, so pipeline.py's own `fits.getheader(...).get("STACKCNT", ...)`
+    file, so lrgb_orchestrator.py's own `fits.getheader(...).get("STACKCNT", ...)`
     call right after it doesn't blow up), so control actually reaches the
     colour loop; `_build_colour_contributor` is then stubbed to stop
     execution right after the colour call site we care about has run.
@@ -680,7 +680,7 @@ def test_run_lrgb_colour_call_site_actually_passes_flat_frame_hash_to_contributo
     assert passed_flat_hash not in (None, ""), (
         "contributor_stale's real colour-loop call site did not pass a real "
         "flat_frame_hash -- this is exactly the round-2 regression, on the SECOND "
-        "of the two named call sites (pipeline.py's colour loop)."
+        "of the two named call sites (lrgb_orchestrator.py's colour loop)."
     )
     assert frame_hash == real_colour_frame_hash  # sanity: light set really is unchanged
     assert real_contributor_stale(

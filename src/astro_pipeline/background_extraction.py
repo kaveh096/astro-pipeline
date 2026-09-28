@@ -16,8 +16,7 @@ fully-formed, WCS-intact FITS file that is 100% (or partially) NaN, with
 no error. run_graxpert_background_extraction() checks for this and raises
 BackgroundExtractionError rather than reporting a false success -- this
 class of bug is exactly why "file exists" was never a sufficient success
-check (see the design review's original B3 finding, now proven, not just
-theoretical).
+check.
 """
 
 from __future__ import annotations
@@ -195,8 +194,8 @@ def run_graxpert_denoise(
     GraXpert binary itself, not specific to the background-extraction
     command, so denoising gets no less protection.
 
-    MEASURED, not assumed, against the real installed GraXpert 3.0.2 CLI
-    on this machine: `-cmd denoising` does NOT expose `-smoothing`/
+    MEASURED, not assumed, against the real installed GraXpert 3.0.2 CLI:
+    `-cmd denoising` does NOT expose `-smoothing`/
     `-correction`/`-bg` the way `-cmd background-extraction` does (those
     flags are listed generically in `-h` output across both commands, but
     denoising's own log output shows it reads "denoise strength" and

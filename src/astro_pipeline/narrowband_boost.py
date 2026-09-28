@@ -3,7 +3,7 @@ broadband RGB/LRGB composite to boost emission-nebula contrast, without
 losing natural star colours (capability A2, 2026-09).
 
 Distinct from the pure narrowband false-colour composite (SHO/HOO, see
-pipeline.py's run_narrowband) -- this produces a still-recognizable
+narrowband_orchestrator.py's run_narrowband) -- this produces a still-recognizable
 "normal" RGB/LRGB image with nebula emission regions enhanced, not an
 entirely narrowband-derived one.
 

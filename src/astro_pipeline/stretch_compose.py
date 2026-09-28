@@ -272,7 +272,7 @@ def stretch_rgb(
 ) -> RGBComposeResult:
     """Stretch rgb_path alone and export it under output_stem -- the
     RGB-only-mode (2026-09) counterpart of stretch_and_compose(), for a
-    run with no Luminance to composite onto (see pipeline.run_lrgb's
+    run with no Luminance to composite onto (see lrgb_orchestrator.run_lrgb's
     is_rgb_only branch). No `rgbcomp -lum=` call.
 
     Mirrors rgbcomp_lum()'s own output-path convention (a NEW file at

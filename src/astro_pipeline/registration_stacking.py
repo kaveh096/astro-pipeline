@@ -26,7 +26,7 @@ from .siril_driver import SirilResult, run_script
 # usable in Siril." register() then fails opaquely ("No sequence
 # `pp_lights_' found.") rather than something callers can distinguish from
 # any other registration failure. Callers must check length BEFORE staging
-# (see pipeline.py's Luminance loop and _build_colour_contributor) and
+# (see lrgb_orchestrator.py's Luminance loop and ColourContributorBuilder) and
 # skip-and-log a too-small group, the same pattern already used for a
 # missing R/G/B filter -- this is a Siril constraint, not specific to
 # CalibrationMode.PRECALIBRATED; any RAW_LOCAL group with a single real
@@ -117,7 +117,7 @@ def stack(
     "unnormalized input, unnormalized output" when no `-norm=` is passed
     (discrepancy between the help text and the observed real behavior).
     Pass norm="addscale" (the caller's job to decide when -- see
-    pipeline.build_master) for a mixed-exposure-time group, where the
+    master_builder.build_group_master) for a mixed-exposure-time group, where the
     unnormalized default would stack frames at genuinely different flux
     scales against each other.
     """
