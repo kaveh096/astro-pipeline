@@ -1630,6 +1630,100 @@ def test_run_lrgb_rgb_only_full_run_no_luminance_no_crash(tmp_path: Path, monkey
     assert persisted["luminance"] == {}
 
 
+def test_run_lrgb_rgb_only_stretch_method_change_invalidates_rgb_final(tmp_path: Path, monkeypatch) -> None:
+    """Real bug found in the publish-readiness audit: RGB-only mode's
+    invalidation block (`_finalize`'s cascade-delete, `_reason('final')`
+    etc.) only ever named `lrgb_final.fit` -- an RGB-only run's real
+    output file, `rgb_final.fit`, was never in that list. A stretch_method
+    change (or `--force final`, or a signature change generally) silently
+    kept re-exporting the STALE rgb_final.fit instead of rebuilding it.
+    Fully mocked -- stretch_rgb itself is stubbed, so no real Siril call
+    happens; this exercises the invalidation logic, not the real stretch.
+    """
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
+    from astro_pipeline.stretch_compose import RGBComposeResult
+
+    class _FakeLightFrame:
+        def __init__(self, path_name: str, user: str = "observer1") -> None:
+            self.path = tmp_path / path_name
+            self.user = user
+            self.exptime = 300.0
+
+    class _FakeReport:
+        def instrument_groups(self):
+            return {
+                ("T02", "Fake Target", "Red", 1): [_FakeLightFrame("r.fit")],
+                ("T02", "Fake Target", "Green", 1): [_FakeLightFrame("g.fit")],
+                ("T02", "Fake Target", "Blue", 1): [_FakeLightFrame("b.fit")],
+            }
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {("T02", "Bias", 1, 0.0): ["b"], ("T02", "Dark", 1, 300.0): ["d"]}
+
+        def flat_index(self):
+            return {}
+
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda project_dir, **kw: _FakeReport())
+
+    stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
+    data = np.random.default_rng(1).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+    fits.PrimaryHDU(data=data).writeto(stub_composite)
+
+    def fake_build_rgb(self, *a, **k):
+        self.contrib_dir.mkdir(parents=True, exist_ok=True)
+        import shutil as _shutil
+        _shutil.copy2(stub_composite, self.contrib_dir / "rgb_colour_calibrated.fit")
+        return ColourContributor(
+            telescope=self.telescope, binning=self.binning, composite_path=stub_composite,
+            sub_count=1, stack_total=1,
+        )
+
+    monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
+
+    stretch_calls = {"n": 0}
+
+    def fake_stretch_rgb(rgb_path, work_dir, output_stem, method="autostretch", **kwargs):
+        stretch_calls["n"] += 1
+        composite_path = Path(work_dir) / f"{output_stem}.fit"
+        fits.PrimaryHDU(
+            data=np.random.default_rng(stretch_calls["n"]).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+        ).writeto(composite_path, overwrite=True)
+        return RGBComposeResult(composite_path=composite_path, rgb_stretch_log=None)
+
+    monkeypatch.setattr(lrgb_orchestrator_module, "stretch_rgb", fake_stretch_rgb)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    def _run(**kwargs):
+        return run_lrgb(
+            project_dir, telescope="T02", target="Fake Target", ra_hours=1.0, dec_deg=1.0,
+            lum_binning=1, rgb_binning=1, **kwargs,
+        )
+
+    result = _run()
+    assert result.composite_path.name == "rgb_final.fit"
+    assert stretch_calls["n"] == 1
+    rgb_final = project_dir / "_pipeline" / "final" / "rgb_final.fit"
+    assert rgb_final.exists()
+    first_bytes = rgb_final.read_bytes()
+
+    # A stretch_method change must invalidate (delete + rebuild) rgb_final.fit,
+    # exactly like lrgb_final.fit already does for LRGB-mode runs.
+    result2 = _run(stretch_method="linear")
+    assert stretch_calls["n"] == 2
+    assert result2.composite_path.name == "rgb_final.fit"
+    assert rgb_final.read_bytes() != first_bytes
+
+    # force={"final"} must also invalidate it.
+    stretch_calls["n"] = 0
+    _run(force={"final"})
+    assert stretch_calls["n"] == 1
+
+
 def test_run_lrgb_rgb_only_multi_contributor_raises_not_implemented(tmp_path: Path, monkeypatch) -> None:
     """The deferred multi-contributor RGB-only case (plan-rgb-only-mode.md
     §7 non-goal) must fail loudly, not silently attempt an unverified

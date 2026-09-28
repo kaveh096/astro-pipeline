@@ -778,12 +778,15 @@ class LRGBOrchestrator:
             _delete_if_exists(self.final / "lum_bg.fits", reason, self.notes)
             _delete_if_exists(self.final / "rgb_reconciled.fit", reason, self.notes)
             _delete_if_exists(self.final / "lrgb_final.fit", reason, self.notes)
+            _delete_if_exists(self.final / "rgb_final.fit", reason, self.notes)
         if "reconciled" in stages_to_invalidate:
             reason = f"{_reason('reconciled')} (colour-affecting)"
             _delete_if_exists(self.final / "rgb_reconciled.fit", reason, self.notes)
             _delete_if_exists(self.final / "lrgb_final.fit", reason, self.notes)
+            _delete_if_exists(self.final / "rgb_final.fit", reason, self.notes)
         if "final" in stages_to_invalidate:
             _delete_if_exists(self.final / "lrgb_final.fit", _reason("final"), self.notes)
+            _delete_if_exists(self.final / "rgb_final.fit", _reason("final"), self.notes)
         save_run_signature(new_signature, self.run_signature_path)
 
         # --- checkpoints for the "masters" stop_after boundary ----------------
