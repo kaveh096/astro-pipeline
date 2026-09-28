@@ -1,20 +1,22 @@
-"""Regenerate the M51 T24 LRGB result into the project's _pipeline/ folder.
+"""Regenerate the real M51/T24 fixtures that tests/conftest.py's
+real-data-gated tests read.
 
 Resumable: re-run after an interruption and completed stages are skipped.
-
-A worked, real reference for run_lrgb's calling convention (see
-skill/SKILL.md) -- edit PROJECT_DIR below to point at your own M51
-project folder before running.
+Not a pytest test file (doesn't match the `test_*.py` collection pattern),
+and not a public usage example -- see examples/run_lrgb_example.py for
+that. This script is deliberately coupled to conftest.py's own PROJECT_DIR
+(and its ASTRO_PIPELINE_PROJECT_DIR_BASE / tests/local_paths.py
+configuration) so it always writes exactly where the tests read.
 """
 
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from astro_pipeline.lrgb_orchestrator import run_lrgb
-
-PROJECT_DIR = Path(r"C:\path\to\your\M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
+from astro_pipeline.lrgb_orchestrator import run_lrgb  # noqa: E402
+from conftest import PROJECT_DIR  # noqa: E402
 
 # M51: RA 13h29m52.7s, Dec +47:11:43 -- passed explicitly so the run needs
 # no network name resolution.

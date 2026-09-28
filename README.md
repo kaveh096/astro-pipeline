@@ -232,7 +232,7 @@ aren't published; the comment's own text is the part that matters.
 
 ```
 src/astro_pipeline/   Pipeline stage modules (Layer 1, standalone CLI)
-scripts/              Siril .ssf script templates
+examples/             Worked example: calling run_lrgb() directly
 skill/                Claude Code skill wrapper (Layer 2)
 docs/                 Calibration reference notes
 tests/                Tests, run against real sample session fixtures

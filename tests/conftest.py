@@ -21,9 +21,10 @@ test is gated by a `pytest.mark.skipif` that checks whether its fixture
 actually exists, so running this suite with neither configured just
 skips them -- the large majority of the suite needs nothing here.
 
-Regenerate the M51 fixtures with:  python scripts/run_m51.py
-(resumable -- it skips whatever is already present; edit its
-PROJECT_DIR constant to point at your own real M51 folder first).
+Regenerate the M51 fixtures with:  python tests/regenerate_m51_fixtures.py
+(resumable -- it skips whatever is already present; reads PROJECT_DIR from
+this same file, so configure your real M51 folder the same way as any
+other real-data test, via local_paths.py/the env vars above).
 """
 
 from __future__ import annotations
@@ -64,7 +65,12 @@ RGB_USER = getattr(local_paths, "RGB_USER", None) or os.environ.get("ASTRO_PIPEL
 # stop matching real disk data once a different local_paths.py is used.
 LUM_USERS = frozenset(LUM_USER.split("+"))
 
-PROJECT_DIR = _under(_PROJECT_DIR_BASE, "M51 - Whirlpool galaxy - T24 & T21 - Jan 2025")
+_M51_PROJECT_NAME = (
+    getattr(local_paths, "M51_PROJECT_NAME", None)
+    or os.environ.get("ASTRO_PIPELINE_M51_PROJECT_NAME")
+    or "M51 - Whirlpool galaxy - T24 & T21 - Jan 2025"
+)
+PROJECT_DIR = _under(_PROJECT_DIR_BASE, _M51_PROJECT_NAME)
 PIPELINE_DIR = PROJECT_DIR / "_pipeline"
 FINAL_DIR = PIPELINE_DIR / "final"
 
@@ -115,7 +121,7 @@ def requires(*paths: Path):
         reason=(
             "missing real fixture(s): "
             + ", ".join(str(p.relative_to(PROJECT_DIR)) for p in missing)
-            + " -- regenerate with: python scripts/run_m51.py"
+            + " -- regenerate with: python tests/regenerate_m51_fixtures.py"
         ),
     )
 

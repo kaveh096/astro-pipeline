@@ -24,9 +24,13 @@ LUM_USER / RGB_USER: the real iTelescope account username(s) embedded in
     into every delivered filename, e.g. "raw-T24-<your-username>-M51-
     ..."), needed only if you're using this repo's own M51 test fixture
     convention with a real multi-collaborator group.
+M51_PROJECT_NAME: the folder name (under PROJECT_DIR_BASE) your own M51
+    project actually uses, if different from this repo's own convention
+    below. Optional -- only needed if you renamed it.
 """
 
 PROJECT_DIR_BASE = r"C:\path\to\your\M51\project\base\dir"
 ITELESCOPE_DIR = r"D:\path\to\your\iTelescope\raw\data"
 LUM_USER = "your-itelescope-username"
 RGB_USER = "your-itelescope-username"
+M51_PROJECT_NAME = "M51 - Whirlpool galaxy - T24 & T21 - Jan 2025"

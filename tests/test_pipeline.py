@@ -297,7 +297,7 @@ def test_contributor_fwhm_arcsec_real_data_t24_sharper_than_t21() -> None:
     t24_master = PIPELINE_DIR / f"T24-{LUM_USER}-M51-Luminance-bin1" / "lights" / "master_luminance.fit"
     t21_master = PIPELINE_DIR / f"T21-{RGB_USER}-M51-Luminance-bin1" / "lights" / "master_luminance.fit"
     if not t24_master.exists() or not t21_master.exists():
-        pytest.skip("real Luminance masters not built yet -- run scripts/run_m51.py")
+        pytest.skip("real Luminance masters not built yet -- run tests/regenerate_m51_fixtures.py")
 
     notes: list[str] = []
     t24_fwhm = contributor_fwhm_arcsec(t24_master, notes)

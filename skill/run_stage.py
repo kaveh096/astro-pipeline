@@ -5,7 +5,7 @@ Not pipeline logic -- a thin, testable wrapper so the skill's instructions
 don't ask the assistant to hand-type a fresh Python snippet into Bash at
 every checkpoint (error-prone, unreviewable, and each typo would be a
 silent divergence from the real `run_lrgb` calling convention in
-scripts/run_m51.py). One call = one `run_lrgb` invocation with a given
+examples/run_lrgb_example.py). One call = one `run_lrgb` invocation with a given
 `stop_after`, printing:
 
   - every `result.notes` line, verbatim -- this project's own established

@@ -38,11 +38,11 @@ separately-named files next to what's already there.
 
 - Python venv: `.venv/Scripts/python` (Windows). Run every command below
   through it, e.g. `.venv/Scripts/python.exe skill/interview.py ...`.
-- `scripts/run_m51.py` is a hardcoded reference for the real calling
-  convention (`telescope="T24"`, `target="M51"`, explicit RA/Dec in hours/
-  degrees -- passed explicitly so plate solving needs no network name
-  resolution). Sanity-check argument shapes against it; don't invoke it
-  directly for a real run.
+- `examples/run_lrgb_example.py` is a worked reference for the real
+  `run_lrgb` calling convention (telescope/target strings, explicit RA/Dec
+  in hours/degrees -- passed explicitly so plate solving needs no network
+  name resolution). Sanity-check argument shapes against it; don't invoke
+  it directly for a real run.
 - `skill/interview.py`, `skill/run_stage.py`, `skill/run_narrowband.py`,
   `skill/run_narrowband_boost.py`, `skill/run_post_process.py` do the actual
   work below; read their docstrings if anything here is ambiguous.
@@ -104,7 +104,7 @@ separately-named files next to what's already there.
    - `ra_hours` / `dec_deg` -- ask directly; `run_lrgb` needs these for
      plate solving and does no name resolution of its own. If the project
      folder is the M51 fixture, the known values are
-     `ra_hours=13.4980, dec_deg=47.1953` (from `scripts/run_m51.py`) --
+     `ra_hours=13.4980, dec_deg=47.1953` --
      confirm these rather than silently assuming them for a different
      target.
    - `lum_binning` (default 1) / `rgb_binning` (default 2) -- only ask if
