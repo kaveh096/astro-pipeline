@@ -46,30 +46,90 @@ from astro_pipeline.star_removal import run_star_removal  # noqa: E402
 from astro_pipeline import preflight  # noqa: E402
 
 
-def find_final_composite(final_dir: Path) -> Path:
-    """The real, already-computed final composite FITS -- lrgb_final.fit
-    (LRGB) or rgb_final.fit (RGB-only mode) -- moved into `_intermediate/`
-    by this session's own final/-directory cleanup, alongside every other
-    working file. Prefers lrgb_final.fit if somehow both exist (should
-    never happen for one real target)."""
-    candidates = [
-        final_dir / "_intermediate" / "lrgb_final.fit",
-        final_dir / "_intermediate" / "rgb_final.fit",
-        final_dir / "lrgb_final.fit",
-        final_dir / "rgb_final.fit",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    raise FileNotFoundError(f"No lrgb_final.fit/rgb_final.fit found under {final_dir} or its _intermediate/")
+CANDIDATE_STEMS = [
+    "lrgb_haboost_final", "rgb_haboost_final", "lrgb_final", "rgb_final", "sho_final", "hoo_final",
+]
+
+
+def _tag_for(stem: str) -> str | None:
+    """None means "keep today's exact output naming" (lrgb_final/
+    rgb_final -- the original two candidates, unchanged since before
+    narrowband/boost existed). Every other real input gets a tag inserted
+    into every output filename, so a boosted/narrowband run's outputs
+    never collide with a plain LRGB/RGB-only run's."""
+    if stem in ("lrgb_final", "rgb_final"):
+        return None
+    if stem in ("lrgb_haboost_final", "rgb_haboost_final"):
+        return "haboost"
+    # "sho_final" -> "sho", "hoo_final" -> "hoo"; an unrecognized stem (an
+    # explicit --input with a custom filename) falls through to using the
+    # whole stem as its own tag, rather than silently using no tag -- that
+    # would risk colliding with a real plain-LRGB output for this target.
+    return stem.split("_", 1)[0]
+
+
+def resolve_input_composite(final_dir: Path, explicit_input: str | None) -> tuple[Path, str | None]:
+    """(path, tag) for whichever final composite this run should
+    post-process. `--input` bypasses auto-detection entirely. Otherwise:
+    each candidate stem is looked for in `final/` then `final/
+    _intermediate/` (final/ wins if both exist for the SAME stem -- an
+    _intermediate/ copy is presumed stale once a fresh one lands in
+    final/); if MULTIPLE DISTINCT stems are present (e.g. a target that
+    has both a plain LRGB composite and a later narrowband-boost one),
+    that's a real ambiguity -- ask for --input rather than silently
+    guessing, since guessing wrong here means denoising/darkening the
+    WRONG image with no obvious sign anything went wrong.
+    """
+    if explicit_input:
+        path = Path(explicit_input)
+        if not path.exists():
+            raise FileNotFoundError(f"--input {path} does not exist.")
+        return path, _tag_for(path.stem)
+
+    found: dict[str, Path] = {}
+    for stem in CANDIDATE_STEMS:
+        name = f"{stem}.fit"
+        for candidate_dir in (final_dir, final_dir / "_intermediate"):
+            candidate = candidate_dir / name
+            if candidate.exists():
+                found[stem] = candidate
+                break
+
+    if not found:
+        raise FileNotFoundError(
+            f"No final composite found under {final_dir} or its _intermediate/ "
+            f"(looked for: {', '.join(CANDIDATE_STEMS)}). Run the target's LRGB/RGB/"
+            "narrowband/boost pipeline first, or pass --input explicitly."
+        )
+    if len(found) > 1:
+        options = "; ".join(f"{stem} ({path})" for stem, path in sorted(found.items()))
+        raise RuntimeError(
+            f"Multiple final composites found under {final_dir} -- ambiguous which one to "
+            f"post-process: {options}. Pass --input <path> to pick one explicitly."
+        )
+    [(stem, path)] = found.items()
+    return path, _tag_for(stem)
+
+
+def _black_point(value: str) -> float:
+    parsed = float(value)
+    if not (0.0 <= parsed < 1.0):
+        raise argparse.ArgumentTypeError(f"--black-point must be in [0, 1) -- got {parsed} (0.0 means no darkening)")
+    return parsed
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("final_dir", help="the target's _pipeline/final directory")
     p.add_argument("--target-name", required=True, help='output file stem, e.g. "M51"')
+    p.add_argument(
+        "--input", default=None,
+        help="explicit path to the composite FITS to post-process, if more than one final "
+        "composite exists under final_dir (e.g. a plain LRGB run alongside a later "
+        "narrowband-boost run) and auto-detection can't pick one",
+    )
     p.add_argument("--nebula", action="store_true", help="run star removal before denoising")
-    p.add_argument("--black-point", type=float, required=True)
+    p.add_argument("--black-point", type=_black_point, required=True)
     p.add_argument("--denoise-gpu", action="store_true", help="attempt GPU denoise (may crash/hang on older or integrated GPUs -- CPU is the safe default)")
     p.add_argument("--graxpert-exe", default=None)
     p.add_argument("--starnet-exe", default=None)
@@ -99,12 +159,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  - {problem}")
             return 2
 
-    composite = find_final_composite(final_dir)
-    print(f"[run ] source composite: {composite}")
+    composite, tag = resolve_input_composite(final_dir, args.input)
+    print(f"[run ] source composite: {composite}" + (f" (tag={tag!r})" if tag else ""))
+    name_stem = f"{args.target_name}_{tag}" if tag else args.target_name
 
     if args.nebula:
-        starless_fits = final_dir / "_intermediate" / f"{args.target_name}_starless.fit"
-        stars_fits = final_dir / "_intermediate" / f"{args.target_name}_stars.fit"
+        starless_fits = final_dir / "_intermediate" / f"{name_stem}_starless.fit"
+        stars_fits = final_dir / "_intermediate" / f"{name_stem}_stars.fit"
         if starless_fits.exists() and stars_fits.exists():
             print(f"[skip] star removal already done -- reusing {starless_fits.name}")
 
@@ -116,21 +177,21 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("[run ] star removal (on the original, un-denoised composite)")
             star_result = run_star_removal(
-                composite, output_dir=final_dir / "_intermediate", output_stem=args.target_name,
+                composite, output_dir=final_dir / "_intermediate", output_stem=name_stem,
                 starnet_exe=starnet_exe,
             )
-            starless_tiff = export(star_result.starless_path, output_dir=final_dir, stem=f"{args.target_name}_starless")
-            stars_tiff = export(star_result.stars_path, output_dir=final_dir, stem=f"{args.target_name}_stars")
+            starless_tiff = export(star_result.starless_path, output_dir=final_dir, stem=f"{name_stem}_starless")
+            stars_tiff = export(star_result.stars_path, output_dir=final_dir, stem=f"{name_stem}_stars")
             print(f"       starless TIFF: {starless_tiff.tiff_path}")
             print(f"       stars TIFF:    {stars_tiff.tiff_path}")
 
         print("[run ] denoising the starless composite")
         denoise_input = star_result.starless_path
-        output_stem = f"{args.target_name}_starless_denoised"
+        output_stem = f"{name_stem}_starless_denoised"
     else:
         print("[run ] denoising the full composite")
         denoise_input = composite
-        output_stem = f"{args.target_name}_denoised"
+        output_stem = f"{name_stem}_denoised"
 
     denoised = run_graxpert_denoise(
         denoise_input, output_stem=output_stem,
