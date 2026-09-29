@@ -384,9 +384,11 @@ if in doubt, pass `--force`.
 For a target with BOTH a finished LRGB/RGB run AND narrowband data (e.g.
 Ha), to blend the narrowband layer into a broadband channel for extra
 colour pop -- a real, sourced technique (lighten-style blend into Red by
-default), not this skill's own invention. Run AFTER Step 4/5 has already
-produced `rgb_reconciled.fit` (and `lum_bg.fits`, if not RGB-only) under
-`final/` or `final/_intermediate/`:
+default), not this skill's own invention. Only needs Step 3's output
+(`rgb_reconciled.fit`, and the matching Luminance -- `lum_bg.fits`, or
+`lum_bg_cropped.fits` for a multi-contributor run, picked automatically
+by shape match) under `final/` or `final/_intermediate/`; it does not
+need Step 4/5 to have run first:
 ```
 .venv/Scripts/python.exe skill/run_narrowband_boost.py "<project_dir>" \
   --telescope <TELESCOPE> --target <TARGET> \

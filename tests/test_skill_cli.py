@@ -12,11 +12,18 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
+from astropy.io import fits
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skill"))
 
 from astro_pipeline.calibration import CalibrationMode, FlatPolicy  # noqa: E402
+
+
+def _write_tiny_fit(path: Path, shape: tuple[int, ...] = (3, 4, 4)) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fits.PrimaryHDU(data=np.zeros(shape, dtype=np.float32)).writeto(path, overwrite=True)
 
 
 # --- run_stage.py: repeatable TEL=value dict form ---------------------------
@@ -155,30 +162,14 @@ def test_run_narrowband_boost_parses_plain_calibration_mode() -> None:
 
 
 def argparse_from_boost_main():
-    """run_narrowband_boost.py builds its parser inline inside main(), not
-    via a standalone build_parser() -- reconstruct an equivalent parser
-    here purely to unit-test the --calibration-mode/--calibration-header-
-    fallback argument definitions without invoking the whole main()."""
-    import argparse
-
+    """run_narrowband_boost.py now has a real, standalone build_parser()
+    (publish-readiness Step 9) -- this just aliases it. Kept as a function
+    (rather than updating every call site to `run_narrowband_boost.
+    build_parser()` directly) so this file's existing structure doesn't
+    need to change everywhere it's used."""
     import run_narrowband_boost as mod
 
-    p = argparse.ArgumentParser()
-    p.add_argument("project_dir")
-    p.add_argument("--telescope", required=True)
-    p.add_argument("--target", required=True)
-    p.add_argument("--ra-hours", type=float, required=True)
-    p.add_argument("--dec-deg", type=float, required=True)
-    p.add_argument("--boost-filter", default="Ha")
-    p.add_argument("--boost-channel", default="red", choices=sorted(mod.CHANNEL_INDEX))
-    p.add_argument("--boost-factor", type=float, default=mod.DEFAULT_BOOST_FACTOR)
-    p.add_argument("--binning", type=int, default=2)
-    p.add_argument("--stretch-method", default="autostretch")
-    p.add_argument("--no-luminance", action="store_true")
-    p.add_argument("--calibration-mode", choices=["raw_local", "precalibrated"], default=None)
-    p.add_argument("--calibration-header-fallback", action="store_true")
-    p.add_argument("--flat-policy", choices=["require", "skip_if_missing"], default=None)
-    return p
+    return mod.build_parser()
 
 
 def test_run_narrowband_boost_call_site_passes_parsed_calibration_mode(tmp_path: Path, monkeypatch) -> None:
@@ -191,7 +182,13 @@ def test_run_narrowband_boost_call_site_passes_parsed_calibration_mode(tmp_path:
 
     final_dir = tmp_path / "_pipeline" / "final"
     final_dir.mkdir(parents=True)
-    (final_dir / "rgb_reconciled.fit").write_bytes(b"not real fits, never read by _find_existing")
+    # Real, tiny FITS now (not junk bytes) -- Step 9's fail-fast Luminance
+    # resolution reads both files' headers via astropy before main() ever
+    # reaches build_single_filter_master, so both must be real, matching-
+    # shape FITS for this test's --calibration-mode assertion to be
+    # reachable at all.
+    _write_tiny_fit(final_dir / "rgb_reconciled.fit", shape=(3, 4, 4))
+    _write_tiny_fit(final_dir / "lum_bg.fits", shape=(4, 4))
 
     class _FakeReport:
         def instrument_groups(self):
@@ -249,7 +246,11 @@ def test_run_narrowband_boost_main_threads_calibration_header_fallback_and_prese
 
     final_dir = tmp_path / "_pipeline" / "final"
     final_dir.mkdir(parents=True)
-    (final_dir / "rgb_reconciled.fit").write_bytes(b"not real fits, never read by _find_existing")
+    # Real, tiny FITS now (not junk bytes) -- see the comment in the test
+    # above for why both are needed since Step 9's fail-fast Luminance
+    # resolution.
+    _write_tiny_fit(final_dir / "rgb_reconciled.fit", shape=(3, 4, 4))
+    _write_tiny_fit(final_dir / "lum_bg.fits", shape=(4, 4))
 
     header_dark = CalibrationFrame(
         path=tmp_path / "dark0.fit", telescope="T20", frame_type="Dark", binning=2,
@@ -302,6 +303,119 @@ def test_run_narrowband_boost_main_threads_calibration_header_fallback_and_prese
     wrapped_report = captured_report["report"]
     frames = wrapped_report.calibration_index()[("T20", "Dark", 2, 300.0)]
     assert frames[0].source == "header"
+
+
+# --- Step 9 (publish-readiness plan): run_narrowband_boost.py's Luminance
+# pairing -- shape-matched, not just filename-matched; a stale cropped file
+# from an earlier multi-contributor run must not be paired with a later
+# single-contributor rgb_reconciled just because the name suggests it should.
+
+
+def test_find_existing_prefers_final_dir_over_intermediate(tmp_path: Path) -> None:
+    import run_narrowband_boost
+
+    final_dir = tmp_path / "final"
+    _write_tiny_fit(final_dir / "_intermediate" / "rgb_reconciled.fit")
+    _write_tiny_fit(final_dir / "rgb_reconciled.fit")
+
+    found = run_narrowband_boost._find_existing(final_dir, "rgb_reconciled.fit")
+    assert found == final_dir / "rgb_reconciled.fit"  # final/ wins, not _intermediate/
+
+
+def test_spatial_shape_matches_compares_naxis1_naxis2_only(tmp_path: Path) -> None:
+    import run_narrowband_boost
+
+    p1, p2, p3 = tmp_path / "a.fit", tmp_path / "b.fit", tmp_path / "c.fit"
+    _write_tiny_fit(p1, shape=(3, 4, 4))  # 3-D RGB, 4x4 spatial
+    _write_tiny_fit(p2, shape=(1, 4, 4))  # 3-D single-channel L, same 4x4 spatial
+    _write_tiny_fit(p3, shape=(3, 8, 8))  # different spatial shape
+
+    assert run_narrowband_boost._spatial_shape_matches(p1, p2) is True
+    assert run_narrowband_boost._spatial_shape_matches(p1, p3) is False
+
+
+def test_resolve_luminance_prefers_cropped_when_it_matches(tmp_path: Path) -> None:
+    import run_narrowband_boost
+
+    final_dir = tmp_path / "final"
+    _write_tiny_fit(final_dir / "rgb_reconciled.fit", shape=(3, 4, 4))
+    _write_tiny_fit(final_dir / "lum_bg_cropped.fits", shape=(4, 4))
+    _write_tiny_fit(final_dir / "lum_bg.fits", shape=(3, 8, 8))  # wrong shape -- must not be picked
+
+    resolved = run_narrowband_boost._resolve_luminance(final_dir, final_dir / "rgb_reconciled.fit")
+    assert resolved == final_dir / "lum_bg_cropped.fits"
+
+
+def test_resolve_luminance_falls_back_to_lum_bg_when_no_cropped_file(tmp_path: Path) -> None:
+    import run_narrowband_boost
+
+    final_dir = tmp_path / "final"
+    _write_tiny_fit(final_dir / "rgb_reconciled.fit", shape=(3, 4, 4))
+    _write_tiny_fit(final_dir / "lum_bg.fits", shape=(4, 4))
+
+    resolved = run_narrowband_boost._resolve_luminance(final_dir, final_dir / "rgb_reconciled.fit")
+    assert resolved == final_dir / "lum_bg.fits"
+
+
+def test_resolve_luminance_falls_back_to_lum_bg_when_cropped_is_stale(tmp_path: Path) -> None:
+    """Real bug fixed: a STALE lum_bg_cropped.fits from an earlier
+    multi-contributor run must not be paired with a later single-
+    contributor rgb_reconciled just because the filename suggests it
+    should -- it's checked by actual shape, not assumed from presence."""
+    import run_narrowband_boost
+
+    final_dir = tmp_path / "final"
+    _write_tiny_fit(final_dir / "rgb_reconciled.fit", shape=(3, 4, 4))
+    _write_tiny_fit(final_dir / "lum_bg_cropped.fits", shape=(3, 9, 9))  # stale, wrong shape
+    _write_tiny_fit(final_dir / "lum_bg.fits", shape=(4, 4))  # matches
+
+    resolved = run_narrowband_boost._resolve_luminance(final_dir, final_dir / "rgb_reconciled.fit")
+    assert resolved == final_dir / "lum_bg.fits"
+
+
+def test_resolve_luminance_raises_clear_error_when_nothing_matches(tmp_path: Path) -> None:
+    import run_narrowband_boost
+
+    final_dir = tmp_path / "final"
+    _write_tiny_fit(final_dir / "rgb_reconciled.fit", shape=(3, 4, 4))
+    _write_tiny_fit(final_dir / "lum_bg.fits", shape=(3, 9, 9))  # wrong shape, only candidate
+
+    with pytest.raises(FileNotFoundError, match="spatial shape matching"):
+        run_narrowband_boost._resolve_luminance(final_dir, final_dir / "rgb_reconciled.fit")
+
+
+def test_main_no_luminance_skips_luminance_resolution_entirely(tmp_path: Path, monkeypatch) -> None:
+    """--no-luminance must never call _resolve_luminance -- an RGB-only
+    target genuinely has no Luminance file to find, and searching for one
+    (and potentially raising) would be a real regression."""
+    import run_narrowband_boost
+
+    final_dir = tmp_path / "_pipeline" / "final"
+    _write_tiny_fit(final_dir / "rgb_reconciled.fit", shape=(3, 4, 4))
+    # Deliberately NO lum_bg.fits/lum_bg_cropped.fits anywhere.
+
+    class _FakeReport:
+        def instrument_groups(self):
+            return {}
+
+    monkeypatch.setattr(run_narrowband_boost, "pipeline_dir", lambda project_dir: tmp_path / "_pipeline")
+    monkeypatch.setattr(run_narrowband_boost, "scan_session", lambda project_dir, **k: _FakeReport())
+    monkeypatch.setattr(run_narrowband_boost, "_NarrowbandNormalizingReport", lambda raw_report: raw_report)
+    monkeypatch.setattr(run_narrowband_boost, "build_single_filter_master", lambda *a, **k: None)
+    monkeypatch.setattr(run_narrowband_boost.preflight, "check_prerequisites", lambda **kwargs: [])
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("_resolve_luminance must not be called under --no-luminance")
+
+    monkeypatch.setattr(run_narrowband_boost, "_resolve_luminance", fail_if_called)
+
+    run_narrowband_boost.main(
+        [
+            str(tmp_path), "--telescope", "T20", "--target", "M42",
+            "--ra-hours", "5.588", "--dec-deg", "-5.391",
+            "--no-luminance",
+        ]
+    )
 
 
 # --- interview.py main(): --calibration-header-fallback --------------------

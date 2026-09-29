@@ -8,9 +8,11 @@ under `_pipeline/final/` or `_pipeline/final/_intermediate/`:
   - rgb_reconciled.fit  (the linear RGB composite -- already reprojected
                           onto Luminance's grid, if this is an LRGB
                           target)
-  - lum_bg.fits         (the background-extracted Luminance -- omit
-                          --no-luminance for an RGB-only target instead,
-                          which has no Luminance to recompose with)
+  - lum_bg.fits (or lum_bg_cropped.fits for a multi-contributor LRGB
+                 run -- picked automatically by matching spatial shape
+                 against rgb_reconciled.fit, not just by filename) --
+                 PASS --no-luminance for an RGB-only target instead,
+                 which has no Luminance to recompose with.
 
 Builds a new master for --boost-filter (default Ha) at the SAME binning
 as the RGB masters (via `build_single_filter_master`), reprojects it
@@ -22,9 +24,9 @@ RGB alone via `stretch_rgb`.
 
 Non-destructive: every output is a NEW file under `final/` --
 `<target>_lrgb_haboost.tif` (or `_rgb_haboost.tif` for --no-luminance),
-plus the raw registered narrowband layer and the raw boosted channel,
-exported standalone as real ingredients for further manual tuning in
-Photoshop if the automated blend ratio isn't to taste.
+plus the raw registered narrowband layer, exported standalone as a real
+ingredient for further manual tuning in your own image editor if the
+automated blend ratio isn't to taste.
 """
 
 from __future__ import annotations
@@ -53,10 +55,14 @@ from astro_pipeline.siril_driver import run_script  # noqa: E402
 from astro_pipeline.stretch_compose import stretch_and_compose, stretch_rgb  # noqa: E402
 from astro_pipeline.workspace import pipeline_dir  # noqa: E402
 from astro_pipeline import preflight  # noqa: E402
+from astropy.io import fits  # noqa: E402
 
 
 def _find_existing(final_dir: Path, name: str) -> Path:
-    for candidate in (final_dir / "_intermediate" / name, final_dir / name):
+    # final/ wins over _intermediate/ for the same name -- an
+    # _intermediate/ copy is presumed stale once a fresh one lands in
+    # final/ (reversed from this function's original order).
+    for candidate in (final_dir / name, final_dir / "_intermediate" / name):
         if candidate.exists():
             return candidate
     raise FileNotFoundError(
@@ -65,7 +71,43 @@ def _find_existing(final_dir: Path, name: str) -> Path:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def _spatial_shape_matches(a: Path, b: Path) -> bool:
+    """Compare only the last two (spatial) axes -- NAXIS1/NAXIS2 -- not
+    NAXIS3, since a Luminance file can be 2-D or 3-D-with-one-channel
+    while the RGB composite it's paired with is always 3-D; the pixel
+    grid, not the channel count, is what has to match for rgbcomp."""
+    return (
+        fits.getheader(a)["NAXIS1"] == fits.getheader(b)["NAXIS1"]
+        and fits.getheader(a)["NAXIS2"] == fits.getheader(b)["NAXIS2"]
+    )
+
+
+def _resolve_luminance(final_dir: Path, rgb_reconciled: Path) -> Path:
+    """Real bug fixed: this used to always take lum_bg.fits, but a
+    multi-contributor LRGB run pairs a CROPPED rgb_reconciled.fit with
+    lum_bg_cropped.fits, not the original lum_bg.fits (see
+    lrgb_orchestrator.py's own pairing logic) -- feeding the uncropped
+    Luminance into rgbcomp with a cropped RGB composite is exactly the
+    kind of shape mismatch that produces a cryptic Siril failure deep
+    inside a multi-hour run. Picks whichever of lum_bg_cropped.fits/
+    lum_bg.fits actually has a matching spatial shape (checked, not
+    assumed from the filename alone -- a STALE cropped file from an
+    earlier multi-contributor run must not be paired with a later
+    single-contributor rgb_reconciled just because the name suggests it
+    should)."""
+    for name in ("lum_bg_cropped.fits", "lum_bg.fits"):
+        for candidate_dir in (final_dir, final_dir / "_intermediate"):
+            candidate = candidate_dir / name
+            if candidate.exists() and _spatial_shape_matches(candidate, rgb_reconciled):
+                return candidate
+    raise FileNotFoundError(
+        f"No Luminance file (lum_bg_cropped.fits or lum_bg.fits) under {final_dir} or its "
+        f"_intermediate/ has a spatial shape matching {rgb_reconciled} -- run the target's "
+        "LRGB pipeline first (skill/run_stage.py), or pass --no-luminance for an RGB-only target."
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("project_dir")
     p.add_argument("--telescope", required=True)
@@ -94,7 +136,11 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-preflight", action="store_true",
         help="skip the tool/Siril-version check before running",
     )
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if not args.skip_preflight:
         problems = preflight.check_prerequisites(needs_siril=True, needs_astap=True)
@@ -111,6 +157,15 @@ def main(argv: list[str] | None = None) -> int:
 
     rgb_reconciled = _find_existing(final_dir, "rgb_reconciled.fit")
     print(f"[run ] source reconciled RGB: {rgb_reconciled}")
+
+    # Fail fast: resolve (and shape-check) Luminance right here, before
+    # scan_session/the Ha master build -- a shape mismatch is a data
+    # problem the caller needs to fix, not something worth discovering
+    # after a real, possibly multi-hour, Siril master build.
+    lum_bg: Path | None = None
+    if not args.no_luminance:
+        lum_bg = _resolve_luminance(final_dir, rgb_reconciled)
+        print(f"[run ] source Luminance: {lum_bg}")
 
     calibration_mode = CalibrationMode(args.calibration_mode) if args.calibration_mode else None
 
@@ -176,7 +231,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[run ] stretch ({args.stretch_method}), RGB-only (no Luminance to compose)")
         compose = stretch_rgb(rgb_boosted, final_dir, output_stem=composite_stem, method=args.stretch_method)
     else:
-        lum_bg = _find_existing(final_dir, "lum_bg.fits")
         print(f"[run ] stretch ({args.stretch_method}) + rgbcomp -lum (Luminance: {lum_bg})")
         compose = stretch_and_compose(
             lum_bg, rgb_boosted, final_dir, output_stem=composite_stem, method=args.stretch_method,
