@@ -5,7 +5,7 @@ import pytest
 from astropy.io import fits
 
 from astro_pipeline.background_color import UnknownInstrumentError, resolve_instrument_profile
-from astro_pipeline.calibration import CalibrationMode, FlatPolicy
+from astro_pipeline.calibration import CalibrationFramesMissingError, CalibrationMode, FlatPolicy
 from astro_pipeline.calibration_policy import infer_calibration_mode, infer_flat_policy
 from astro_pipeline.ingest import scan_session
 from astro_pipeline.colour_contributor import ColourContributor, ColourContributorBuilder
@@ -710,6 +710,45 @@ def test_build_master_debayer_with_no_real_dark_skips_select_dark_and_requires_b
     assert captured["dark_frames"] == []
     assert captured["require_dark"] is False
     assert captured["debayer"] is True
+
+
+def test_build_group_master_raises_clear_error_on_missing_bias_not_bare_keyerror() -> None:
+    """Real bug found in the publish-readiness audit: a RAW_LOCAL group
+    with no Bias entry in cal_index at all raised a bare KeyError from
+    `cal_index[(telescope, "Bias", binning, 0.0)]` -- SKILL.md promises the
+    assistant a CalibrationFramesMissingError it can relay verbatim, not a
+    traceback naming an internal tuple key. cal_index has a real Dark entry
+    (so this fails specifically on the missing Bias, not on reaching
+    select_dark first)."""
+    cal_index = {("T24", "Dark", 1, 300.0): [_FakeLightFrame()]}  # no "Bias" key at all
+
+    class _FakeLightFrameWithExptime:
+        def __init__(self) -> None:
+            self.user = "observer1"
+            self.exptime = 300.0
+
+    with pytest.raises(CalibrationFramesMissingError, match="Bias"):
+        build_group_master(
+            Path("/fake"), [_FakeLightFrameWithExptime()], cal_index, "group", "Luminance",
+            "T24", 1, 13.4, 47.2, [],
+            flat_frames=[], flat_policy=FlatPolicy.SKIP_IF_MISSING,
+        )
+
+
+def test_build_osc_raises_not_implemented_for_raw_local() -> None:
+    """RAW_LOCAL OSC calibration (bias/dark for a one-shot-colour camera)
+    is deliberately not supported yet. Before this fix, build_osc() passed
+    an empty cal_index={} straight into build_group_master(), which raised
+    a bare KeyError from deep inside a different function -- this must
+    raise a clear NotImplementedError immediately instead, before touching
+    resolve_lights/build_group_master at all (so no report/lights fixture
+    is needed to exercise this)."""
+    builder = ColourContributorBuilder(
+        project_dir=Path("/fake"), contrib_dir=Path("/fake/contrib"), report=None,
+        telescope="T68", target="IC 1396", binning=1, ra_hours=21.6, dec_deg=57.5, notes=[],
+    )
+    with pytest.raises(NotImplementedError, match="not supported yet"):
+        builder.build_osc(calibration_mode=CalibrationMode.RAW_LOCAL)
 
 
 # --- Step 6b (plan-flats-v4.md, fixes half of G6): a group proceeding

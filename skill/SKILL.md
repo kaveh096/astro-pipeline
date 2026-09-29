@@ -175,11 +175,9 @@ with a full R/G/B set for the primary telescope.
   filename (no `T68` folder token anywhere in their path), so
   `infer_calibration_mode` sees zero local Bias/Dark and falls back to
   PRECALIBRATED via its real `calibrated-` provenance lights. RAW_LOCAL
-  OSC (bias-only + debayer, as the retired claim described) is real code
-  (`build_group_master`'s bias-only-when-no-dark branch) but currently
-  UNREACHABLE for T68 in practice: `build_osc`'s own `cal_index={}` bug
-  means RAW_LOCAL OSC raises `KeyError` before ever reaching that branch
-  -- deferred, see "Flats" below. A target with BOTH a full mono R/G/B set
+  OSC (local bias/dark calibration for an OSC camera) is not supported
+  yet -- `build_osc` raises `NotImplementedError` if asked for it; relay
+  that message verbatim rather than trying to work around it. A target with BOTH a full mono R/G/B set
   AND `Color` data
   at the same (telescope, binning) raises `NotImplementedError` instead
   of silently combining them (channel-order parity between Siril's
@@ -520,9 +518,9 @@ fallback flag with an explicit `--calibration-mode` override:
 
 **What this does NOT do (stated plainly, so a reader doesn't assume more
 happened than did)**:
-- **No OSC flats.** `build_osc`'s own `cal_index={}` bug means RAW_LOCAL
-  OSC raises `KeyError` regardless of any flag above -- deferred, not
-  committed to. Revisit only if IC 1396's own future per-target
+- **No OSC flats, or any RAW_LOCAL OSC calibration at all.** `build_osc`
+  raises `NotImplementedError` regardless of any flag above -- deferred,
+  not committed to. Revisit only if IC 1396's own future per-target
   measurement shows a real benefit.
 - **No narrowband master invalidation on a flat/recipe change.**
   Narrowband (`run_narrowband.py`) has no `RunSignature`-based staleness

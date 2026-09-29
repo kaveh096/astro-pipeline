@@ -202,11 +202,39 @@ def consequence_annotations(
     annotation here instead of each one's own `infer_flat_policy` result,
     so the interview's preview matches what a run with that same override
     would actually do.
+
+    Real bug fixed here: a missing-Dark line used to get an unconditional
+    `[BLOCKED]`, even when `calibration.select_dark()` would actually
+    scale a longer dark down and let the run proceed (T21's real
+    300s/600s-vs-900s-dark case) -- the interview told a human "this stops
+    a real run" for something that doesn't. Computed per (telescope,
+    binning) by actually calling `select_dark()` against the same
+    `calibration_index()`/real light exptimes `build_group_master()` uses
+    -- not by re-deriving exptimes from this function's own lossy
+    `:.0f`-formatted warning text. If ANY instrument group at that
+    (telescope, binning) would still raise, the line stays `[BLOCKED]`
+    (conservative: a mixed-filter binning where one filter genuinely has
+    no usable dark is still a real blocker).
     """
+    cal_index = report.calibration_index()
+    blocked_dark_binnings: set[tuple[str, int]] = set()
+    for (telescope, _target, _filter_name, binning), lights in report.instrument_groups().items():
+        light_exptimes = {f.exptime for f in lights}
+        try:
+            select_dark(cal_index, telescope, binning, light_exptimes)
+        except CalibrationFramesMissingError:
+            blocked_dark_binnings.add((telescope, binning))
+
     annotated: list[str] = []
     for line in deduped_warnings:
         telescope = line.split(" BIN", 1)[0]
-        if "no Bias frames" in line or "no Dark frames" in line:
+        if "no Dark frames" in line:
+            binning = int(line.split(" BIN", 1)[1].split(":", 1)[0])
+            if (telescope, binning) in blocked_dark_binnings:
+                annotated.append(f"  [BLOCKED] {line}")
+            else:
+                annotated.append(f"  (will scale -- see Dark-scaling resolution below) {line}")
+        elif "no Bias frames" in line:
             annotated.append(f"  [BLOCKED] {line}")
         elif "no Flat frames" in line:
             policy = flat_policy_override if flat_policy_override is not None else infer_flat_policy(report, telescope)

@@ -24,6 +24,7 @@ from astropy.io import fits
 
 from .calibration import (
     DEFAULT_PEDESTAL,
+    CalibrationFramesMissingError,
     CalibrationMode,
     FlatPolicy,
     run_calibration,
@@ -173,7 +174,13 @@ def build_group_master(
             debayer=debayer, bayer_pattern=bayer_pattern,
         )
     else:
-        bias = cal_index[(telescope, "Bias", binning, 0.0)]
+        bias_key = (telescope, "Bias", binning, 0.0)
+        if bias_key not in cal_index:
+            raise CalibrationFramesMissingError(
+                f"No Bias frames found for {telescope} BIN{binning} "
+                f"(needed to calibrate {group_name})."
+            )
+        bias = cal_index[bias_key]
 
         # OSC + local raw calibration plan (2026-09): a real, not
         # hypothetical, case -- T68 (IC 1396) has real local bias but NO

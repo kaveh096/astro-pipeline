@@ -216,16 +216,53 @@ def test_unrecognized_summary_groups_and_counts_by_reason() -> None:
     assert lines[1] == "  1x: B"
 
 
-def test_consequence_annotations_bias_dark_always_blocked() -> None:
+class _FakeLightWithExptime:
+    def __init__(self, exptime: float) -> None:
+        self.exptime = exptime
+
+
+def test_consequence_annotations_bias_always_blocked_dark_blocked_when_unscalable() -> None:
+    """Bias is unconditionally [BLOCKED] (no scaling mechanism exists for
+    it). Dark is genuinely blocked here too, but via select_dark() finding
+    NO dark at all for T20 BIN1 in calibration_index() -- not via a
+    hardcoded "always blocked" rule."""
     class _FakeReport:
         def flat_index(self):
             return {}
+
+        def instrument_groups(self):
+            return {("T20", "Target", "Luminance", 1): [_FakeLightWithExptime(300.0)]}
+
+        def calibration_index(self):
+            return {}  # no Bias, no Dark at all -> select_dark raises
 
     lines = consequence_annotations(_FakeReport(), [
         "T20 BIN1: no Bias frames (needed for Luminance)",
         "T20 BIN1: no Dark frames at 300s (needed for Luminance)",
     ])
     assert all(line.startswith("  [BLOCKED]") for line in lines)
+
+
+def test_consequence_annotations_scalable_dark_is_not_blocked() -> None:
+    """Real bug fix: T21's own real case (300s/600s lights, only a 900s
+    dark exists) -- select_dark() successfully scales this, so the
+    interview must NOT tell a human this blocks the run."""
+    class _FakeReport:
+        def flat_index(self):
+            return {}
+
+        def instrument_groups(self):
+            return {("T21", "M51", "Luminance", 1): [_FakeLightWithExptime(300.0), _FakeLightWithExptime(600.0)]}
+
+        def calibration_index(self):
+            return {("T21", "Dark", 1, 900.0): [object()]}
+
+    lines = consequence_annotations(_FakeReport(), [
+        "T21 BIN1: no Dark frames at 300s, 600s (needed for Luminance)",
+    ])
+    assert len(lines) == 1
+    assert "[BLOCKED]" not in lines[0]
+    assert "will scale" in lines[0]
 
 
 def test_consequence_annotations_flat_require_is_blocked_skip_is_not() -> None:
@@ -235,6 +272,12 @@ def test_consequence_annotations_flat_require_is_blocked_skip_is_not() -> None:
 
         def flat_index(self):
             return {("T20", 1, "Luminance"): ["f"]} if self._has_flat else {}
+
+        def instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {}
 
     require_lines = consequence_annotations(
         _FakeReport(has_flat=True), ["T20 BIN1: no Flat frames (needed for Red)"],
