@@ -252,6 +252,27 @@ class LRGBOrchestrator:
         self.previous = None
         self.previous_linear: bool | None = None
 
+    def _warn_about_legacy_narrowband_files(self) -> None:
+        """Log-only (never deletes anything) -- narrowband used to share
+        `final/` directly with the LRGB/RGB-only path before it got its
+        own subdirectory (`final/narrowband_<palette>/`). Leftover files
+        from before that change are dead weight this class never reads,
+        but worth flagging rather than leaving a silent trap for whoever
+        finds them later.
+        """
+        legacy_names = ["rgb_equalized.fit", "ha.fit", "oiii.fit", "sii.fit", "oiii_2.fit"]
+        found = [name for name in legacy_names if (self.final / name).exists()]
+        found += [p.name for p in self.checkpoint_dir.glob("checkpoints_narrowband_*.json")]
+        if found:
+            _log(
+                f"[note] legacy narrowband file(s) found in {self.final}/ or its checkpoints/: "
+                f"{', '.join(found)} -- these predate narrowband's own subdirectory, this run "
+                "never reads them, delete by hand. If narrowband ran BEFORE this LRGB/RGB-only "
+                "run, final/rgb_native*/rgb_colour_calibrated.fit may ALSO be narrowband-owned "
+                "-- if colours look wrong, --force masters rebuilds them for real.",
+                self.notes,
+            )
+
     def _build_masters(self) -> None:
         """Luminance discovery/build/select, RGB+OSC contributor
         discovery/build, reference-contributor selection, `RunSignature`
@@ -262,6 +283,8 @@ class LRGBOrchestrator:
         returns (Steps 12c/12d will move those phases into methods here
         too; until then `run_lrgb` reads these directly off the instance).
         """
+        self._warn_about_legacy_narrowband_files()
+
         _log(f"=== scanning {self.project_dir.name} ===", self.notes)
         report = scan_session(self.project_dir, calibration_header_fallback=self.calibration_header_fallback)
 

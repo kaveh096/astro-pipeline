@@ -1297,6 +1297,255 @@ def test_run_narrowband_exports_with_palette_named_stem(tmp_path: Path, monkeypa
     assert "-nosum" not in captured["rgbcomp_command"]  # sho has no repeated filter
 
 
+def _setup_narrowband_full_mocks(monkeypatch, tmp_path: Path, stretch_calls: dict) -> None:
+    """Shared mock harness for the publish-readiness Step 7 tests below --
+    same shape as test_run_narrowband_exports_with_palette_named_stem's own
+    mocks, factored out since several tests need the exact same fully-
+    mocked call chain (contributor build -> equalization -> stretch ->
+    export), differing only in what's already on disk before the call and
+    what they assert about stretch_calls afterward."""
+    import astro_pipeline.colour_contributor as colour_contributor_module
+    import astro_pipeline.narrowband_orchestrator as narrowband_orchestrator_module
+
+    class _FakeLightFrame:
+        def __init__(self) -> None:
+            self.user = "observer1"
+            self.exptime = 300.0
+
+    class _FakeReportSHO:
+        def instrument_groups(self):
+            return {
+                ("T20", "M42", f, 2): [_FakeLightFrame(), _FakeLightFrame()]
+                for f in ("SII", "Ha", "OIII")
+            }
+
+        def calibration_index(self):
+            return {}
+
+        def flat_index(self):
+            return {}
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+    monkeypatch.setattr(narrowband_orchestrator_module, "scan_session", lambda pd, **kw: _FakeReportSHO())
+
+    def fake_build_master(project_dir, lights, cal_index, group_name, filter_name, *args, **kwargs):
+        p = tmp_path / f"master_{filter_name}.fit"
+        fits.PrimaryHDU(data=np.full((16, 16), 0.3, dtype=np.float32)).writeto(p, overwrite=True)
+        return p
+
+    def fake_reproject(source, reference, out_path):
+        fits.PrimaryHDU(data=np.full((16, 16), 0.3, dtype=np.float32)).writeto(out_path, overwrite=True)
+
+        class _R:
+            footprint_mean = 1.0
+
+        return _R()
+
+    def fake_run_script(commands, workdir=None, **kwargs):
+        fits.PrimaryHDU(data=np.full((3, 16, 16), 0.3, dtype=np.float32)).writeto(
+            Path(workdir) / "rgb_native.fit", overwrite=True
+        )
+
+        class _R:
+            log_lines: list = []
+
+        return _R()
+
+    def fake_bg_extraction(fits_path, output_stem):
+        out = Path(fits_path).parent / f"{output_stem}.fits"
+        fits.PrimaryHDU(data=np.full((3, 16, 16), 0.3, dtype=np.float32)).writeto(out, overwrite=True)
+        return out
+
+    def fake_stretch_rgb(rgb_path, work_dir, output_stem, method):
+        stretch_calls["n"] += 1
+        out = Path(work_dir) / f"{output_stem}.fit"
+        fits.PrimaryHDU(
+            data=np.random.default_rng(stretch_calls["n"]).uniform(0.4, 0.6, size=(3, 16, 16)).astype(np.float32)
+        ).writeto(out, overwrite=True)
+
+        class _R:
+            composite_path = out
+
+        return _R()
+
+    monkeypatch.setattr(colour_contributor_module, "build_group_master", fake_build_master)
+    monkeypatch.setattr(colour_contributor_module, "reproject_to_reference", fake_reproject)
+    monkeypatch.setattr(colour_contributor_module, "crop_to_common_coverage", lambda paths, out_dir: None)
+    monkeypatch.setattr(colour_contributor_module, "run_script", fake_run_script)
+    monkeypatch.setattr(colour_contributor_module, "run_graxpert_background_extraction", fake_bg_extraction)
+    monkeypatch.setattr(narrowband_orchestrator_module, "stretch_rgb", fake_stretch_rgb)
+
+
+def test_run_narrowband_writes_contributor_files_into_own_subdirectory(tmp_path: Path, monkeypatch) -> None:
+    """Real bug fixed: narrowband used to build rgb_native.fit/
+    rgb_colour_calibrated.fit directly in final/ -- the SAME location the
+    LRGB/RGB-only path's primary contributor uses -- so running narrowband
+    after (or before) an LRGB run on the same project silently reused the
+    other run's colour files. They now live under final/narrowband_sho/,
+    and only the composite + its export stay in final/ directly."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    stretch_calls = {"n": 0}
+    _setup_narrowband_full_mocks(monkeypatch, tmp_path, stretch_calls)
+
+    run_narrowband(project_dir, "T20", "M42", 5.588, -5.391, palette="sho", binning=2)
+
+    final = project_dir / "_pipeline" / "final"
+    assert (final / "narrowband_sho" / "rgb_native.fit").exists()
+    assert not (final / "rgb_native.fit").exists()
+    assert (final / "sho_final.fit").exists()
+
+
+def test_run_narrowband_force_rebuilds_stale_final_composite(tmp_path: Path, monkeypatch) -> None:
+    """force=True must actually rebuild final/sho_final.fit, not just the
+    (now-namespaced) intermediates -- the composite itself was previously
+    outside the force-delete list's own directory once narrowband moved
+    to a subdirectory; this confirms both paths are covered together."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    stretch_calls = {"n": 0}
+    _setup_narrowband_full_mocks(monkeypatch, tmp_path, stretch_calls)
+
+    run_narrowband(project_dir, "T20", "M42", 5.588, -5.391, palette="sho", binning=2)
+    assert stretch_calls["n"] == 1
+
+    run_narrowband(project_dir, "T20", "M42", 5.588, -5.391, palette="sho", binning=2, force=True)
+    assert stretch_calls["n"] == 2
+
+
+def test_run_narrowband_migration_rebuilds_stale_composite_without_force(tmp_path: Path, monkeypatch) -> None:
+    """The real migration case: an existing project has a stale
+    final/sho_final.fit from before narrowband got its own subdirectory,
+    but the new final/narrowband_sho/ subdirectory is empty. Even WITHOUT
+    force, equalization re-running (since its own subdirectory has
+    nothing to resume from) must delete and rebuild the stale composite,
+    not leave the old file in place forever."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    final = project_dir / "_pipeline" / "final"
+    final.mkdir(parents=True)
+    stale = final / "sho_final.fit"
+    fits.PrimaryHDU(data=np.zeros((3, 4, 4), dtype=np.float32)).writeto(stale)
+    stale_bytes = stale.read_bytes()
+
+    stretch_calls = {"n": 0}
+    _setup_narrowband_full_mocks(monkeypatch, tmp_path, stretch_calls)
+
+    run_narrowband(project_dir, "T20", "M42", 5.588, -5.391, palette="sho", binning=2)
+
+    assert stretch_calls["n"] == 1
+    assert stale.read_bytes() != stale_bytes
+
+
+def test_run_narrowband_plain_second_run_does_not_restretch(tmp_path: Path, monkeypatch) -> None:
+    """A normal resumed run (nothing forced, no migration gap) must skip
+    the stretch entirely on the second call -- confirms the migration fix
+    above doesn't turn into an unconditional rebuild-every-time."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    stretch_calls = {"n": 0}
+    _setup_narrowband_full_mocks(monkeypatch, tmp_path, stretch_calls)
+
+    run_narrowband(project_dir, "T20", "M42", 5.588, -5.391, palette="sho", binning=2)
+    assert stretch_calls["n"] == 1
+
+    run_narrowband(project_dir, "T20", "M42", 5.588, -5.391, palette="sho", binning=2)
+    assert stretch_calls["n"] == 1
+
+
+def test_run_lrgb_and_run_narrowband_in_one_project_share_no_files(tmp_path: Path, monkeypatch) -> None:
+    """Real bug fixed: LRGB and narrowband used to share final/rgb_native
+    .fit/rgb_colour_calibrated.fit (colour-file collision) AND
+    checkpoints/checkpoints.json (save_checkpoints() prunes any preview
+    PNG not in ITS OWN JSON, so each one's save silently deleted the
+    other's checkpoint previews). Runs narrowband first, then a real
+    (mocked) run_lrgb RGB-only pass on the SAME project, and confirms
+    narrowband's own files -- including its checkpoint previews -- all
+    survive."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    stretch_calls = {"n": 0}
+    _setup_narrowband_full_mocks(monkeypatch, tmp_path, stretch_calls)
+
+    run_narrowband(project_dir, "T20", "M42", 5.588, -5.391, palette="sho", binning=2)
+
+    final = project_dir / "_pipeline" / "final"
+    narrowband_previews = list((final / ".." / "checkpoints" / "narrowband_sho").resolve().glob("*.png"))
+    assert narrowband_previews, "expected at least one narrowband checkpoint preview on disk"
+    narrowband_contrib_files_before = sorted((final / "narrowband_sho").glob("*"))
+
+    # A minimal, fully-mocked LRGB RGB-only run against the SAME project --
+    # same shape as test_run_lrgb_rgb_only_stretch_method_change_invalidates_rgb_final's
+    # own mocks, just with a different (T02) telescope/target so its own
+    # contributor discovery doesn't collide with T20/M42's narrowband data.
+    import astro_pipeline.lrgb_orchestrator as lrgb_orchestrator_module
+    from astro_pipeline.stretch_compose import RGBComposeResult
+
+    class _FakeRGBLightFrame:
+        def __init__(self, path_name: str) -> None:
+            self.path = tmp_path / path_name
+            self.user = "observer1"
+            self.exptime = 300.0
+
+    class _FakeReportRGBOnly:
+        def instrument_groups(self):
+            return {
+                ("T02", "Fake Target", "Red", 1): [_FakeRGBLightFrame("r.fit")],
+                ("T02", "Fake Target", "Green", 1): [_FakeRGBLightFrame("g.fit")],
+                ("T02", "Fake Target", "Blue", 1): [_FakeRGBLightFrame("b.fit")],
+            }
+
+        def calibrated_instrument_groups(self):
+            return {}
+
+        def calibration_index(self):
+            return {("T02", "Bias", 1, 0.0): ["b"], ("T02", "Dark", 1, 300.0): ["d"]}
+
+        def flat_index(self):
+            return {}
+
+    monkeypatch.setattr(lrgb_orchestrator_module, "scan_session", lambda pd, **kw: _FakeReportRGBOnly())
+
+    stub_composite = tmp_path / "stub_rgb_colour_calibrated.fit"
+    fits.PrimaryHDU(
+        data=np.random.default_rng(2).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+    ).writeto(stub_composite)
+
+    def fake_build_rgb(self, *a, **k):
+        self.contrib_dir.mkdir(parents=True, exist_ok=True)
+        import shutil as _shutil
+        _shutil.copy2(stub_composite, self.contrib_dir / "rgb_colour_calibrated.fit")
+        return ColourContributor(
+            telescope=self.telescope, binning=self.binning, composite_path=stub_composite,
+            sub_count=1, stack_total=1,
+        )
+
+    def fake_stretch_rgb_lrgb(rgb_path, work_dir, output_stem, method="autostretch", **kwargs):
+        out = Path(work_dir) / f"{output_stem}.fit"
+        fits.PrimaryHDU(
+            data=np.random.default_rng(9).uniform(0.05, 0.5, size=(3, 16, 16)).astype(np.float32)
+        ).writeto(out, overwrite=True)
+        return RGBComposeResult(composite_path=out, rgb_stretch_log=None)
+
+    monkeypatch.setattr(ColourContributorBuilder, "build_rgb", fake_build_rgb)
+    monkeypatch.setattr(lrgb_orchestrator_module, "stretch_rgb", fake_stretch_rgb_lrgb)
+
+    run_lrgb(
+        project_dir, telescope="T02", target="Fake Target", ra_hours=1.0, dec_deg=1.0,
+        lum_binning=1, rgb_binning=1,
+    )
+
+    # Narrowband's own colour-contributor files (in its own subdirectory)
+    # must be completely untouched by the LRGB run.
+    assert sorted((final / "narrowband_sho").glob("*")) == narrowband_contrib_files_before
+    # And narrowband's own checkpoint previews must survive the LRGB run's
+    # own save_checkpoints() call (previously: shared checkpoints.json ->
+    # each save pruned the other's previews).
+    assert list((final / ".." / "checkpoints" / "narrowband_sho").resolve().glob("*.png")) == narrowband_previews
+
+
 # --- narrowband-boost plan (2026-09): build_single_filter_master ----------
 
 

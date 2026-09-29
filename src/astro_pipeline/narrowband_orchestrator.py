@@ -111,8 +111,8 @@ def run_narrowband(
     result = PipelineResult()
     notes = result.notes
 
-    checkpoint_dir = out / "checkpoints"
-    checkpoints_path = checkpoint_dir / f"checkpoints_narrowband_{palette}.json"
+    checkpoint_dir = out / "checkpoints" / f"narrowband_{palette}"
+    checkpoints_path = checkpoint_dir / "checkpoints.json"
 
     _log(f"=== scanning {project_dir.name} (narrowband, palette={palette}) ===", notes)
     raw_report = scan_session(project_dir, calibration_header_fallback=calibration_header_fallback)
@@ -121,14 +121,35 @@ def run_narrowband(
     resolved_calibration_mode = calibration_mode or infer_calibration_mode(raw_report, telescope)
     resolved_flat_policy = flat_policy if flat_policy is not None else infer_flat_policy(raw_report, telescope)
 
-    contrib_dir = final  # single contributor -- always the primary path, mirrors contributor_dir()'s own rule
+    # Own subdirectory (not `final` directly) -- narrowband used to share
+    # `final/rgb_native.fit`/`rgb_colour_calibrated.fit` with the LRGB/
+    # RGB-only path (contributor_dir()'s own single-contributor rule),
+    # which meant running narrowband after an LRGB run (or HOO after SHO)
+    # silently reused the OTHER run's colour files. Only the final
+    # composite (`{palette}_final.fit`) and its TIFF/preview export stay
+    # in `final/` -- those are this run's own real, namespaced outputs.
+    contrib_dir = final / f"narrowband_{palette}"
 
     if force:
+        # Slot filenames mirror ColourContributorBuilder.build_rgb()'s own
+        # naming exactly (dedup with a "_2" suffix for a repeated filter,
+        # e.g. HOO's real Ha/OIII/OIII -> ha.fit/oiii.fit/oiii_2.fit) --
+        # not usable()-gated, so deleting them is just hygiene, not load-
+        # bearing for the force rebuild itself.
+        slot_names: list[str] = []
+        seen: set[str] = set()
+        for filter_name in filters:
+            name = f"{filter_name.lower()}.fit"
+            if name in seen:
+                name = f"{filter_name.lower()}_2.fit"
+            seen.add(name)
+            slot_names.append(name)
         for name in (
             "rgb_native.fit", "rgb_native_bg.fits", "rgb_colour_calibrated.fit",
-            "rgb_equalized.fit", f"{palette}_final.fit",
+            "rgb_equalized.fit", *slot_names,
         ):
             _delete_if_exists(contrib_dir / name, "force=True", notes)
+        _delete_if_exists(final / f"{palette}_final.fit", "force=True", notes)
 
     builder = ColourContributorBuilder(
         project_dir, contrib_dir, report, telescope, target, binning, ra_hours, dec_deg, notes,
@@ -157,12 +178,29 @@ def run_narrowband(
     save_checkpoints(result.checkpoints, checkpoints_path)
 
     equalized_path = contrib_dir / "rgb_equalized.fit"
-    if not usable(equalized_path, notes):
+    equalization_ran = not usable(equalized_path, notes)
+    if equalization_ran:
         _log("[run ] per-channel background/scale equalization (narrowband colour substitute for SPCC)", notes)
         stats = equalize_narrowband_channels(contributor.composite_path, equalized_path)
         _log(f"       {', '.join(f'{k}={v:.4f}' for k, v in stats.items())}", notes)
     else:
         _log("[skip] narrowband channel equalization already done", notes)
+
+    if equalization_ran:
+        # The migration case (an existing project's narrowband contributor
+        # just moved to its own subdirectory, so contrib_dir was empty and
+        # everything above just rebuilt from the reused per-filter masters)
+        # and the "narrowband reused another run's colour files" bug both
+        # leave a composite that was built from different upstream data
+        # than what equalization just produced -- delete it so the
+        # composite step below actually rebuilds from the fresh
+        # equalized_path, rather than usable() finding a stale file and
+        # skipping. Same equalize->composite chaining LRGB's own
+        # invalidation cascade already relies on, applied here since
+        # narrowband has no RunSignature to trigger it automatically.
+        _delete_if_exists(
+            final / f"{palette}_final.fit", "equalization just rebuilt, composite is now stale", notes,
+        )
 
     cp = checkpoint(
         equalized_path, "03_narrowband_equalized", output_dir=checkpoint_dir,
