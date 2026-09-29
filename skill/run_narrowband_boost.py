@@ -108,8 +108,12 @@ def _resolve_luminance(final_dir: Path, rgb_reconciled: Path) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("project_dir")
+    p = argparse.ArgumentParser(
+        description="Blend a narrowband channel (default Ha) into an already-completed LRGB/"
+        "RGB-only project's composite. Needs rgb_reconciled.fit (and, unless --no-luminance, a "
+        "matching Luminance file) already present under final/ or final/_intermediate/.",
+    )
+    p.add_argument("project_dir", help="the target's project folder (raw iTelescope delivery)")
     p.add_argument("--telescope", required=True)
     p.add_argument("--target", required=True)
     p.add_argument("--ra-hours", type=float, required=True)
@@ -118,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--boost-channel", default="red", choices=sorted(CHANNEL_INDEX))
     p.add_argument("--boost-factor", type=float, default=DEFAULT_BOOST_FACTOR)
     p.add_argument("--binning", type=int, default=2)
-    p.add_argument("--stretch-method", default="autostretch")
+    p.add_argument("--stretch-method", choices=["autostretch", "autoghs", "autoghs+auto"], default="autostretch")
     p.add_argument("--no-luminance", action="store_true", help="RGB-only target: stretch the boosted RGB alone")
     p.add_argument(
         "--calibration-mode", choices=["raw_local", "precalibrated"], default=None,
@@ -142,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    project_dir = Path(args.project_dir)
+    if not project_dir.exists():
+        print(f"{project_dir} does not exist.")
+        return 2
+
     if not args.skip_preflight:
         problems = preflight.check_prerequisites(needs_siril=True, needs_astap=True)
         if problems:
@@ -150,7 +159,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  - {problem}")
             return 2
 
-    project_dir = Path(args.project_dir)
     final_dir = pipeline_dir(project_dir) / "final"
     work_dir = final_dir / "_intermediate" / "narrowband_boost"
     work_dir.mkdir(parents=True, exist_ok=True)

@@ -38,47 +38,59 @@ from astro_pipeline.lrgb_orchestrator import run_lrgb  # noqa: E402
 from astro_pipeline import preflight  # noqa: E402
 
 
-def _parse_lum_source(value: str | None) -> tuple[str, int] | None:
-    if not value:
-        return None
+def _parse_lum_source(value: str) -> tuple[str, int]:
+    """Used as --lum-source's `type=` -- a bad value raises
+    ArgumentTypeError DURING parse_args(), which argparse turns into its
+    own normal usage error (exit 2), not a raw traceback after parsing
+    already finished."""
     telescope, _, binning = value.partition(":")
     if not binning:
         raise argparse.ArgumentTypeError(
             f"--lum-source must be TELESCOPE:BINNING (e.g. T21:1), got {value!r}"
         )
-    return telescope, int(binning)
+    try:
+        return telescope, int(binning)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--lum-source's BINNING must be an integer, got {binning!r} in {value!r}"
+        ) from None
 
 
-def _parse_calibration_mode_dict(values: list[str]) -> dict[str, CalibrationMode] | None:
-    """`--calibration-mode TEL=raw_local|precalibrated`, repeatable, one
-    TEL=value pair per occurrence (Step 5, plan-flats-v4.md) -- a genuine
+def _parse_calibration_mode_item(value: str) -> tuple[str, CalibrationMode]:
+    """Used as --calibration-mode's `type=`, applied to each repeated
+    `TEL=raw_local|precalibrated` occurrence individually (a genuine
     multi-telescope override, since one LRGB run can have a different
-    Luminance telescope and colour telescope. `run_lrgb`/`LRGBOrchestrator`
-    already accept exactly this `dict[str, CalibrationMode]` shape."""
-    if not values:
-        return None
-    result: dict[str, CalibrationMode] = {}
-    for item in values:
-        telescope, sep, mode = item.partition("=")
-        if not sep:
-            raise argparse.ArgumentTypeError(
-                f"--calibration-mode must be TEL=raw_local|precalibrated, got {item!r}"
-            )
-        result[telescope] = CalibrationMode(mode)
-    return result
+    Luminance telescope and colour telescope) -- `main()` collects the
+    resulting (telescope, mode) pairs into the
+    `dict[str, CalibrationMode]` shape `run_lrgb`/`LRGBOrchestrator`
+    already accept."""
+    telescope, sep, mode = value.partition("=")
+    if not sep:
+        raise argparse.ArgumentTypeError(
+            f"--calibration-mode must be TEL=raw_local|precalibrated, got {value!r}"
+        )
+    try:
+        return telescope, CalibrationMode(mode)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--calibration-mode's value must be 'raw_local' or 'precalibrated', got {mode!r} in {value!r}"
+        ) from None
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("project_dir")
+    p = argparse.ArgumentParser(
+        description="Run the LRGB/RGB-only/OSC pipeline stage-by-stage for one project folder, "
+        "printing notes/checkpoints/preview paths as it goes.",
+    )
+    p.add_argument("project_dir", help="the target's project folder (raw iTelescope delivery)")
     p.add_argument("--telescope", required=True, help="primary telescope (RGB discovery scope + lum fallback)")
     p.add_argument("--target", required=True)
     p.add_argument("--ra-hours", type=float, required=True)
     p.add_argument("--dec-deg", type=float, required=True)
     p.add_argument("--lum-binning", type=int, default=1)
     p.add_argument("--rgb-binning", type=int, default=2)
-    p.add_argument("--stretch-method", default="autostretch")
-    p.add_argument("--lum-source", default=None, help="explicit override, TELESCOPE:BINNING")
+    p.add_argument("--stretch-method", choices=["autostretch", "autoghs", "autoghs+auto"], default="autostretch")
+    p.add_argument("--lum-source", type=_parse_lum_source, default=None, help="explicit override, TELESCOPE:BINNING")
     p.add_argument("--pedestal", type=float, default=DEFAULT_PEDESTAL)
     p.add_argument(
         "--stop-after", choices=["masters", "reconciled", "final"], default=None,
@@ -89,7 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="repeatable; invalidates the named stage and every stage after it",
     )
     p.add_argument(
-        "--calibration-mode", action="append", default=[], metavar="TEL=raw_local|precalibrated",
+        "--calibration-mode", action="append", default=[], type=_parse_calibration_mode_item,
+        metavar="TEL=raw_local|precalibrated",
         help="repeatable per-telescope override, e.g. --calibration-mode T20=raw_local",
     )
     p.add_argument(
@@ -109,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    project_dir_path = Path(args.project_dir)
+    if not project_dir_path.exists():
+        print(f"{project_dir_path} does not exist.")
+        return 2
 
     if not args.skip_preflight:
         problems = preflight.check_prerequisites(
@@ -136,11 +154,11 @@ def main(argv: list[str] | None = None) -> int:
         lum_binning=args.lum_binning,
         rgb_binning=args.rgb_binning,
         stretch_method=args.stretch_method,
-        lum_source=_parse_lum_source(args.lum_source),
+        lum_source=args.lum_source,  # already parsed via --lum-source's type=
         pedestal=args.pedestal,
         stop_after=args.stop_after,
         force=set(args.force) or None,
-        calibration_mode=_parse_calibration_mode_dict(args.calibration_mode),
+        calibration_mode=dict(args.calibration_mode) if args.calibration_mode else None,
         calibration_header_fallback=args.calibration_header_fallback,
         flat_policy=FlatPolicy(args.flat_policy) if args.flat_policy else None,
     )

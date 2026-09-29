@@ -8,20 +8,18 @@ same `final/` directory, so nothing already delivered is at risk.
 
 Two real, distinct chains, chosen by `--nebula`:
 
-  - Galaxy (--no-nebula, default): denoise the full composite (stars
+  - Galaxy (default, omit --nebula): denoise the full composite (stars
     included -- a galaxy's star field isn't a thing to remove), then
     export with the given black point.
       <target>_denoised_darkened.tif
 
-  - Nebula (--nebula): star-removal FIRST on the original composite (not
-    the denoised one -- denoising blurs faint stars and degrades
-    detection, confirmed during this capability's own development), then
-    denoise the STARLESS result (avoids star-blur artifacts entirely),
-    then export with the given black point. The star layer is exported
-    standalone (faithful, no denoise/darken) for optional manual
-    recombination in Photoshop -- deliberately not auto-recombined, same
-    scope boundary as every other creative step this skill declines to
-    automate.
+  - Nebula (--nebula): star-removal FIRST on the original composite
+    (denoising blurs faint stars and degrades detection), then denoise
+    the STARLESS result, then export with the given black point. The
+    star layer is exported standalone (faithful, no denoise/darken) for
+    optional manual recombination in your own image editor --
+    deliberately not auto-recombined, same scope boundary as every
+    other creative step this skill declines to automate.
       <target>_starless.tif          (faithful, standalone)
       <target>_stars.tif             (faithful, standalone)
       <target>_starless_denoised_darkened.tif
@@ -119,7 +117,11 @@ def _black_point(value: str) -> float:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description="Optional post-processing on an already-finished final composite: star "
+        "removal (--nebula), GraXpert denoise, and black-point export. Every output is a new, "
+        "separately-named file -- nothing already delivered is touched.",
+    )
     p.add_argument("final_dir", help="the target's _pipeline/final directory")
     p.add_argument("--target-name", required=True, help='output file stem, e.g. "M51"')
     p.add_argument(
@@ -143,16 +145,17 @@ def main(argv: list[str] | None = None) -> int:
     graxpert_exe = Path(args.graxpert_exe) if args.graxpert_exe else None
     starnet_exe = Path(args.starnet_exe) if args.starnet_exe else None
 
+    if not final_dir.exists():
+        print(f"{final_dir} does not exist.")
+        return 2
+
     if not args.skip_preflight:
-        problems = []
-        if not final_dir.exists():
-            problems.append(f"{final_dir} does not exist.")
-        problems.extend(preflight.check_prerequisites(
+        problems = preflight.check_prerequisites(
             needs_graxpert=True,
             needs_starnet=args.nebula,
             graxpert_exe=graxpert_exe,
             starnet_exe=starnet_exe,
-        ))
+        )
         if problems:
             print("Cannot run -- fix these first (or pass --skip-preflight):")
             for problem in problems:

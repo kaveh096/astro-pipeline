@@ -30,6 +30,11 @@ def _write_tiny_fit(path: Path, shape: tuple[int, ...] = (3, 4, 4)) -> None:
 
 
 def test_run_stage_parses_calibration_mode_dict_repeated() -> None:
+    """--calibration-mode's type= (_parse_calibration_mode_item) now
+    converts each repeated TEL=value occurrence AT PARSE TIME, so a bad
+    value is argparse's own usage error, not a raw traceback after
+    parsing already finished -- args.calibration_mode is a list of
+    (telescope, CalibrationMode) pairs, which main() turns into a dict."""
     import run_stage
 
     args = run_stage.build_parser().parse_args(
@@ -40,8 +45,7 @@ def test_run_stage_parses_calibration_mode_dict_repeated() -> None:
             "--calibration-mode", "T68=precalibrated",
         ]
     )
-    parsed = run_stage._parse_calibration_mode_dict(args.calibration_mode)
-    assert parsed == {"T20": CalibrationMode.RAW_LOCAL, "T68": CalibrationMode.PRECALIBRATED}
+    assert dict(args.calibration_mode) == {"T20": CalibrationMode.RAW_LOCAL, "T68": CalibrationMode.PRECALIBRATED}
 
 
 def test_run_stage_calibration_mode_defaults_to_none_when_not_given() -> None:
@@ -50,11 +54,50 @@ def test_run_stage_calibration_mode_defaults_to_none_when_not_given() -> None:
     args = run_stage.build_parser().parse_args(
         ["proj", "--telescope", "T24", "--target", "M51", "--ra-hours", "13.4", "--dec-deg", "47.2"]
     )
-    assert run_stage._parse_calibration_mode_dict(args.calibration_mode) is None
+    assert args.calibration_mode == []
     assert args.calibration_header_fallback is False
 
 
-def test_run_stage_main_passes_calibration_mode_and_fallback_to_run_lrgb(monkeypatch) -> None:
+def test_run_stage_bad_calibration_mode_value_is_a_usage_error_not_a_traceback() -> None:
+    import run_stage
+
+    with pytest.raises(SystemExit):
+        run_stage.build_parser().parse_args(
+            [
+                "proj", "--telescope", "T24", "--target", "M51",
+                "--ra-hours", "13.4", "--dec-deg", "47.2",
+                "--calibration-mode", "not-tel-equals-mode",
+            ]
+        )
+
+
+def test_run_stage_bad_lum_source_value_is_a_usage_error_not_a_traceback() -> None:
+    import run_stage
+
+    with pytest.raises(SystemExit):
+        run_stage.build_parser().parse_args(
+            [
+                "proj", "--telescope", "T24", "--target", "M51",
+                "--ra-hours", "13.4", "--dec-deg", "47.2",
+                "--lum-source", "not-a-valid-lum-source",
+            ]
+        )
+
+
+def test_run_stage_lum_source_parses_to_tuple_at_parse_time() -> None:
+    import run_stage
+
+    args = run_stage.build_parser().parse_args(
+        [
+            "proj", "--telescope", "T24", "--target", "M51",
+            "--ra-hours", "13.4", "--dec-deg", "47.2",
+            "--lum-source", "T21:1",
+        ]
+    )
+    assert args.lum_source == ("T21", 1)
+
+
+def test_run_stage_main_passes_calibration_mode_and_fallback_to_run_lrgb(tmp_path: Path, monkeypatch) -> None:
     import run_stage
 
     captured = {}
@@ -74,7 +117,7 @@ def test_run_stage_main_passes_calibration_mode_and_fallback_to_run_lrgb(monkeyp
     monkeypatch.setattr(run_stage.preflight, "check_prerequisites", lambda **kwargs: [])
     run_stage.main(
         [
-            "proj", "--telescope", "T24", "--target", "M51",
+            str(tmp_path), "--telescope", "T24", "--target", "M51",
             "--ra-hours", "13.4", "--dec-deg", "47.2",
             "--calibration-mode", "T20=raw_local",
             "--calibration-header-fallback",
@@ -111,7 +154,7 @@ def test_run_narrowband_calibration_mode_defaults_to_none() -> None:
     assert args.calibration_header_fallback is False
 
 
-def test_run_narrowband_main_passes_calibration_mode_and_fallback(monkeypatch) -> None:
+def test_run_narrowband_main_passes_calibration_mode_and_fallback(tmp_path: Path, monkeypatch) -> None:
     import run_narrowband
 
     captured = {}
@@ -131,7 +174,7 @@ def test_run_narrowband_main_passes_calibration_mode_and_fallback(monkeypatch) -
     monkeypatch.setattr(run_narrowband.preflight, "check_prerequisites", lambda **kwargs: [])
     run_narrowband.main(
         [
-            "proj", "--telescope", "T20", "--target", "M42",
+            str(tmp_path), "--telescope", "T20", "--target", "M42",
             "--ra-hours", "5.588", "--dec-deg", "-5.391",
             "--calibration-mode", "precalibrated",
             "--calibration-header-fallback",
@@ -421,7 +464,7 @@ def test_main_no_luminance_skips_luminance_resolution_entirely(tmp_path: Path, m
 # --- interview.py main(): --calibration-header-fallback --------------------
 
 
-def test_interview_main_threads_calibration_header_fallback(monkeypatch, capsys) -> None:
+def test_interview_main_threads_calibration_header_fallback(tmp_path: Path, monkeypatch, capsys) -> None:
     import interview
 
     captured = {}
@@ -453,11 +496,11 @@ def test_interview_main_threads_calibration_header_fallback(monkeypatch, capsys)
 
     monkeypatch.setattr(interview, "scan_session", fake_scan_session)
     monkeypatch.setattr(interview, "prerequisites_summary", lambda report: [])
-    interview.main(["interview.py", "some_project", "--calibration-header-fallback"])
+    interview.main(["interview.py", str(tmp_path), "--calibration-header-fallback"])
     assert captured.get("calibration_header_fallback") is True
 
 
-def test_interview_main_defaults_calibration_header_fallback_false(monkeypatch) -> None:
+def test_interview_main_defaults_calibration_header_fallback_false(tmp_path: Path, monkeypatch) -> None:
     import interview
 
     captured = {}
@@ -489,7 +532,7 @@ def test_interview_main_defaults_calibration_header_fallback_false(monkeypatch) 
 
     monkeypatch.setattr(interview, "scan_session", fake_scan_session)
     monkeypatch.setattr(interview, "prerequisites_summary", lambda report: [])
-    interview.main(["interview.py", "some_project"])
+    interview.main(["interview.py", str(tmp_path)])
     assert captured.get("calibration_header_fallback") is False
 
 
@@ -509,7 +552,7 @@ def test_run_stage_parses_flat_policy() -> None:
     assert args.flat_policy == "require"
 
 
-def test_run_stage_main_passes_flat_policy_to_run_lrgb(monkeypatch) -> None:
+def test_run_stage_main_passes_flat_policy_to_run_lrgb(tmp_path: Path, monkeypatch) -> None:
     import run_stage
 
     captured = {}
@@ -529,14 +572,14 @@ def test_run_stage_main_passes_flat_policy_to_run_lrgb(monkeypatch) -> None:
     monkeypatch.setattr(run_stage.preflight, "check_prerequisites", lambda **kwargs: [])
     run_stage.main(
         [
-            "proj", "--telescope", "T24", "--target", "M51",
+            str(tmp_path), "--telescope", "T24", "--target", "M51",
             "--ra-hours", "13.4", "--dec-deg", "47.2", "--flat-policy", "skip_if_missing",
         ]
     )
     assert captured["flat_policy"] == FlatPolicy.SKIP_IF_MISSING
 
 
-def test_run_narrowband_parses_and_passes_flat_policy(monkeypatch) -> None:
+def test_run_narrowband_parses_and_passes_flat_policy(tmp_path: Path, monkeypatch) -> None:
     import run_narrowband
 
     args = run_narrowband.build_parser().parse_args(
@@ -564,7 +607,7 @@ def test_run_narrowband_parses_and_passes_flat_policy(monkeypatch) -> None:
     monkeypatch.setattr(run_narrowband.preflight, "check_prerequisites", lambda **kwargs: [])
     run_narrowband.main(
         [
-            "proj", "--telescope", "T20", "--target", "M42",
+            str(tmp_path), "--telescope", "T20", "--target", "M42",
             "--ra-hours", "5.588", "--dec-deg", "-5.391", "--flat-policy", "require",
         ]
     )
@@ -582,7 +625,7 @@ def test_run_narrowband_boost_parses_flat_policy() -> None:
     assert args.flat_policy == "skip_if_missing"
 
 
-def test_interview_main_threads_flat_policy_override(monkeypatch) -> None:
+def test_interview_main_threads_flat_policy_override(tmp_path: Path, monkeypatch) -> None:
     import interview
 
     captured = {}
@@ -618,5 +661,5 @@ def test_interview_main_threads_flat_policy_override(monkeypatch) -> None:
     monkeypatch.setattr(interview, "scan_session", fake_scan_session)
     monkeypatch.setattr(interview, "render", spy_render)
     monkeypatch.setattr(interview, "prerequisites_summary", lambda report: [])
-    interview.main(["interview.py", "some_project", "--flat-policy", "require"])
+    interview.main(["interview.py", str(tmp_path), "--flat-policy", "require"])
     assert captured["flat_policy_override"] == FlatPolicy.REQUIRE

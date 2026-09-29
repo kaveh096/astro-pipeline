@@ -447,6 +447,11 @@ def render(
     if unrecognized_lines:
         lines.append(f"Unrecognized frames ({len(report.unrecognized)} total):")
         lines.extend(unrecognized_lines)
+        lines.append(
+            "  (expected light filename: raw-T24-<user>-<target>-YYYYMMDD-HHMMSS-<filter>"
+            "-BIN<n>-<E|W|_>-<exptime>-<seq>.fits, case-insensitive; only iTelescope's own "
+            "naming is recognized)"
+        )
         lines.append("")
 
     scaling = [
@@ -463,8 +468,12 @@ def render(
 def main(argv: list[str]) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(prog="interview.py")
-    parser.add_argument("project_dir")
+    parser = argparse.ArgumentParser(
+        prog="interview.py",
+        description="Scan a project folder and report what's there -- telescopes, targets, "
+        "calibration gaps, and tool/version prerequisites -- without running or writing anything.",
+    )
+    parser.add_argument("project_dir", help="the project folder to scan (raw iTelescope delivery, not _pipeline/)")
     parser.add_argument(
         "--calibration-header-fallback", action="store_true",
         help="opt-in header-based recognition of calibration frames a filename pattern can't see (Step 4b)",
@@ -476,6 +485,10 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv[1:])
 
     project_dir = Path(args.project_dir)
+    if not project_dir.exists():
+        print(f"{project_dir} does not exist.")
+        return 2
+
     report = scan_session(project_dir, calibration_header_fallback=args.calibration_header_fallback)
     flat_policy_override = FlatPolicy(args.flat_policy) if args.flat_policy else None
     prerequisites = prerequisites_summary(report)

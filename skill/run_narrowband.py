@@ -24,15 +24,18 @@ from astro_pipeline import preflight  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("project_dir")
+    p = argparse.ArgumentParser(
+        description="Build a pure narrowband (SHO/HOO) false-colour composite for one project "
+        "folder, printing notes/checkpoints/preview paths as it goes.",
+    )
+    p.add_argument("project_dir", help="the target's project folder (raw iTelescope delivery)")
     p.add_argument("--telescope", required=True)
     p.add_argument("--target", required=True)
     p.add_argument("--ra-hours", type=float, required=True)
     p.add_argument("--dec-deg", type=float, required=True)
     p.add_argument("--palette", choices=sorted(NARROWBAND_PALETTES), default="sho")
     p.add_argument("--binning", type=int, default=2)
-    p.add_argument("--stretch-method", default="autostretch")
+    p.add_argument("--stretch-method", choices=["autostretch", "autoghs", "autoghs+auto"], default="autostretch")
     p.add_argument("--pedestal", type=float, default=DEFAULT_PEDESTAL)
     p.add_argument("--force", action="store_true", help="rebuild everything, ignoring what's already on disk")
     p.add_argument(
@@ -57,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    project_dir_path = Path(args.project_dir)
+    if not project_dir_path.exists():
+        print(f"{project_dir_path} does not exist.")
+        return 2
 
     if not args.skip_preflight:
         problems = preflight.check_prerequisites(

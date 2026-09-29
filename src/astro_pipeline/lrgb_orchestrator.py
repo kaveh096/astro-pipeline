@@ -833,6 +833,25 @@ class LRGBOrchestrator:
             self.previous, self.previous_linear = cp.stats, True
             _log(cp.summary(), self.notes)
             save_checkpoints(self.result.checkpoints, self.checkpoints_path)
+        elif (available := sorted(
+            (_real_rgb_binnings | _real_osc_binnings) - {self.rgb_binning}
+        )):
+            # Real colour data exists for this telescope/target, just not
+            # at self.rgb_binning -- checkpoint 02 is silently missing
+            # (or, on a resumed run, stale) as a result. Log-only: this
+            # isn't necessarily wrong (the caller may genuinely want a
+            # different binning as the primary contributor), just worth
+            # surfacing rather than a quietly absent checkpoint. Excludes
+            # self.rgb_binning itself from `available` -- if real data DID
+            # exist there, the missing checkpoint would be a build
+            # failure, not a binning mismatch, and this message would be
+            # actively misleading.
+            _log(
+                f"[note] no colour contributor at BIN{self.rgb_binning} for "
+                f"{self.telescope}/{self.target} -- checkpoint 02 is missing. Real colour data "
+                f"exists at BIN{available} -- pass --rgb-binning to use one of those instead.",
+                self.notes,
+            )
 
     def _reconcile(self) -> None:
         """L background extraction, per-contributor reprojection,
