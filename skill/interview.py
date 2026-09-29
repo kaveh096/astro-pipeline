@@ -476,7 +476,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("project_dir", help="the project folder to scan (raw iTelescope delivery, not _pipeline/)")
     parser.add_argument(
         "--calibration-header-fallback", action="store_true",
-        help="opt-in header-based recognition of calibration frames a filename pattern can't see (Step 4b)",
+        help="opt-in header-based recognition of calibration frames a filename pattern can't see",
     )
     parser.add_argument(
         "--flat-policy", choices=["require", "skip_if_missing"], default=None,

@@ -45,13 +45,12 @@ def infer_calibration_mode(report, telescope: str) -> CalibrationMode:
     data actually has, not hardcoded by telescope name, with an explicit
     per-telescope override escape hatch in `run_lrgb`.
 
-    `CalibrationMode.PRECALIBRATED` if `telescope` has zero Bias-or-Dark
-    frames of any kind (raw+local calibration structurally cannot work --
+    `CalibrationMode.PRECALIBRATED` if `telescope` is missing local Bias
+    or Dark frames (either one, not necessarily both -- raw+local
+    calibration structurally cannot work without both, and
     `run_calibration` would raise `CalibrationFramesMissingError` before
     ever reaching registration) AND has at least one "calibrated"-
-    provenance light group (there is something to fall back to). Real
-    case: NGC 3628/T73 (Feb 2025) -- zero recognized Bias/Dark, both
-    raw- and calibrated- provenance copies of every light delivered.
+    provenance light group (there is something to fall back to).
 
     `CalibrationMode.RAW_LOCAL` otherwise -- unconditionally the default
     for every telescope with real Bias+Dark (T24, T21), unchanged from

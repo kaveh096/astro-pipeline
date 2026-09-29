@@ -7,35 +7,57 @@ version: 0.1.0
 # Astro Pipeline: run wrapper
 
 Interviews the user about a project folder, then drives the pipeline
-(`src/astro_pipeline/lrgb_orchestrator.py`/`narrowband_orchestrator.py` --
-`pipeline.py` no longer exists, split apart in Task 5's OOP refactor) one
-stage at a time via the `skill/run_*.py` scripts, stopping at real
+(`src/astro_pipeline/lrgb_orchestrator.py` / `narrowband_orchestrator.py`)
+one stage at a time via the `skill/run_*.py` scripts, stopping at real
 control-flow boundaries to show what happened and let a human Proceed /
 Adjust / Abort. This skill adds no pipeline behaviour of its own -- it
 calls the pipeline, reads back `result.notes` / `result.checkpoints`, and
 presents them. If this file disagrees with the code, trust the code.
 
 **Scope reminder (do not exceed this)**: flats are supported for mono
-Luminance/R/G/B/narrowband groups calibrated locally (RAW_LOCAL) --
-see the "Flats" section below for what that actually covers and what it
-deliberately does not (no automatic override of which telescope's
-Luminance drives the composite (surface the numbers, never silently pick
-against them), no cross-telescope Luminance blending, no touching
-Photoshop) -- every path below ends the moment a TIFF path exists.
-Optional post-processing (denoise/star-removal/black-point/narrowband-boost)
-never overwrites or auto-recombines anything; it only ever adds new,
-separately-named files next to what's already there.
+Luminance/R/G/B/narrowband groups calibrated locally (RAW_LOCAL) -- see
+the "Flats" section below for what that covers and what it deliberately
+does not (no automatic override of which telescope's Luminance drives the
+composite -- surface the numbers, never silently pick against them; no
+cross-telescope Luminance blending; no touching your image editor) --
+every path below ends the moment a TIFF exists. Optional post-processing
+(denoise/star-removal/black-point/narrowband-boost) never overwrites or
+auto-recombines anything; it only adds new, separately-named files next
+to what's already there.
 
-**Which flow does the user want?**
-| Data | Flow |
-|---|---|
-| Mono L + R/G/B, or R/G/B only, or OSC/Bayer colour | Steps 1-5 below (LRGB/RGB-only/OSC, one skill, auto-detected) |
-| Narrowband only (SII/Ha/OIII), false-colour SHO or HOO | "Narrowband (SHO/HOO)" section |
-| Broadband LRGB/RGB already finished, want Ha/OIII/SII blended in for colour pop | "Narrowband-boost (HaRGB)" section |
-| A finished TIFF, want denoise / star removal / a specific black point before Photoshop | "Optional post-processing" section |
+## Before you start
 
-## Repo conventions to reuse, not reinvent
-
+- **iTelescope.net data only.** Light frames must match iTelescope's
+  filename convention; anything else is reported as an unrecognized frame,
+  not processed. See README's "Project folder layout" for the expected
+  directory shape (raw delivery folders + a generated `_pipeline/` that
+  the pipeline owns and you should never hand-edit).
+- **Every `run_*.py` script checks its own prerequisites** (Siril's
+  version, ASTAP/GraXpert/StarNet2 presence, and an SPCC colour profile)
+  before writing anything, and exits 2 with a clear message if something's
+  missing -- relay that message verbatim rather than guessing at a fix.
+  `--skip-preflight` bypasses the check if the user says the tool
+  situation is fine despite what it reports. `interview.py` reports the
+  same prerequisites informationally, without blocking, since it never
+  writes anything itself.
+- **SPCC colour calibration only ever runs against the run's PRIMARY
+  telescope** (the `--telescope` you pass) -- a telescope with
+  Luminance-only data and no SPCC profile is fine and expected, since it's
+  never the one SPCC needs a profile for. If the primary telescope has no
+  known instrument profile, preflight reports it before anything is built.
+- **Outputs**: a 16-bit TIFF + faithful preview PNG per composite, under
+  the project's own `_pipeline/final/`. Intermediate/resumability state
+  lives under `_pipeline/checkpoints/`. The pipeline never writes outside
+  `_pipeline/`.
+- **Some stages take a long time** -- a full master build with GraXpert
+  background extraction, Siril `register`/`stack` on a large frame set, or
+  a CPU-only denoise pass can run from several minutes to a couple of
+  hours. Run a long stage as a background/detached process rather than a
+  blocking foreground call, and poll for completion rather than assuming a
+  long silence means it died.
+- **Every script's own `--help` is the authoritative argument reference**
+  -- read a script's docstring/`--help` output if anything below is
+  ambiguous; this file explains the workflow, not every flag.
 - Python venv: `.venv/Scripts/python` (Windows). Run every command below
   through it, e.g. `.venv/Scripts/python.exe skill/interview.py ...`.
 - `examples/run_lrgb_example.py` is a worked reference for the real
@@ -43,15 +65,14 @@ separately-named files next to what's already there.
   in hours/degrees -- passed explicitly so plate solving needs no network
   name resolution). Sanity-check argument shapes against it; don't invoke
   it directly for a real run.
-- `skill/interview.py`, `skill/run_stage.py`, `skill/run_narrowband.py`,
-  `skill/run_narrowband_boost.py`, `skill/run_post_process.py` do the actual
-  work below; read their docstrings if anything here is ambiguous.
-- Every `run_*.py` script (not `interview.py`, which only reports) checks
-  its own required tools/Siril version/SPCC profile before writing
-  anything, and exits 2 with a clear message if something's missing --
-  relay that message verbatim rather than guessing at a fix. `--skip-
-  preflight` bypasses the check if the user says the tool situation is
-  fine despite what it reports.
+
+**Which flow does the user want?**
+| Data | Flow |
+|---|---|
+| Mono L + R/G/B, or R/G/B only, or OSC/Bayer colour | Steps 1-5 below (LRGB/RGB-only/OSC, one skill, auto-detected) |
+| Narrowband only (SII/Ha/OIII), false-colour SHO or HOO | "Narrowband (SHO/HOO)" section |
+| Broadband LRGB/RGB already finished, want Ha/OIII/SII blended in for colour pop | "Narrowband-boost (HaRGB)" section |
+| A finished TIFF, want denoise / star removal / a specific black point before your image editor | "Optional post-processing" section |
 
 ## Step 1 -- Interview
 
@@ -69,29 +90,28 @@ separately-named files next to what's already there.
    - which telescopes/targets/binnings/users were actually found;
    - `IngestReport.missing_calibration_warnings()`'s gaps, DEDUPLICATED to
      one line per `(telescope, frame_type, binning)` -- the raw function
-     repeats one warning per user per group (see `light_groups()`'s own
-     docstring: that's deliberate there, collaborators' subs must not be
-     silently merged at that layer, but it makes the raw output
-     unreadable for a human standing at an interview checkpoint). Show
-     the user the deduplicated list, not the raw one. If you want to show the
-     raw-vs-deduplicated contrast for transparency, that's fine too, but
-     the deduplicated list is what should drive the conversation.
+     repeats one warning per user per group, which is deliberate there
+     (collaborators' subs must not be silently merged at that layer), but
+     unreadable for a human standing at an interview checkpoint. Show the
+     deduplicated list, not the raw one; showing both for transparency is
+     also fine, but the deduplicated list is what should drive the
+     conversation.
    - a **dark-scaling preview**: for any group whose exact-exptime dark is
-     missing, whether `calibration.select_dark()` will actually resolve
-     it by scaling a longer/shorter dark via `-opt=exp` (safe direction),
-     or whether it's a genuine `[BLOCKED]` gap `run_lrgb` will raise
+     missing, whether `calibration.select_dark()` will resolve it by
+     scaling a longer/shorter dark via `-opt=exp` (safe direction), or
+     whether it's a genuine `[BLOCKED]` gap `run_lrgb` will raise
      `CalibrationFramesMissingError` on. Surface `[BLOCKED]` entries
      prominently -- those are real stoppers, not cosmetic warnings.
    - a **`Precalibrated: <telescopes>` line** (only printed when at least
-     one telescope qualifies): these telescopes have no local Bias/Dark
-     frames at all but DO have iTelescope-side-calibrated (`calibrated-`
-     provenance) lights, so `run_lrgb` will use them directly
-     (`CalibrationMode.PRECALIBRATED`) instead of locally recalibrating --
-     real case: T73 (NGC 3628) and T02 (Abell 6 and HFG1). Detected
-     automatically; nothing to ask about or pass as a parameter. Its
-     calibration-gap warnings for that telescope are already filtered out
-     of the deduplicated list below it (they'd otherwise read as a
-     blocking problem when they're actually expected).
+     one telescope qualifies): these telescopes are missing local Bias
+     and/or Dark frames but DO have iTelescope-side-calibrated
+     (`calibrated-` provenance) lights, so `run_lrgb` will use them
+     directly (`CalibrationMode.PRECALIBRATED`) instead of locally
+     recalibrating. Detected automatically; nothing to ask about or pass
+     as a parameter. Its calibration-gap warnings for that telescope are
+     already filtered out of the deduplicated list below it (they'd
+     otherwise read as a blocking problem when they're actually
+     expected).
 
 3. **Present the summary** to the user: telescopes/targets/binnings/users
    found, which telescopes are precalibrated (if any), the deduplicated
@@ -105,14 +125,11 @@ separately-named files next to what's already there.
    - `telescope` -- the PRIMARY telescope: scopes RGB discovery and is the
      fallback Luminance source if nothing can be measured. Luminance
      discovery itself is NOT scoped to this -- every telescope with
-     Luminance data for `target` gets its own master built regardless
-     (Slice 1), and Step 2 below surfaces all of them.
+     Luminance data for `target` gets its own master built regardless,
+     and Step 2 below surfaces all of them.
    - `ra_hours` / `dec_deg` -- ask directly; `run_lrgb` needs these for
-     plate solving and does no name resolution of its own. If the project
-     folder is the M51 fixture, the known values are
-     `ra_hours=13.4980, dec_deg=47.1953` --
-     confirm these rather than silently assuming them for a different
-     target.
+     plate solving and does no name resolution of its own. Look these up
+     on Simbad or a planetarium app rather than guessing.
    - `lum_binning` (default 1) / `rgb_binning` (default 2) -- only ask if
      the scan shows more than one binning in play and it's not obvious
      which is primary.
@@ -144,8 +161,8 @@ Run:
 ```
 This builds (or resumes/skips, per `run_lrgb`'s own `usable()` gating)
 every discovered Luminance contributor across every telescope, selects the
-sharpest by measured FWHM (Slice 2), and builds every colour contributor
-with a full R/G/B set for the primary telescope.
+sharpest by measured FWHM, and builds every colour contributor with a
+full R/G/B set for the primary telescope.
 
 **Read the output, don't just glance at it:**
 - The `=== NOTES ===` section contains the real Luminance-selection
@@ -155,6 +172,11 @@ with a full R/G/B set for the primary telescope.
   composite (FWHM 3.88" vs selected 3.44")` for every contributor that
   lost. Relay both -- the point of building every contributor is that
   it's inspectable, not just the winner.
+- Also in `=== NOTES ===`: a `[run] gain/offset reference: <key>
+  (STACKCNT <n>, highest)` line whenever more than one colour contributor
+  was built -- this designates which contributor's numbers the
+  reconciliation step (Step 3) will match every other contributor onto.
+  Relay it here; it's logged at this stage, not at Step 3.
 - The `=== CHECKPOINTS ===` section has one entry per checkpoint reached
   (`01_master_luminance`, and `02_primary_rgb_colour_calibrated` once
   every colour contributor for the primary telescope is done) -- each
@@ -167,23 +189,22 @@ with a full R/G/B set for the primary telescope.
   telescope with a `Color` filter group instead of separate Luminance/
   Red/Green/Blue ones. OSC lights are genuine undemosaiced Bayer-mosaic
   sensor data, debayered automatically as part of building that
-  contributor -- nothing to ask about there either. Two real cases: T02
-  (Abell 6 and HFG1, PRECALIBRATED, no local frames at all) and T68 (IC
-  1396) -- **corrected, plan-flats-v4.md**: T68 is PRECALIBRATED TODAY,
-  not RAW_LOCAL as an earlier version of this doc claimed. Its real local
-  bias (48 subs) and darks (50 subs) are NOT recognised at all by
-  filename (no `T68` folder token anywhere in their path), so
-  `infer_calibration_mode` sees zero local Bias/Dark and falls back to
-  PRECALIBRATED via its real `calibrated-` provenance lights. RAW_LOCAL
-  OSC (local bias/dark calibration for an OSC camera) is not supported
-  yet -- `build_osc` raises `NotImplementedError` if asked for it; relay
-  that message verbatim rather than trying to work around it. A target with BOTH a full mono R/G/B set
-  AND `Color` data
-  at the same (telescope, binning) raises `NotImplementedError` instead
-  of silently combining them (channel-order parity between Siril's
-  debayer output and the mono path's `rgbcomp` has never been verified) --
-  a real, deliberate limitation, not a bug; relay the exception message
-  verbatim if it comes up.
+  contributor -- nothing to ask about there either.
+  **If checkpoint `02_primary_rgb_colour_calibrated` never appears at
+  all** and the run otherwise completed the masters stage, check the
+  notes for a `[note] no colour contributor at BIN<rgb_binning> ...`
+  line -- it means real colour data exists at a different binning than
+  the one passed via `--rgb-binning`, and names which one(s) to retry
+  with.
+  RAW_LOCAL OSC (local bias/dark calibration for an OSC camera) is not
+  supported yet -- `build_osc` raises `NotImplementedError` if asked for
+  it; relay that message verbatim rather than trying to work around it. A
+  target with BOTH a full mono R/G/B set AND `Color` data at the same
+  (telescope, binning) raises `NotImplementedError` instead of silently
+  combining them (channel-order parity between Siril's debayer output
+  and the mono path's `rgbcomp` has never been verified) -- a real,
+  deliberate limitation, not a bug; relay the exception message verbatim
+  if it comes up.
 - The `=== PREVIEWS ===` section lists each checkpoint's preview PNG path.
   **Actually look at them** — use the Read tool on each preview path
   before presenting the checkpoint, the same way a human would look at a
@@ -217,37 +238,35 @@ discovered and logged above -- naming anything else raises inside
 ... --lum-source <TELESCOPE>:<BINNING> --stop-after masters
 ```
 No `--force` needed: `run_lrgb`'s own run-signature diff already treats a
-changed `luminance_selected` as a "masters"-tier change and cascades
-automatically -- verified directly on real M51 data (this slice's own
-validation): overriding to `T21:1` with no `--force` at all produced
-`lum_bg.fits: run signature changed (Luminance-affecting) -- deleting to
-force regeneration` (and the same for `rgb_reconciled.fit`/
-`lrgb_final.fit`) in the notes, unprompted. Only reach for `--force
-masters` if you need to force a rebuild WITHOUT a signature change (e.g.
-re-selecting the same contributor to rule out on-disk corruption) --
-using it for an ordinary override is harmless but redundant.
+changed `luminance_selected` as a masters-tier change and cascades
+automatically, deleting `lum_bg.fits`/`rgb_reconciled.fit`/`lrgb_final.fit`
+and logging why. Only reach for `--force masters` if you need to force a
+rebuild WITHOUT a signature change (e.g. re-selecting the same contributor
+to rule out on-disk corruption) -- using it for an ordinary override is
+harmless but redundant.
 
-**A real failure mode to know about, hit during this slice's own
-validation**: overriding Luminance to a telescope whose field doesn't
-overlap the RGB contributors well enough raises
+**A real failure mode to know about**: overriding Luminance to a telescope
+whose field doesn't overlap the RGB contributors well enough raises
 `reconciliation.ReprojectionError: Channels overlap too poorly to crop to
 common coverage (would need to discard more than 25% of the frame)` once
-the run reaches reconciliation -- confirmed real on M51 (T21's practice
-2-sub Luminance, `0.96"/px`, vs T24's RGB, `0.47"/px` on a different
-field position). `run_lrgb` raises this loudly rather than silently
-cropping to a sliver or producing garbage, which is the correct behaviour
--- if it happens, relay the exception message verbatim, don't guess at a
-fix, and ask whether to pick a different Luminance source (ideally one
-from the SAME telescope as the RGB data, since colour-only-rule
-contributors are typically field-matched) or Abort.
+the run reaches reconciliation. `run_lrgb` raises this loudly rather than
+silently cropping to a sliver or producing garbage, which is the correct
+behaviour -- if it happens, relay the exception message verbatim, don't
+guess at a fix, and ask whether to pick a different Luminance source
+(ideally one from the SAME telescope as the RGB data, since field
+coverage is then far more likely to match) or Abort.
 
 ## Step 3 -- Reconciled (`stop_after="reconciled"`)
 
 On Proceed from Step 2, re-run the same command with
 `--stop-after reconciled` (drop `--force`/`--lum-source` unless
 deliberately still overriding). This adds L background extraction and,
-when there's more than one colour contributor, the reprojection + gain/
-offset match + STACKCNT-weighted combine (Slice 3.4/3.5).
+whenever there IS a Luminance to reconcile against, reprojects every
+colour contributor onto L's pixel grid; with more than one colour
+contributor it additionally does the gain/offset match + STACKCNT-weighted
+combine against the reference designated in Step 2. (A single-contributor,
+Luminance-driven run still reprojects -- there's just nothing to gain-match
+against, so that part is skipped.)
 
 **RGB-only mode**: no L background extraction happens (there is no L),
 and with the single supported RGB-only shape (exactly one colour
@@ -256,9 +275,9 @@ either -- `rgb_reconciled.fit` is just the one contributor's output,
 copied through. Checkpoint `03_lum_background_extracted` never appears;
 only `04_rgb_reconciled` does. Skip straight to that checkpoint below.
 
-Relay from `=== NOTES ===` (Luminance-driven runs only -- RGB-only has
-no gain/offset fit to relay, since there is nothing to reconcile):
-- the designated gain/offset reference (`highest STACKCNT wins`);
+Relay from `=== NOTES ===` (Luminance-driven, multi-contributor runs
+only -- a single-contributor run has no gain/offset fit to relay, since
+there is nothing to match against):
 - each non-reference contributor's fitted gain and background numbers
   (`gain=... on N high-signal px`);
 - the combine weights actually used.
@@ -269,8 +288,8 @@ checkpoint previews (RGB-only: `04_rgb_reconciled` only).
 **Menu:**
 ```
 Proceed -- advance to the final stretch + export
-Adjust  -- re-run with a different `pedestal` (Slice 4.1), OR force a
-           bare recompute of reconciliation
+Adjust  -- re-run with a different `pedestal`, OR force a bare
+           recompute of reconciliation
 Abort   -- stop here
 ```
 
@@ -278,13 +297,12 @@ Be honest about what "Adjust" means here, because the two options are not
 symmetric:
 - **Different `pedestal`**: `pedestal` is baked into every calibrated
   light BEFORE registration/stacking (see `calibration.py`), so changing
-  it invalidates the raw masters themselves, not just reconciliation.
-  Re-run with `--pedestal <value> --force masters --stop-after
-  reconciled` -- yes, `--force masters`, even though you're adjusting at
-  the "reconciled" checkpoint, because that's genuinely what's stale.
-  Say this out loud to the user before running it (it will rebuild the
-  masters, not just the reconciliation step) rather than silently doing a
-  slower thing than "Adjust" sounds like it should be.
+  it invalidates the raw masters themselves, not just reconciliation. It
+  is tracked by `run_lrgb`'s own run-signature diff exactly like the
+  Luminance override in Step 2 -- re-run with `--pedestal <value>
+  --stop-after reconciled` and the masters rebuild automatically, no
+  `--force` needed. Say out loud that this will rebuild the masters, not
+  just the reconciliation step, before running it.
 - **Bare recompute, no parameter change**: `--force reconciled
   --stop-after reconciled` -- only useful if you suspect the on-disk
   reconciliation product is corrupted or stale in a way `run_lrgb`'s own
@@ -324,31 +342,36 @@ Abort          -- stop here
 Report, plainly:
 - the exported TIFF path (`TIFF` line from `run_stage.py`'s output --
   named `<target>_lrgb.tif`, e.g. `M51_lrgb.tif`, not a hardcoded stem;
-  RGB-only mode: `<target>_rgb.tif`, e.g. `Abell 6 and HFG1_rgb.tif`);
-- the faithful preview PNG path, for a quick look without opening
-  Photoshop;
+  RGB-only mode: `<target>_rgb.tif`);
+- the faithful preview PNG path, for a quick look without opening your
+  image editor;
 - clipped-low/clipped-high fractions from the export, if either is
   non-trivial (worth a mention -- it's a real signal about the stretch).
 
-Then stop. **Do not open Photoshop, do not attempt any framing, cropping,
-or colour-grading** -- that is deliberately the user's manual creative step,
-not something this skill automates. The skill's job ends at "here's your
-TIFF."
+Then stop. **Do not open an image editor, do not attempt any framing,
+cropping, or colour-grading** -- that is deliberately the user's manual
+creative step, not something this skill automates. The skill's job ends
+at "here's your TIFF."
 
 ## Abort, at any checkpoint
 
-Just stop. `run_lrgb`'s own resumability (Slice 4.1-4.3: `usable()` +
-run-signature tracking) is exactly what makes this safe -- whatever is on
-disk in `_pipeline/` is left as-is, and a later re-run of this same skill
-picks up from wherever it actually got to, without redoing completed
-work. No separate cleanup step exists or is needed.
+Just stop. `run_lrgb`'s own resumability (`usable()` + run-signature
+tracking) is exactly what makes this safe -- whatever is on disk in
+`_pipeline/` is left as-is, and a later re-run of this same skill picks
+up from wherever it actually got to, without redoing completed work. No
+separate cleanup step exists or is needed.
 
 ## Narrowband (SHO/HOO)
 
 For a target shot ONLY in narrowband (SII/Ha/OIII, no L/R/G/B/OSC), skip
-Steps 1-5 and run `skill/run_narrowband.py` instead -- a single call, no
-staged checkpoints (there is exactly one colour contributor, no
-reconciliation tier to pause at):
+Steps 1-5 and run `skill/run_narrowband.py` instead -- a single call
+(there is exactly one colour contributor, no reconciliation tier to pause
+at). It runs straight through all three of its checkpoints
+(`02_narrowband_colour_calibrated`, `03_narrowband_equalized`,
+`04_<palette>_final`) without pausing between them for a Proceed/Adjust/
+Abort decision -- read them all from the printed `=== CHECKPOINTS ===`/
+`=== PREVIEWS ===` output the same way as Steps 2-4 above, just all at
+once:
 ```
 .venv/Scripts/python.exe skill/run_narrowband.py "<project_dir>" \
   --telescope <TELESCOPE> --target <TARGET> \
@@ -369,8 +392,8 @@ information in narrowband) -- each channel is independently
 background-subtracted and percentile-rescaled instead
 (`equalize_narrowband_channels()`), which is the real substitute for
 colour calibration here. Output: `<target>_sho.tif` / `<target>_hoo.tif`
-plus a faithful preview PNG, same non-destructive/no-Photoshop scope as
-every other output this skill produces.
+plus a faithful preview PNG, same non-destructive scope as every other
+output this skill produces.
 
 `--force` rebuilds everything; there is no per-stage force vocabulary like
 `run_stage.py`'s (only one contributor, no reconciliation boundary to
@@ -386,9 +409,9 @@ Ha), to blend the narrowband layer into a broadband channel for extra
 colour pop -- a real, sourced technique (lighten-style blend into Red by
 default), not this skill's own invention. Only needs Step 3's output
 (`rgb_reconciled.fit`, and the matching Luminance -- `lum_bg.fits`, or
-`lum_bg_cropped.fits` for a multi-contributor run, picked automatically
-by shape match) under `final/` or `final/_intermediate/`; it does not
-need Step 4/5 to have run first:
+`lum_bg_cropped.fits` for a multi-contributor run, picked automatically by
+shape match) under `final/` or `final/_intermediate/`; it does not need
+Step 4/5 to have run first:
 ```
 .venv/Scripts/python.exe skill/run_narrowband_boost.py "<project_dir>" \
   --telescope <TELESCOPE> --target <TARGET> \
@@ -402,116 +425,106 @@ reconciled RGB's own grid, blends it into `--boost-channel` (default red),
 recombines via `rgbcomp`, and re-composes with the existing Luminance (or
 stretches the boosted RGB alone, `--no-luminance`).
 
-**Real finding, don't skip this step if reimplementing**: raw Siril
-`stack` output has no background subtraction or cross-filter
-normalization -- a real Red master and a real Ha master can land on
-near-identical absolute pixel scales, so a naive `max(Red, Ha*k)` boosts
-ZERO pixels at any realistic `k` (confirmed: 0% at k=0.4 on real M42
-data). The fix actually shipped: the narrowband layer is re-expressed in
-the TARGET channel's own real units first (`rescale_narrowband_to_
-reference()`), and the blend itself is background-preserving
-(`max(channel, channel_median*(1-k) + narrowband*k)` via
-`boost_channel_with_narrowband(..., channel_median=...)`) -- the target
-channel itself is never rescaled, so its real relationship to the other
-two RGB channels stays correct for the downstream `rgbcomp`.
+**Why a naive blend doesn't work, if reimplementing**: raw Siril `stack`
+output has no background subtraction or cross-filter normalization -- a
+real broadband and a real narrowband master can land on near-identical
+absolute pixel scales, so a naive `max(Red, Ha*k)` boosts effectively
+zero pixels at any realistic `k`. The narrowband layer is instead
+re-expressed in the target channel's own real units first
+(`rescale_narrowband_to_reference()`), and the blend itself is
+background-preserving (`max(channel, channel_median*(1-k) +
+narrowband*k)` via `boost_channel_with_narrowband(...,
+channel_median=...)`) -- the target channel itself is never rescaled, so
+its real relationship to the other two RGB channels stays correct for the
+downstream `rgbcomp`.
 
 Output: `<target>_lrgb_haboost.tif` (or `_rgb_haboost.tif`), plus the raw
 registered narrowband layer exported standalone
-(`<target>_<filter>_layer.tif`) as a real ingredient for manual Photoshop
-tuning if the automated blend ratio isn't to taste. Non-destructive: never
-touches the original LRGB/RGB TIFF.
+(`<target>_<filter>_layer.tif`) as a real ingredient for manual tuning in
+your image editor if the automated blend ratio isn't to taste.
+Non-destructive: never touches the original LRGB/RGB TIFF.
 
 ## Optional post-processing (denoise / star removal / black point)
 
 After a TIFF already exists (from Step 5, narrowband, or narrowband-boost),
-offer this as a distinct, optional final step before Photoshop -- ask the
-user whether they want it; never run it unprompted. Every output is a NEW
-file in `final/`; the original TIFF/preview is never touched.
+offer this as a distinct, optional final step before your image editor --
+ask the user whether they want it; never run it unprompted. Every output
+is a NEW file in `final/`; the original TIFF/preview is never touched.
 ```
 .venv/Scripts/python.exe skill/run_post_process.py "<project_dir>/_pipeline/final" \
-  --target-name "<TARGET>" --black-point <0.0-1.0> \
+  --target-name "<TARGET>" --black-point <value in [0, 1)> \
   [--nebula]   # star removal first; omit for galaxy targets
 ```
+**If more than one final composite exists** under `final/` (or its
+`_intermediate/`) -- e.g. a target with both a plain LRGB run and a later
+narrowband-boost run -- auto-detection can't pick one and the script
+raises rather than guessing; pass `--input <path>` to name the composite
+to post-process explicitly.
+
 Ask which chain applies:
 - **Galaxy** (default, no `--nebula`): denoise the full composite (stars
   included -- a galaxy's own star field is not a thing to remove) ->
   `<target>_denoised_darkened.tif`.
 - **Nebula** (`--nebula`): star removal FIRST on the original composite
   (not the denoised one -- denoising blurs faint stars and degrades
-  detection, confirmed during this capability's development), then
-  denoise the STARLESS result. Star layer exported standalone, faithful,
-  un-denoised, for optional manual recombination in Photoshop (not
-  auto-recombined -- same scope boundary as everything else this skill
-  declines to automate) -> `<target>_starless.tif`, `<target>_stars.tif`,
+  detection), then denoise the STARLESS result. Star layer exported
+  standalone, faithful, un-denoised, for optional manual recombination in
+  your image editor (not auto-recombined -- same scope boundary as
+  everything else this skill declines to automate) ->
+  `<target>_starless.tif`, `<target>_stars.tif`,
   `<target>_starless_denoised_darkened.tif`.
 
-`--black-point` (0.0-1.0, the low end of the export's linear stretch) has
-no baked-in default on purpose -- a genuine aesthetic choice, ask the
-user rather than picking one. `--denoise-gpu` exists but is known
-unreliable on low-VRAM/older-GPU machines (see "Known gaps" below) --
-default to CPU denoise unless the user specifically wants to try GPU.
-Resumable: if `<target>_starless.fit`/`_stars.fit` already exist under
-`final/_intermediate/`, star removal is skipped and reused.
+`--black-point` (the low end of the export's linear stretch, must be in
+`[0, 1)`) has no baked-in default on purpose -- a genuine aesthetic
+choice, ask the user rather than picking one. `--denoise-gpu` exists but
+can crash/hang on older or integrated GPUs (see README's "Configuring
+tool locations") -- default to CPU denoise unless the user specifically
+wants to try GPU. Resumable: if `<target>_starless.fit`/`_stars.fit`
+already exist under `final/_intermediate/`, star removal is skipped and
+reused.
 
-## Flats (plan-flats-v4.md, 2026-09)
+## Flats
 
 **Discovery**: flats are matched on `(telescope, binning, filter_name)`,
 exact string, for mono Luminance/R/G/B and narrowband groups calibrated
 locally (`CalibrationMode.RAW_LOCAL`) -- nothing to ask the user about,
 it's automatic once a matching flat is found. Real names/folders vary by
-telescope: T21's real flats are `scope_<Filter>_<b>x<b>_skyflat<N>.fit`
-under a `.../T21/Flats/...` path (telescope inferred from the directory,
-not the filename); other telescopes' calibration frames often carry the
-telescope directly in the filename (`<telescope>-<user>-Flat-...`).
-
-**The one real, flat-corrected path today is T21 Luminance on M51.**
-Its master flat had two real, fixed defects (both shipped in
-plan-flats-v4.md): two twilight sessions' worth of colliding generic
-`skyflat<N>` basenames used to collapse 30 matched frames to 20 staged
-(now deduped+uniquified, all 30 survive, staged under disambiguated names
-when they collide); and the master was stacked with Siril's default
-normalisation instead of the `-norm=mul` its own bundled reference
-scripts use (now fixed). Both fixes ship unconditionally, not behind a
-flag -- nothing to ask about, and no consequence for any other telescope
-(inert everywhere else since no other real flat-corrected master exists
-yet, see below).
+telescope: some telescopes' flats live under a `.../T<n>/Flats/...` path
+with the telescope inferred from the directory rather than the filename;
+others carry the telescope directly in the filename.
 
 **`REQUIRE` vs `SKIP_IF_MISSING`**: a telescope with ANY flat at all
 defaults to `REQUIRE` (missing a flat for one of its filters is then a
 real, blocking gap -- see the interview's `[BLOCKED]` annotation below); a
-telescope with zero flats of any kind (T24's real, permanent situation)
-defaults to `SKIP_IF_MISSING`. Override uniformly for a whole run via
-`--flat-policy require|skip_if_missing` on `run_stage.py`/
-`run_narrowband.py`/`run_narrowband_boost.py` if you ever need to (also
-available on `interview.py`, to preview the consequence annotations as if
-that override were in effect).
+telescope with zero flats of any kind defaults to `SKIP_IF_MISSING`.
+Override uniformly for a whole run via `--flat-policy require|
+skip_if_missing` on `run_stage.py`/`run_narrowband.py`/
+`run_narrowband_boost.py` if you ever need to (also available on
+`interview.py`, to preview the consequence annotations as if that
+override were in effect).
 
-**Interview visibility** (`skill/interview.py`): the interview now shows
-three things this skill previously left invisible --
+**Interview visibility** (`skill/interview.py`): the interview shows three
+things that would otherwise be invisible --
 - **Consequences**: each calibration-gap line is annotated `[BLOCKED]`
   (Bias/Dark, or a REQUIRE'd Flat -- these actually stop a real run) or
   "no flat applied, proceeding" (a SKIP'd Flat -- informational, the run
   continues without correction for that filter).
 - **Matched flats**: `N frames (K copies, C collisions)` per matched
   (telescope, binning, filter) group, using a cheap header-identity
-  signal -- surfaces a colliding-basename problem like T21's own (now
-  fixed) BEFORE a real run ever touches Siril.
-- **Unrecognized frames**: grouped by reason, so a telescope's real
-  calibration library that no filename pattern (and, if enabled, no
-  header fallback) could place anywhere is now visible, instead of
-  silently vanishing.
+  signal -- surfaces a colliding-basename problem before a real run ever
+  touches Siril.
+- **Unrecognized frames**: grouped by reason, so a telescope's calibration
+  library that no filename pattern (and, if enabled, no header fallback)
+  could place anywhere is visible, instead of silently vanishing.
 
 **Header-based recognition, opt-in, OFF by default**
 (`--calibration-header-fallback` on `run_stage.py`/`run_narrowband.py`/
-`run_narrowband_boost.py`/`interview.py`): M42/T20, IC 1396/T68 and
-M31/T05 each have a real local bias/dark/flat library that no filename
-pattern recognises today (no telescope token anywhere in their path).
-Passing this flag lets `IMAGETYP`-based header recognition find them --
-but recognition ALONE never changes any telescope's `CalibrationMode`
-(T20/T68/T05 all stay PRECALIBRATED by default, permanently, not just for
-now) and never changes any other real telescope's behaviour. To actually
-exercise a header-recognised RAW_LOCAL flat/bias/dark set, pair the
-fallback flag with an explicit `--calibration-mode` override:
+`run_narrowband_boost.py`/`interview.py`): lets `IMAGETYP`-based header
+recognition find a bias/dark/flat library that no filename pattern can
+place -- but recognition ALONE never changes any telescope's
+`CalibrationMode` and never changes any other telescope's behaviour. To
+actually exercise a header-recognised RAW_LOCAL flat/bias/dark set, pair
+the fallback flag with an explicit `--calibration-mode` override:
 - `run_stage.py`: `--calibration-mode TEL=raw_local` (repeatable, one
   `TEL=value` per occurrence -- a genuine multi-telescope override).
 - `run_narrowband.py` / `run_narrowband_boost.py`: a plain
@@ -522,23 +535,17 @@ fallback flag with an explicit `--calibration-mode` override:
 happened than did)**:
 - **No OSC flats, or any RAW_LOCAL OSC calibration at all.** `build_osc`
   raises `NotImplementedError` regardless of any flag above -- deferred,
-  not committed to. Revisit only if IC 1396's own future per-target
-  measurement shows a real benefit.
+  not committed to.
 - **No narrowband master invalidation on a flat/recipe change.**
   Narrowband (`run_narrowband.py`) has no `RunSignature`-based staleness
   tracking at all (a pre-existing, non-flat-specific gap) -- pass
-  `--force` explicitly after changing anything upstream, same as before
-  this plan.
-- **No behaviour change to M42, IC 1396 or M31 in this plan.** Ingest can
-  now SEE their real calibration libraries (opt-in) and the mode-decoupling
-  keeps that recognition safely inert by default, but nothing here
-  reprocesses any of their real data with local flats. That measurement
-  (per target, corner/centre-ratio method) is the deliberate NEXT step,
-  not something this skill does automatically -- and reprocessing itself
-  is recommended only where a target's own measurement shows a genuine,
-  quantified improvement, never blind (M42's flat library is 21 months
-  older than its lights; IC 1396's calibration timestamps are corrupted;
-  M31's flats are fresh but its darks are at the wrong temperature).
+  `--force` explicitly after changing anything upstream.
+- Header-recognition being ON never reprocesses existing data with local
+  flats by itself -- it only makes the calibration library visible and
+  available; an explicit `--calibration-mode ...=raw_local` override is
+  still required to actually use it, and doing so is worth it only when a
+  target's own before/after measurement shows a genuine improvement,
+  never blind.
 
 ## Known gaps, honestly
 
@@ -546,69 +553,42 @@ happened than did)**:
   (once live via `run_lrgb`'s internal `print()`, once again under
   `=== NOTES ===` since that's `result.notes` printed back) -- cosmetic,
   not a bug; treat `=== NOTES ===` as the authoritative transcript.
-- This skill has been walked through against three real project folders:
-  M51 (both telescopes, both binnings, a Luminance override round-trip
-  that succeeded, and one that raised `ReprojectionError` -- see above),
-  NGC 3628 (T73, `CalibrationMode.PRECALIBRATED` -- confirmed the
-  "Precalibrated" interview line and its calibration-gap filtering both
-  work end to end on a real no-local-dark delivery), and Abell 6 and HFG1
-  (T02, RGB-only + OSC -- confirmed checkpoints `02`/`04`/`05_rgb_final`
-  all fire correctly with no `01`/`03`, and the `_rgb.tif` export naming).
-  It has not been exercised against a project with zero colour
+- This skill has not been exercised against every real-world edge case
+  the underlying pipeline supports -- a project with zero colour
   contributors at all, an unknown telescope (`UnknownInstrumentError`), a
   genuinely `[BLOCKED]` calibration gap, or the mixed-OSC-and-mono-RGB
-  `NotImplementedError` case -- those paths exist in the underlying
-  pipeline but weren't hit on real data yet. If one comes up, relay
+  `NotImplementedError` case are all real, reachable paths that may not
+  have been hit yet on a given machine's data. If one comes up, relay
   `run_lrgb`'s actual exception message rather than guessing what it
   means.
-- **This machine's ~8GB RAM can OOM-kill a real Siril `register`/`stack`
-  call outright** on a handful of large (6000x4000+) frames -- confirmed
-  real on the Abell 6/HFG1 run (7 frames, killed mid-`stack`, no partial/
-  corrupt output). `run_lrgb`'s own resumability already covers this:
-  the staged/debayered lights survive the kill, so simply re-running the
-  identical `run_stage.py` command resumes from `register+stack` rather
-  than restaging from scratch. If a real run dies this way, say so
-  plainly and just re-run the same command -- don't treat it as a code
-  bug to fix first.
+- **Limited RAM (roughly 8GB) can OOM-kill a real Siril `register`/`stack`
+  call outright** on a handful of large (6000x4000+) frames. `run_lrgb`'s
+  own resumability already covers this: the staged/debayered lights
+  survive the kill, so simply re-running the identical `run_stage.py`
+  command resumes from `register+stack` rather than restaging from
+  scratch. If a real run dies this way, say so plainly and just re-run
+  the same command -- don't treat it as a code bug to fix first.
 - **Forcing a Luminance-tier rebuild is not byte-reproducible**, even
-  reverting to the exact same parameters afterward: reverting the M51
-  override back to `T24-bin1` during this slice's validation re-ran
-  GraXpert's AI background extraction on L from scratch, and the
-  resulting `lrgb_final.fit`/TIFF were NOT byte-identical to the
-  pre-override files (different crop shape, different pixel content) --
-  GraXpert's own run-to-run variance, not something this skill or
-  `run_lrgb` controls. This matches plan-rev4.md's own stated position
-  that byte-identical output is "provably unachievable" as a
-  verification criterion for anything that forces a real Siril/GraXpert
-  re-run; it is NOT a sign that an Adjust round-trip corrupted anything --
-  the rebuilt output was independently checked (checkpoint stats,
-  `usable()`'s own NaN/read-back gate) and is a legitimate, correctly
-  re-derived result, just not byte-for-byte the same as before. Only a
-  RESUMED call (nothing forced, nothing changed) is byte-identical --
-  that path is what `tests/test_pipeline.py`'s
-  `test_run_lrgb_full_run_after_staged_calls_reproduces_slice3_output`
-  actually verifies.
-- **GPU denoise (`--denoise-gpu`) is unreliable on Intel-integrated-GPU
-  laptops**: confirmed real crash investigated end-to-end (event logs,
-  driver dumps, retried after a full reboot) -- root cause is a
-  Haswell-era Intel GPU's DirectML incompatibility (the INTEL-SA-00315
-  security fix disabled DX12 on this hardware class), not an OOM and not
-  fixable by a driver upgrade. Default to CPU denoise; only try
-  `--denoise-gpu` if the user has a genuinely modern discrete GPU.
-- **CPU denoise at full resolution (4096x4096) needs real time and real
-  RAM headroom** -- confirmed to complete successfully but takes 1-2+
-  hours per image on an 8GB machine. Run it as a detached background
-  process, not a foreground blocking call, and monitor by polling the
-  PID rather than assuming a long silence means it died.
+  reverting to the exact same parameters afterward -- GraXpert's AI
+  background extraction has real run-to-run variance, so a reverted
+  override can produce a differently-cropped, non-byte-identical result
+  even though it is independently correct (checked via checkpoint stats
+  and `usable()`'s own NaN/read-back gate). This is not a sign that an
+  Adjust round-trip corrupted anything. Only a RESUMED call (nothing
+  forced, nothing changed) is byte-identical.
+- **CPU denoise at full resolution needs real time and RAM headroom** --
+  a 4096x4096 image can take 1-2+ hours on an 8GB machine. Run it as a
+  detached background process, not a foreground blocking call, and
+  monitor by polling rather than assuming a long silence means it died.
 - `run_narrowband.py`/`run_narrowband_boost.py` have real-data-tested unit
-  coverage and a manual, hand-run validation against independently-built
-  masters (M42/T20), but `run_narrowband_boost.py` has NOT yet been run
-  end-to-end as a script against one complete real LRGB project start to
-  finish -- if it's used that way for the first time, treat the run as a
-  fresh validation, not a known-good path.
-- **A real bad-data case, not a code bug**: M42's Green-bin2 registration
-  can fail with Siril's "Found 0 stars in reference" if the frame set
-  contains near-zero-signal frames (cloud/focus/tracking dropouts) --
-  diagnose by checking each frame's pixel std via astropy directly, not by
-  assuming the code is at fault; the fix is excluding the bad frame(s),
-  not touching the pipeline.
+  coverage and a manual validation against independently-built masters,
+  but `run_narrowband_boost.py` has not yet been run end-to-end as a
+  script against one complete real LRGB project start to finish -- if
+  it's used that way for the first time, treat the run as a fresh
+  validation, not a known-good path.
+- **A real bad-data case, not a code bug**: registration can fail with
+  Siril's "Found 0 stars in reference" if the frame set contains
+  near-zero-signal frames (cloud/focus/tracking dropouts) -- diagnose by
+  checking each frame's pixel std via astropy directly, not by assuming
+  the code is at fault; the fix is excluding the bad frame(s), not
+  touching the pipeline.
