@@ -85,6 +85,13 @@ py -3.12 -m venv .venv
 
 `[dev]` pulls in `pytest`; skip it if you don't plan to run the tests.
 
+If `pip install` fails with `WinError 206` (filename or extension too
+long), your clone is sitting under a deeply nested path (common under
+OneDrive-synced folders or some corporate profiles) and a dependency's
+own file path exceeds Windows' `MAX_PATH`. Clone somewhere shallower
+(e.g. `C:\dev\astro-pipeline`) or enable `LongPathsEnabled` for your
+Windows version.
+
 ## Using the skill in Claude Code
 
 The pipeline is a standalone CLI (`src/astro_pipeline/`, `skill/run_*.py`) —
