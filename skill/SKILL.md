@@ -474,9 +474,12 @@ Ask which chain applies:
   `<target>_starless.tif`, `<target>_stars.tif`,
   `<target>_starless_denoised_darkened.tif`.
 
-`--black-point` (the low end of the export's linear stretch, must be in
-`[0, 1)`) has no baked-in default on purpose -- a genuine aesthetic
-choice, ask the user rather than picking one. `--denoise-gpu` exists but
+The defaults are aesthetic starting points, not truths: the 0.10 sky
+target is deliberately not darker so faint outer structure (cloudy outer
+arms, IFN) survives, and the auto black point uses the whole-frame sky
+median, so a channel that sits lower than the others (e.g. red near the
+frame edge) can clip slightly -- check `clipped low` in the output.
+`--denoise-gpu` exists but
 can crash/hang on older or integrated GPUs (see README's "Configuring
 tool locations") -- default to CPU denoise unless the user specifically
 wants to try GPU. Resumable: if `<target>_starless.fit`/`_stars.fit`

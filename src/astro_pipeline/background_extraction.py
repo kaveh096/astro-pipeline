@@ -21,6 +21,7 @@ check.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -196,6 +197,7 @@ def run_graxpert_denoise(
     gpu: bool = True,
     timeout: float | None = None,
     restore_nan: bool = False,
+    strength: float = 1.0,
 ) -> Path:
     """Run GraXpert's AI denoising (optional pipeline stage D1, 2026-09).
 
@@ -208,17 +210,16 @@ def run_graxpert_denoise(
     GraXpert binary itself, not specific to the background-extraction
     command, so denoising gets no less protection.
 
-    MEASURED, not assumed, against the real installed GraXpert 3.0.2 CLI:
-    `-cmd denoising` does NOT expose `-smoothing`/
-    `-correction`/`-bg` the way `-cmd background-extraction` does (those
-    flags are listed generically in `-h` output across both commands, but
-    denoising's own log output shows it reads "denoise strength" and
-    "batch size" from GraXpert's own STORED preferences (last set via the
-    GUI, or its own default of 0.5/4) -- there is no CLI flag to set
-    denoise strength deterministically as of this version. Document this
-    as a real limitation rather than guessing at an argument that does
-    not exist: a caller wanting a specific denoise strength must set it
-    once via GraXpert's GUI first; this function cannot override it.
+    `strength` (0 < s <= 1, default 1.0) is MEASURED against the real
+    installed GraXpert 3.0.2 CLI: there is no `-denoise_strength` flag,
+    and editing GraXpert's stored `preferences.json` is IGNORED by the
+    CLI (it always ran at 0.5 -- bit-identical outputs at stored 0.1 and
+    1.0). The only working channel is `-preferences_file <json>` holding
+    `{"denoise_strength": s}`, so that is what this passes. GraXpert's
+    blend is `clip(orig + s * (denoised - orig), 0, 1)`; the old
+    effective default of 0.5 removed only ~45% of the noise in a real M51
+    crop vs ~87% at 1.0. Values above 1.0 are rejected: noise reduction
+    peaks at 1.0 and then reverses (inverted-noise overshoot re-adds it).
 
     `gpu` defaults to True (matching `run_graxpert_background_extraction`
     and GraXpert's own default), but real-world GPU support varies by
@@ -238,6 +239,8 @@ def run_graxpert_denoise(
     inference time scales with resolution and hardware in a way no single
     default timeout could safely cover.
     """
+    if not 0.0 < strength <= 1.0:
+        raise ValueError(f"denoise strength must be in (0, 1] -- got {strength}")
     fits_path = Path(fits_path)
     exe = graxpert_exe or find_graxpert()
     output_dir = fits_path.parent
@@ -249,23 +252,29 @@ def run_graxpert_denoise(
     # exactly what filled_path looked like going INTO GraXpert.
     input_data_for_comparison = fits.getdata(filled_path, memmap=False)
 
-    proc = subprocess.run(
-        [
-            str(exe),
-            "-cli", "-cmd", "denoising",
-            "-output", output_stem,
-            "-gpu", "true" if gpu else "false",
-            str(filled_path),
-        ],
-        cwd=output_dir,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-    )
-    if filled_path != fits_path:
-        filled_path.unlink(missing_ok=True)
+    prefs_path = output_dir / f"{output_stem}_graxpert_prefs.json"
+    prefs_path.write_text(json.dumps({"denoise_strength": strength}), encoding="utf-8")
+    try:
+        proc = subprocess.run(
+            [
+                str(exe),
+                "-cli", "-cmd", "denoising",
+                "-preferences_file", str(prefs_path),
+                "-output", output_stem,
+                "-gpu", "true" if gpu else "false",
+                str(filled_path),
+            ],
+            cwd=output_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    finally:
+        prefs_path.unlink(missing_ok=True)
+        if filled_path != fits_path:
+            filled_path.unlink(missing_ok=True)
 
     if not output_path.exists():
         raise DenoiseError(

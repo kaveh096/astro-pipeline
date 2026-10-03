@@ -489,3 +489,38 @@ def test_t73_profile_names_exist_in_the_spcc_database() -> None:
         ("blue filter", T73_PROFILE.blue_filter),
     ):
         assert value in names, f"T73 {label} {value!r} not found in the SPCC database"
+
+
+@pytest.mark.parametrize("bad", [0.0, -0.1, 1.01, 2.0])
+def test_run_graxpert_denoise_rejects_out_of_range_strength(tmp_path: Path, bad: float) -> None:
+    src = tmp_path / "input.fit"
+    fits.writeto(src, np.ones((8, 8), dtype=np.float32))
+    with pytest.raises(ValueError, match="strength"):
+        run_graxpert_denoise(src, output_stem="x", graxpert_exe=Path("unused.exe"), strength=bad)
+
+
+def test_run_graxpert_denoise_passes_strength_via_preferences_file(tmp_path: Path, monkeypatch) -> None:
+    import json
+    import subprocess as subprocess_module
+
+    src = tmp_path / "input.fit"
+    base = np.linspace(0.1, 0.9, 32 * 32, dtype=np.float32).reshape(32, 32)
+    fits.writeto(src, base)
+    seen: dict = {}
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = ""
+
+    def fake_run(cmd, **kwargs):
+        prefs = Path(cmd[cmd.index("-preferences_file") + 1])
+        seen["prefs"] = prefs
+        seen["strength"] = json.loads(prefs.read_text())["denoise_strength"]
+        fits.writeto(tmp_path / "out.fits", base * 0.99)
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(subprocess_module, "run", fake_run)
+    run_graxpert_denoise(src, output_stem="out", graxpert_exe=Path("unused.exe"), gpu=False, strength=0.8)
+
+    assert seen["strength"] == 0.8
+    assert not seen["prefs"].exists()

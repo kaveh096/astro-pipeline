@@ -208,7 +208,7 @@ hours and decimal degrees — look them up on Simbad or a planetarium app.
 Outputs land in `<project_dir>/_pipeline/final/` (TIFF + PNG preview);
 intermediate checkpoints are in `<project_dir>/_pipeline/checkpoints/`.
 See `skill/SKILL.md` for narrowband, narrowband-boost and post-processing
-(denoise/star-removal/black-point) entry points, which have the same
+(denoise/star-removal/black-point; denoise strength and darkening are tunable) entry points, which have the same
 preflight check and escape hatch.
 
 ## Project folder layout

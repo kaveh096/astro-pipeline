@@ -150,6 +150,7 @@ def test_main_uses_untagged_output_names_for_plain_lrgb_final(tmp_path: Path, mo
 
     def fake_denoise(denoise_input, output_stem, **kwargs):
         captured["output_stem"] = output_stem
+        captured["strength"] = kwargs["strength"]
         out = tmp_path / f"{output_stem}.fit"
         _write_fit(out)
         return out
@@ -165,9 +166,10 @@ def test_main_uses_untagged_output_names_for_plain_lrgb_final(tmp_path: Path, mo
     monkeypatch.setattr(run_post_process, "run_graxpert_denoise", fake_denoise)
     monkeypatch.setattr(run_post_process, "export_with_black_point", fake_export_with_black_point)
 
-    main([str(final_dir), "--target-name", "M51", "--black-point", "0.02"])
+    main([str(final_dir), "--target-name", "M51", "--black-point", "0.02",])
 
     assert captured["output_stem"] == "M51_denoised"  # no tag inserted
+    assert captured["strength"] == 1.0  # GraXpert always runs full strength; blending is post hoc
 
 
 def test_main_inserts_tag_for_haboost_input(tmp_path: Path, monkeypatch) -> None:
@@ -253,3 +255,97 @@ def test_main_starless_resume_cache_is_keyed_by_tag(tmp_path: Path, monkeypatch)
     # "M51_starless.fit" (if it existed) would be a DIFFERENT file.
     assert (final_dir / "_intermediate" / "M51_haboost_starless.fit").exists()
     assert not (final_dir / "_intermediate" / "M51_starless.fit").exists()
+
+
+# --- denoise blend + auto black point wiring ---------------------------------
+
+
+def _write_flat_fit(path: Path, level: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fits.PrimaryHDU(data=np.full((3, 16, 16), level, dtype=np.float32)).writeto(path, overwrite=True)
+
+
+def _run_main_capturing_black_point(tmp_path: Path, monkeypatch, extra_args: list[str]) -> dict:
+    final_dir = tmp_path / "final"
+    _write_flat_fit(final_dir / "lrgb_final.fit", 0.25)
+    monkeypatch.setattr(run_post_process.preflight, "check_prerequisites", lambda **kwargs: [])
+    calls = {"denoise": 0}
+
+    def fake_denoise(denoise_input, output_stem, **kwargs):
+        calls["denoise"] += 1
+        out = Path(denoise_input).parent / f"{output_stem}.fits"
+        _write_flat_fit(out, 0.25)
+        return out
+
+    def fake_export_with_black_point(fits_path, black_point, output_dir, stem):
+        calls["black_point"] = black_point
+
+        class _R:
+            tiff_path = Path(output_dir) / f"{stem}.tif"
+            clipped_low_fraction = 0.0
+            clipped_high_fraction = 0.0
+
+        return _R()
+
+    monkeypatch.setattr(run_post_process, "run_graxpert_denoise", fake_denoise)
+    monkeypatch.setattr(run_post_process, "export_with_black_point", fake_export_with_black_point)
+    assert main([str(final_dir), "--target-name", "M51", *extra_args]) == 0
+    return calls
+
+
+def test_main_auto_black_point_puts_sky_at_default_target(tmp_path: Path, monkeypatch) -> None:
+    calls = _run_main_capturing_black_point(tmp_path, monkeypatch, [])
+    assert calls["black_point"] == pytest.approx((0.25 - 0.10) / 0.90)
+
+
+def test_main_sky_target_and_explicit_black_point_override(tmp_path: Path, monkeypatch) -> None:
+    calls = _run_main_capturing_black_point(tmp_path, monkeypatch, ["--sky-target", "0.05"])
+    assert calls["black_point"] == pytest.approx((0.25 - 0.05) / 0.95)
+    calls = _run_main_capturing_black_point(tmp_path / "b", monkeypatch, ["--black-point", "0.3"])
+    assert calls["black_point"] == 0.3
+
+
+def test_main_second_run_reuses_cached_denoise(tmp_path: Path, monkeypatch) -> None:
+    final_dir = tmp_path / "final"
+    _run_main_capturing_black_point(tmp_path, monkeypatch, [])
+    calls = {"denoise": 0}
+
+    def counting_denoise(*a, **k):
+        calls["denoise"] += 1
+        raise AssertionError("should have reused the cached full-strength denoise")
+
+    monkeypatch.setattr(run_post_process, "run_graxpert_denoise", counting_denoise)
+    assert main([str(final_dir), "--target-name", "M51", "--denoise-strength", "0.5"]) == 0
+    assert calls["denoise"] == 0
+
+
+def test_main_ignores_cached_denoise_from_other_strength(tmp_path: Path, monkeypatch) -> None:
+    """An old pipeline's `<stem>.fits` (GraXpert CLI silently at 0.5) has no
+    matching sidecar, so it must be recomputed rather than trusted."""
+    final_dir = tmp_path / "final"
+    _write_flat_fit(final_dir / "lrgb_final.fit", 0.25)
+    _write_flat_fit(final_dir / "M51_denoised.fits", 0.25)
+    monkeypatch.setattr(run_post_process.preflight, "check_prerequisites", lambda **kwargs: [])
+    ran = []
+
+    def fake_denoise(denoise_input, output_stem, **kwargs):
+        ran.append(output_stem)
+        out = Path(denoise_input).parent / f"{output_stem}.fits"
+        _write_flat_fit(out, 0.25)
+        return out
+
+    monkeypatch.setattr(run_post_process, "run_graxpert_denoise", fake_denoise)
+    monkeypatch.setattr(
+        run_post_process, "export_with_black_point",
+        lambda fits_path, black_point, output_dir, stem: type(
+            "R", (), {"tiff_path": Path(output_dir) / f"{stem}.tif", "clipped_low_fraction": 0.0, "clipped_high_fraction": 0.0}
+        )(),
+    )
+    main([str(final_dir), "--target-name", "M51"])
+    assert ran == ["M51_denoised"]
+
+
+@pytest.mark.parametrize("flag,value", [("--denoise-strength", "1.5"), ("--denoise-core-strength", "-0.1"), ("--sky-target", "0")])
+def test_main_rejects_out_of_range_tuning_values(flag: str, value: str, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        main([str(tmp_path), "--target-name", "M51", flag, value])

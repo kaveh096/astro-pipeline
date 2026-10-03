@@ -24,21 +24,40 @@ Two real, distinct chains, chosen by `--nebula`:
       <target>_stars.tif             (faithful, standalone)
       <target>_starless_denoised_darkened.tif
 
-`--black-point` has no default baked into the underlying
-`export_with_black_point()` on purpose (a genuine aesthetic preference,
-not a pipeline default) -- this script requires it explicitly for the
-same reason, rather than picking one silently.
+Both aesthetic steps have defaults and are tunable (a noisy target may
+want more denoising, a faint-outskirts target less darkening):
+
+  - Denoise: GraXpert runs once at its maximum strength (the slow part,
+    cached next to the input and reused on re-runs); the result is then
+    blended into the original with a brightness-aware strength --
+    `--denoise-strength` on sky/faint structure (default 1.0),
+    `--denoise-core-strength` on the brightest structure (default 0.75).
+  - Darkening: `--black-point auto` (default) measures the sky level and
+    sets the black point so the sky lands at `--sky-target` (default
+    0.10, deliberately not darker so faint outer structure survives);
+    `--black-point <0..1)` overrides it with an explicit value.
+
+Re-running with different values reuses the cached GraXpert output, so
+readjusting takes seconds rather than hours.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from astro_pipeline.background_color import run_graxpert_denoise  # noqa: E402
+from astro_pipeline.denoise_blend import (  # noqa: E402
+    DEFAULT_BG_STRENGTH,
+    DEFAULT_CORE_STRENGTH,
+    DEFAULT_SKY_TARGET,
+    auto_black_point,
+    blend_denoised_fits,
+)
 from astro_pipeline.export_image import export, export_with_black_point  # noqa: E402
 from astro_pipeline.star_removal import run_star_removal  # noqa: E402
 from astro_pipeline import preflight  # noqa: E402
@@ -116,6 +135,50 @@ def _black_point(value: str) -> float:
     return parsed
 
 
+def _black_point_or_auto(value: str) -> float | None:
+    return None if value.strip().lower() == "auto" else _black_point(value)
+
+
+def _unit_interval(name: str):
+    def parse(value: str) -> float:
+        parsed = float(value)
+        if not (0.0 <= parsed <= 1.0):
+            raise argparse.ArgumentTypeError(f"{name} must be in [0, 1] -- got {parsed}")
+        return parsed
+
+    return parse
+
+
+def _sky_target(value: str) -> float:
+    parsed = float(value)
+    if not (0.0 < parsed < 1.0):
+        raise argparse.ArgumentTypeError(f"--sky-target must be in (0, 1) -- got {parsed}")
+    return parsed
+
+
+_GRAXPERT_STRENGTH = 1.0
+
+
+def _cached_denoise(denoise_input: Path, output_stem: str, **kwargs) -> Path:
+    """Run GraXpert at full strength, or reuse a previous full-strength
+    result for this exact input. The sidecar records the strength so an
+    output from an older pipeline version (GraXpert's CLI silently ran at
+    0.5) is never mistaken for a full-strength one."""
+    out = denoise_input.parent / f"{output_stem}.fits"
+    sidecar = denoise_input.parent / f"{output_stem}.denoise.json"
+    stamp = {"graxpert_strength": _GRAXPERT_STRENGTH, "input": denoise_input.name, "input_size": denoise_input.stat().st_size}
+    if out.exists() and sidecar.exists() and out.stat().st_mtime >= denoise_input.stat().st_mtime:
+        try:
+            if json.loads(sidecar.read_text(encoding="utf-8")) == stamp:
+                print(f"[skip] reusing full-strength denoise {out.name}")
+                return out
+        except (OSError, ValueError):
+            pass
+    result = run_graxpert_denoise(denoise_input, output_stem=output_stem, strength=_GRAXPERT_STRENGTH, **kwargs)
+    sidecar.write_text(json.dumps(stamp), encoding="utf-8")
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Optional post-processing on an already-finished final composite: star "
@@ -131,8 +194,26 @@ def main(argv: list[str] | None = None) -> int:
         "narrowband-boost run) and auto-detection can't pick one",
     )
     p.add_argument("--nebula", action="store_true", help="run star removal before denoising")
-    p.add_argument("--black-point", type=_black_point, required=True)
+    p.add_argument(
+        "--black-point", type=_black_point_or_auto, default=None, metavar="{auto,0..1)}",
+        help="export black point in [0, 1), or 'auto' (default): measure the sky and set the "
+        "black point so it lands at --sky-target",
+    )
+    p.add_argument(
+        "--sky-target", type=_sky_target, default=DEFAULT_SKY_TARGET,
+        help=f"sky level after darkening when --black-point is auto (default {DEFAULT_SKY_TARGET}; "
+        "lower = darker background, but faint outer structure starts to clip)",
+    )
     p.add_argument("--denoise-gpu", action="store_true", help="attempt GPU denoise (may crash/hang on older or integrated GPUs -- CPU is the safe default)")
+    p.add_argument(
+        "--denoise-strength", type=_unit_interval("--denoise-strength"), default=DEFAULT_BG_STRENGTH,
+        help=f"denoise strength on sky/faint structure, 0..1 (default {DEFAULT_BG_STRENGTH}; 0 = none)",
+    )
+    p.add_argument(
+        "--denoise-core-strength", type=_unit_interval("--denoise-core-strength"), default=DEFAULT_CORE_STRENGTH,
+        help=f"denoise strength on the brightest structure (galaxy core/bright arms), 0..1 "
+        f"(default {DEFAULT_CORE_STRENGTH}; lower keeps more detail where the source is bright)",
+    )
     p.add_argument("--graxpert-exe", default=None)
     p.add_argument("--starnet-exe", default=None)
     p.add_argument(
@@ -196,14 +277,30 @@ def main(argv: list[str] | None = None) -> int:
         denoise_input = composite
         output_stem = f"{name_stem}_denoised"
 
-    denoised = run_graxpert_denoise(
+    denoised = _cached_denoise(
         denoise_input, output_stem=output_stem,
         graxpert_exe=graxpert_exe, gpu=args.denoise_gpu, timeout=None,
     )
-    print(f"       denoised FITS: {denoised}")
+    print(f"       full-strength denoised FITS: {denoised}")
+
+    blend = blend_denoised_fits(
+        denoise_input, denoised, denoised.with_name(f"{output_stem}_blend.fits"),
+        bg_strength=args.denoise_strength, core_strength=args.denoise_core_strength,
+    )
+    print(
+        f"       blend: strength {args.denoise_strength} on sky/faint, {args.denoise_core_strength} on bright "
+        f"structure (mean {blend.mean_strength:.3f})"
+    )
+
+    if args.black_point is None:
+        black_point = auto_black_point(blend.sky_level, args.sky_target)
+        print(f"       sky level {blend.sky_level:.4f} -> auto black point {black_point:.4f} (sky lands at {args.sky_target})")
+    else:
+        black_point = args.black_point
+        print(f"       sky level {blend.sky_level:.4f}; explicit black point {black_point}")
 
     final_result = export_with_black_point(
-        denoised, black_point=args.black_point, output_dir=final_dir,
+        blend.path, black_point=black_point, output_dir=final_dir,
         stem=f"{output_stem}_darkened",
     )
     print(f"[done] {final_result.tiff_path}")
